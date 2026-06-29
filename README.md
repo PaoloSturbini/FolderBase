@@ -6,20 +6,19 @@ FolderBase trasforma cartelle e file reali del Mac in viste tabellari arricchite
 
 ## MVP
 
-- Sidebar con cartelle preferite e dischi
+- Sidebar con pulsante per scegliere una cartella
 - Vista tabellare dei file
 - Colonne standard: Name, Type, Created, Size
 - Colonne metadata: Nota, Stato
-- Salvataggio metadata locale in SQLite
-- Apertura file con app predefinita
-- QuickLook in fase successiva
+- Nota modificabile
+- Stato modificabile con valori Todo, Doing, Done
+- Colonne metadata aggiuntive: nota libera, select con valori custom, link a file/cartelle o URL
+- Salvataggio metadata locale in `~/Library/Application Support/FolderBase/metadata.json`
 
-## Stack previsto
+## Stack
 
 - Swift
 - SwiftUI
-- AppKit / NSTableView per la tabella avanzata
-- SQLite / GRDB
+- Swift Package
+- JSON per MVP
 - FileManager API
-- QuickLook
-- FSEvents
