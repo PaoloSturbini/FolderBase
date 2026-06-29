@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Compila FolderBase in RELEASE e crea un vero bundle .app con icona, installandolo
+# in /Applications. Da lanciare sul Mac:  ./make-app.sh
+#
+# Icona: salva l'immagine come "AppIcon.png" (idealmente 1024x1024) nella cartella
+# del progetto, accanto a questo script.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+APP_NAME="FolderBase"
+CONFIG="release"
+BUILD_PATH="/tmp/folderbase-run"
+ICON_PNG="AppIcon.png"
+INSTALL_DIR="/Applications"
+BUNDLE_ID="com.paolosturbini.folderbase"
+
+echo ">> Compilo in ${CONFIG}..."
+swift build -c "${CONFIG}" --build-path "${BUILD_PATH}"
+
+BIN="${BUILD_PATH}/${CONFIG}/${APP_NAME}"
+if [ ! -f "${BIN}" ]; then
+    echo "Errore: eseguibile non trovato in ${BIN}"
+    exit 1
+fi
+
+APP="${INSTALL_DIR}/${APP_NAME}.app"
+echo ">> Creo il bundle ${APP}..."
+rm -rf "${APP}"
+mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
+cp "${BIN}" "${APP}/Contents/MacOS/${APP_NAME}"
+
+cat > "${APP}/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>               <string>${APP_NAME}</string>
+    <key>CFBundleDisplayName</key>        <string>${APP_NAME}</string>
+    <key>CFBundleIdentifier</key>         <string>${BUNDLE_ID}</string>
+    <key>CFBundleExecutable</key>         <string>${APP_NAME}</string>
+    <key>CFBundlePackageType</key>        <string>APPL</string>
+    <key>CFBundleShortVersionString</key> <string>1.0</string>
+    <key>CFBundleVersion</key>            <string>1</string>
+    <key>CFBundleIconFile</key>           <string>AppIcon</string>
+    <key>LSMinimumSystemVersion</key>     <string>14.4</string>
+    <key>NSHighResolutionCapable</key>    <true/>
+    <key>NSPrincipalClass</key>           <string>NSApplication</string>
+</dict>
+</plist>
+PLIST
+
+if [ -f "${ICON_PNG}" ]; then
+    echo ">> Genero l'icona da ${ICON_PNG}..."
+    WORK="$(mktemp -d)"
+    ICONSET="${WORK}/AppIcon.iconset"
+    mkdir -p "${ICONSET}"
+    for size in 16 32 128 256 512; do
+        dbl=$(( size * 2 ))
+        sips -z "${size}" "${size}" "${ICON_PNG}" --out "${ICONSET}/icon_${size}x${size}.png" >/dev/null
+        sips -z "${dbl}" "${dbl}" "${ICON_PNG}" --out "${ICONSET}/icon_${size}x${size}@2x.png" >/dev/null
+    done
+    iconutil -c icns "${ICONSET}" -o "${APP}/Contents/Resources/AppIcon.icns"
+    rm -rf "${WORK}"
+else
+    echo "Attenzione: ${ICON_PNG} non trovato, l'app usera' l'icona generica."
+fi
+
+# Firma ad-hoc (non e' notarizzazione, ma evita alcuni avvisi all'avvio locale).
+codesign --force --deep --sign - "${APP}" >/dev/null 2>&1 || true
+
+# Forza il refresh dell'icona nel Finder/Dock.
+touch "${APP}"
+echo "OK: installata in ${APP}"

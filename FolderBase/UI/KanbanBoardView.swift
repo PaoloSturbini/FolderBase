@@ -1,0 +1,131 @@
+import SwiftUI
+
+/// Vista a board: raggruppa gli elementi nelle colonne definite da un campo Kanban.
+/// Trascinando una card da una colonna all'altra si aggiorna il valore del metadata.
+struct KanbanBoardView: View {
+    let items: [FileItem]
+    let field: MetadataField
+    @ObservedObject var metadataStore: MetadataStore
+    let fontSize: Double
+    let openItem: (FileItem) -> Void
+
+    private struct Column: Identifiable {
+        let id: String
+        let assignmentLabel: String   // valore scritto sul drop ("" = senza stato)
+        let color: MetadataTagColor
+        let items: [FileItem]
+        var isUnassigned: Bool { assignmentLabel.isEmpty }
+    }
+
+    /// Lo stato Kanban riguarda solo i file: le cartelle non compaiono nella board.
+    private var boardItems: [FileItem] {
+        items.filter { !$0.isFolder }
+    }
+
+    private var columns: [Column] {
+        let source = boardItems
+        var result: [Column] = [
+            Column(
+                id: "__unassigned__",
+                assignmentLabel: "",
+                color: .gray,
+                items: source.filter { metadataStore.value(for: $0, field: field).isEmpty }
+            )
+        ]
+
+        for option in field.options {
+            result.append(
+                Column(
+                    id: option.id,
+                    assignmentLabel: option.label,
+                    color: option.color,
+                    items: source.filter { metadataStore.value(for: $0, field: field) == option.label }
+                )
+            )
+        }
+
+        return result
+    }
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: true) {
+            HStack(alignment: .top, spacing: 12) {
+                ForEach(columns) { column in
+                    columnView(column)
+                }
+            }
+            .padding(12)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func columnView(_ column: Column) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                if column.isUnassigned {
+                    Text("Senza stato")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundStyle(.secondary)
+                } else {
+                    MetadataTagView(label: column.assignmentLabel, color: column.color)
+                }
+
+                Spacer()
+
+                Text("\(column.items.count)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 4)
+
+            ScrollView {
+                VStack(spacing: 8) {
+                    ForEach(column.items) { item in
+                        card(item)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(2)
+            }
+        }
+        .frame(width: 250)
+        .padding(8)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+        .dropDestination(for: String.self) { paths, _ in
+            applyDrop(paths: paths, toLabel: column.assignmentLabel)
+        }
+    }
+
+    private func card(_ item: FileItem) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: item.isFolder ? "folder.fill" : "doc.fill")
+                .foregroundStyle(item.isFolder ? .blue : .secondary)
+            Text(item.name)
+                .font(.system(size: fontSize))
+                .lineLimit(2)
+            Spacer(minLength: 0)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.secondary.opacity(0.15), lineWidth: 1)
+        }
+        .contentShape(Rectangle())
+        .draggable(item.url.path)
+        .onTapGesture(count: 2) {
+            openItem(item)
+        }
+        .help(item.name)
+    }
+
+    private func applyDrop(paths: [String], toLabel label: String) -> Bool {
+        // Solo i file possono ricevere uno stato Kanban: le cartelle vengono ignorate.
+        let targets = items.filter { paths.contains($0.url.path) && !$0.isFolder }
+        guard !targets.isEmpty else { return false }
+        metadataStore.updateBulk(items: targets, field: field, value: label)
+        return true
+    }
+}

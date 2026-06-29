@@ -6,9 +6,12 @@ final class FolderWatcher {
     private var source: DispatchSourceFileSystemObject?
     private var fileDescriptor: Int32 = -1
     private let onChange: () -> Void
+    private let debounce: TimeInterval
+    private var pendingNotification: DispatchWorkItem?
 
-    init(url: URL, onChange: @escaping () -> Void) {
+    init(url: URL, debounce: TimeInterval = 0.25, onChange: @escaping () -> Void) {
         self.onChange = onChange
+        self.debounce = debounce
         start(url: url)
     }
 
@@ -27,7 +30,7 @@ final class FolderWatcher {
         )
 
         source.setEventHandler { [weak self] in
-            self?.onChange()
+            self?.scheduleNotification()
         }
 
         source.setCancelHandler { [weak self] in
@@ -42,7 +45,19 @@ final class FolderWatcher {
         self.source = source
     }
 
+    /// Raggruppa raffiche di eventi (es. copia di molti file) in una sola notifica.
+    private func scheduleNotification() {
+        pendingNotification?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.onChange()
+        }
+        pendingNotification = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + debounce, execute: work)
+    }
+
     func stop() {
+        pendingNotification?.cancel()
+        pendingNotification = nil
         source?.cancel()
         source = nil
     }

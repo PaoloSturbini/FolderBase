@@ -14,7 +14,10 @@ let package = Package(
         .executableTarget(
             name: "FolderBase",
             path: "FolderBase",
-            exclude: ["Resources"]
+            exclude: ["Resources"],
+            linkerSettings: [
+                .linkedLibrary("sqlite3")
+            ]
         )
     ]
 )

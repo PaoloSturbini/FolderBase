@@ -1,7 +1,8 @@
 import Foundation
 
 struct FileItem: Identifiable, Hashable {
-    var id: String { url.path }
+    var id: String { identity }
+    var identity: String
     var url: URL
     var name: String
     var type: String
