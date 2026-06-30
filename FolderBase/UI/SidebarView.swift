@@ -658,7 +658,7 @@ struct SidebarView: View {
                         .fixedSize(horizontal: false, vertical: true)
 
                     KofiWidgetView()
-                        .frame(width: 240, height: 80)
+                        .frame(width: 240, height: 56)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(6)
@@ -669,16 +669,47 @@ struct SidebarView: View {
     }
 }
 
+/// Mostra il bottone ufficiale del widget Ko-fi e, al clic, apre la pagina Ko-fi nel
+/// browser di sistema invece di navigare dentro la web view (che non funzionava).
 private struct KofiWidgetView: NSViewRepresentable {
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.setValue(false, forKey: "drawsBackground")
+        webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
         webView.loadHTMLString(html, baseURL: URL(string: "https://storage.ko-fi.com"))
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {}
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+        private let fallback = URL(string: "https://ko-fi.com/pst")!
+
+        // Clic sul bottone del widget: apri nel browser e annulla la navigazione interna.
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            if navigationAction.navigationType == .linkActivated {
+                openExternally(navigationAction.request.url)
+                decisionHandler(.cancel)
+            } else {
+                decisionHandler(.allow)
+            }
+        }
+
+        // Il widget apre il link con target=_blank → gestiamo anche la richiesta di nuova finestra.
+        func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+            openExternally(navigationAction.request.url)
+            return nil
+        }
+
+        private func openExternally(_ url: URL?) {
+            let target = (url?.host?.contains("ko-fi.com") == true) ? url! : fallback
+            NSWorkspace.shared.open(target)
+        }
+    }
 
     private var html: String {
         """

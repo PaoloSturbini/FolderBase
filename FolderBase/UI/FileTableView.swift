@@ -38,8 +38,8 @@ struct FileTableView: View {
     @State private var boardFieldID: String?
     @State private var columnCustomization = TableColumnCustomization<FileItem>()
     @AppStorage("columnCustomization") private var columnCustomizationData = Data()
-    @State private var hiddenColumnIDs: Set<String> = []
-    @AppStorage("hiddenColumns") private var hiddenColumnsData = Data()
+    @State private var hiddenByFolder: [String: Set<String>] = [:]
+    @AppStorage("hiddenColumnsByFolder") private var hiddenColumnsData = Data()
 
     private enum ViewMode: String, CaseIterable, Identifiable {
         case table
@@ -303,7 +303,7 @@ struct FileTableView: View {
             if !hiddenColumnIDs.isEmpty {
                 Divider()
                 Button("Mostra tutte le colonne") {
-                    hiddenColumnIDs = []
+                    showAllColumns()
                 }
             }
         } label: {
@@ -336,13 +336,15 @@ struct FileTableView: View {
                     Button {
                         fieldPendingEdit = field
                     } label: {
-                        Label("Rinomina…", systemImage: "pencil")
+                        Label("Modifica…", systemImage: "pencil")
                     }
 
                     Button(role: .destructive) {
                         if let selectedFolderURL {
                             metadataStore.removeField(folderURL: selectedFolderURL, field: field)
-                            hiddenColumnIDs.remove(field.id)
+                            var set = hiddenByFolder[folderKey] ?? []
+                            set.remove(field.id)
+                            hiddenByFolder[folderKey] = set.isEmpty ? nil : set
                         }
                     } label: {
                         Label("Elimina colonna", systemImage: "trash")
@@ -521,6 +523,16 @@ struct FileTableView: View {
         allColumns.filter { $0.id == "name" || !hiddenColumnIDs.contains($0.id) }
     }
 
+    /// Chiave per memorizzare lo stato mostra/nascondi PER CARTELLA.
+    private var folderKey: String {
+        selectedFolderURL?.path ?? ""
+    }
+
+    /// Colonne nascoste nella cartella corrente (lo stato è indipendente per ogni cartella).
+    private var hiddenColumnIDs: Set<String> {
+        hiddenByFolder[folderKey] ?? []
+    }
+
     private var table: some View {
         let index = metadataIndex
         return Table(visibleItems, selection: $selection, sortOrder: $tableSortOrder, columnCustomization: $columnCustomization) {
@@ -550,7 +562,7 @@ struct FileTableView: View {
         .onChange(of: columnCustomization) {
             persistColumnCustomization()
         }
-        .onChange(of: hiddenColumnIDs) {
+        .onChange(of: hiddenByFolder) {
             persistHiddenColumns()
         }
     }
@@ -671,22 +683,28 @@ struct FileTableView: View {
 
     private func restoreHiddenColumns() {
         guard !hiddenColumnsData.isEmpty,
-              let decoded = try? JSONDecoder().decode(Set<String>.self, from: hiddenColumnsData) else { return }
-        hiddenColumnIDs = decoded
+              let decoded = try? JSONDecoder().decode([String: Set<String>].self, from: hiddenColumnsData) else { return }
+        hiddenByFolder = decoded
     }
 
     private func persistHiddenColumns() {
-        if let data = try? JSONEncoder().encode(hiddenColumnIDs) {
+        if let data = try? JSONEncoder().encode(hiddenByFolder) {
             hiddenColumnsData = data
         }
     }
 
     private func toggleColumnVisibility(_ id: String) {
-        if hiddenColumnIDs.contains(id) {
-            hiddenColumnIDs.remove(id)
+        var set = hiddenByFolder[folderKey] ?? []
+        if set.contains(id) {
+            set.remove(id)
         } else {
-            hiddenColumnIDs.insert(id)
+            set.insert(id)
         }
+        hiddenByFolder[folderKey] = set.isEmpty ? nil : set
+    }
+
+    private func showAllColumns() {
+        hiddenByFolder[folderKey] = nil
     }
 
     // MARK: - Cells
