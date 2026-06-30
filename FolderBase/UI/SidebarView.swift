@@ -12,11 +12,11 @@ enum AppearanceMode: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .system:
-            return "Automatico"
+            return L("appearance.system")
         case .light:
-            return "Chiaro"
+            return L("appearance.light")
         case .dark:
-            return "Scuro"
+            return L("appearance.dark")
         }
     }
 
@@ -48,6 +48,7 @@ struct SidebarView: View {
     let moveItems: ([String], URL) -> Void
     @ObservedObject var templateStore: TemplateStore
     @ObservedObject var metadataStore: MetadataStore
+    @ObservedObject private var loc = LocalizationManager.shared
 
     @State private var isShowingSettings = false
     @State private var isAddingTemplate = false
@@ -60,6 +61,7 @@ struct SidebarView: View {
     @State private var newItemKind: NewItemKind = .file
     @State private var settingsSection: SettingsSection = .folders
     @State private var creationMessage: String?
+    @State private var creationFailed = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -68,10 +70,10 @@ struct SidebarView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     VStack(alignment: .leading, spacing: 4) {
-                        sectionHeader("Cartelle")
+                        sectionHeader(L("sidebar.folders"))
 
                         if recentFolderURLs.isEmpty {
-                            Label("Nessuna cartella", systemImage: "folder")
+                            Label(L("common.noFolders"), systemImage: "folder")
                                 .foregroundStyle(.secondary)
                                 .padding(.horizontal, 4)
                         } else {
@@ -93,7 +95,7 @@ struct SidebarView: View {
                                     }
                                     .buttonStyle(.borderless)
                                     .foregroundStyle(.secondary)
-                                    .help("Togli cartella")
+                                    .help(L("sidebar.removeFolder"))
                                 }
                                 .padding(.horizontal, 4)
                             }
@@ -102,7 +104,7 @@ struct SidebarView: View {
 
                     if let treeRootURL {
                         VStack(alignment: .leading, spacing: 4) {
-                            sectionHeader("Struttura")
+                            sectionHeader(L("sidebar.structure"))
 
                             DirectoryTreeView(
                                 rootURL: treeRootURL,
@@ -126,7 +128,7 @@ struct SidebarView: View {
             Button {
                 isShowingSettings = true
             } label: {
-                Label("Configurazione", systemImage: "gearshape")
+                Label(L("sidebar.configuration"), systemImage: "gearshape")
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(.bordered)
@@ -159,7 +161,7 @@ struct SidebarView: View {
         .frame(width: 760, height: 540)
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(isPresented: $isAddingTemplate) {
-            TemplateEditorView(title: "Nuovo template") { template in
+            TemplateEditorView(title: L("templateEditor.new")) { template in
                 templateStore.add(template)
                 isAddingTemplate = false
             } cancel: {
@@ -167,7 +169,7 @@ struct SidebarView: View {
             }
         }
         .sheet(item: $templatePendingEdit) { template in
-            TemplateEditorView(title: "Modifica template", template: template) { updated in
+            TemplateEditorView(title: L("templateEditor.edit"), template: template) { updated in
                 templateStore.update(updated)
                 templatePendingEdit = nil
             } cancel: {
@@ -178,7 +180,7 @@ struct SidebarView: View {
 
     private var settingsSidebar: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("Configurazione")
+            Text(L("sidebar.configuration"))
                 .font(.headline)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 10)
@@ -237,7 +239,7 @@ struct SidebarView: View {
 
                 Spacer()
 
-                Button("Fine") {
+                Button(L("common.done")) {
                     isShowingSettings = false
                 }
                 .keyboardShortcut(.defaultAction)
@@ -255,6 +257,8 @@ struct SidebarView: View {
                         foldersSettings
                     case .appearance:
                         appearanceSettings
+                    case .language:
+                        languageSettings
                     case .templates:
                         templatesSettings
                     case .maintenance:
@@ -288,12 +292,12 @@ struct SidebarView: View {
                             .lineLimit(2)
                             .textSelection(.enabled)
                     } else {
-                        Label("Nessuna cartella selezionata", systemImage: "folder")
+                        Label(L("folders.none"), systemImage: "folder")
                             .foregroundStyle(.secondary)
                     }
 
                     Button(action: chooseFolder) {
-                        Label("Aggiungi cartella", systemImage: "folder.badge.plus")
+                        Label(L("folders.addFolder"), systemImage: "folder.badge.plus")
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
@@ -301,14 +305,14 @@ struct SidebarView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(6)
             } label: {
-                settingsCardLabel("Cartella corrente", systemImage: "folder")
+                settingsCardLabel(L("folders.currentCard"), systemImage: "folder")
             }
 
             GroupBox {
                 VStack(alignment: .leading, spacing: 14) {
-                    Picker("Tipo", selection: $newItemKind) {
+                    Picker(L("common.type"), selection: $newItemKind) {
                         ForEach(NewItemKind.allCases) { kind in
-                            Text(kind.rawValue).tag(kind)
+                            Text(kind.title).tag(kind)
                         }
                     }
                     .pickerStyle(.segmented)
@@ -316,12 +320,12 @@ struct SidebarView: View {
                     .frame(maxWidth: 300)
 
                     HStack(spacing: 10) {
-                        TextField("Nome", text: $newItemName)
+                        TextField(L("common.name"), text: $newItemName)
                             .textFieldStyle(.roundedBorder)
                             .frame(maxWidth: 280)
 
                         if newItemKind == .file {
-                            TextField("Estensione", text: $newFileExtension)
+                            TextField(L("folders.extension"), text: $newFileExtension)
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 110)
                         }
@@ -330,34 +334,36 @@ struct SidebarView: View {
                     HStack(spacing: 12) {
                         Button {
                             if let createdName = createItem(newItemName, newFileExtension, newItemKind == .directory) {
-                                creationMessage = "Creato: \(createdName)"
+                                creationFailed = false
+                                creationMessage = "\(L("folders.createdPrefix")) \(createdName)"
                                 newItemName = ""
                             } else {
-                                creationMessage = "Creazione non riuscita."
+                                creationFailed = true
+                                creationMessage = L("folders.createFailed")
                             }
                         } label: {
-                            Label(newItemKind == .directory ? "Crea cartella" : "Crea file", systemImage: newItemKind == .directory ? "folder.badge.plus" : "doc.badge.plus")
+                            Label(newItemKind == .directory ? L("folders.createFolder") : L("folders.createFile"), systemImage: newItemKind == .directory ? "folder.badge.plus" : "doc.badge.plus")
                         }
                         .buttonStyle(.bordered)
                         .disabled(selectedFolderURL == nil || newItemName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                         if let creationMessage {
-                            Label(creationMessage, systemImage: creationMessage.contains("non riuscita") ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                            Label(creationMessage, systemImage: creationFailed ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
                                 .font(.callout)
-                                .foregroundStyle(creationMessage.contains("non riuscita") ? .red : .green)
+                                .foregroundStyle(creationFailed ? .red : .green)
                         }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(6)
             } label: {
-                settingsCardLabel("Crea nella cartella corrente", systemImage: "plus.rectangle.on.folder")
+                settingsCardLabel(L("folders.createCard"), systemImage: "plus.rectangle.on.folder")
             }
 
             GroupBox {
                 VStack(alignment: .leading, spacing: 8) {
                     if recentFolderURLs.isEmpty {
-                        Label("Nessuna cartella", systemImage: "folder")
+                        Label(L("common.noFolders"), systemImage: "folder")
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
@@ -388,7 +394,7 @@ struct SidebarView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(6)
             } label: {
-                settingsCardLabel("Cartelle recenti", systemImage: "clock")
+                settingsCardLabel(L("folders.recentCard"), systemImage: "clock")
             }
         }
     }
@@ -397,7 +403,7 @@ struct SidebarView: View {
         VStack(alignment: .leading, spacing: 18) {
             GroupBox {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Riallinea i metadata al filesystem se hai spostato, rinominato o cancellato file da un'altra parte del Mac.")
+                    Text(L("maint.intro"))
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -406,9 +412,9 @@ struct SidebarView: View {
                         Button {
                             let result = metadataStore.reconcileManagedFiles()
                             maintenanceOrphans = result.missing
-                            maintenanceMessage = "Aggiornati \(result.relocated) · orfani \(result.missing)"
+                            maintenanceMessage = "\(L("maint.updated")) \(result.relocated) · \(L("maint.orphans")) \(result.missing)"
                         } label: {
-                            Label("Verifica e ripara", systemImage: "arrow.triangle.2.circlepath")
+                            Label(L("maint.repair"), systemImage: "arrow.triangle.2.circlepath")
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.large)
@@ -417,9 +423,9 @@ struct SidebarView: View {
                             Button(role: .destructive) {
                                 let removed = metadataStore.purgeOrphans()
                                 maintenanceOrphans = 0
-                                maintenanceMessage = "Rimossi \(removed) metadata orfani"
+                                maintenanceMessage = "\(L("maint.removedPrefix")) \(removed) \(L("maint.orphanMetadataSuffix"))"
                             } label: {
-                                Label("Rimuovi \(maintenanceOrphans) orfani", systemImage: "trash")
+                                Label("\(L("maint.removePrefix")) \(maintenanceOrphans) \(L("maint.orphans"))", systemImage: "trash")
                             }
                             .buttonStyle(.bordered)
                         }
@@ -434,15 +440,15 @@ struct SidebarView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(6)
             } label: {
-                settingsCardLabel("Riallineamento metadata", systemImage: "arrow.triangle.2.circlepath")
+                settingsCardLabel(L("maint.repairCard"), systemImage: "arrow.triangle.2.circlepath")
             }
 
             GroupBox {
                 VStack(alignment: .leading, spacing: 8) {
-                    Toggle("Rimuovi automaticamente i metadata orfani all'avvio", isOn: $autoPurgeOrphans)
+                    Toggle(L("maint.autoToggle"), isOn: $autoPurgeOrphans)
                         .toggleStyle(.checkbox)
 
-                    Text("Un metadata è “orfano” quando il file a cui era associato non è più raggiungibile (cancellato o spostato su un volume non disponibile).")
+                    Text(L("maint.autoNote"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -450,7 +456,7 @@ struct SidebarView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(6)
             } label: {
-                settingsCardLabel("Pulizia automatica", systemImage: "trash")
+                settingsCardLabel(L("maint.autoCard"), systemImage: "trash")
             }
         }
     }
@@ -465,7 +471,7 @@ struct SidebarView: View {
         VStack(alignment: .leading, spacing: 18) {
             GroupBox {
                 VStack(alignment: .leading, spacing: 8) {
-                    Picker("Tema", selection: $appearanceMode) {
+                    Picker(L("appearance.themeCard"), selection: $appearanceMode) {
                         ForEach(AppearanceMode.allCases) { mode in
                             Text(mode.title).tag(mode.rawValue)
                         }
@@ -474,21 +480,21 @@ struct SidebarView: View {
                     .labelsHidden()
                     .frame(maxWidth: 340)
 
-                    Text("Segui il sistema oppure forza chiaro/scuro.")
+                    Text(L("appearance.themeNote"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(6)
             } label: {
-                settingsCardLabel("Tema", systemImage: "circle.lefthalf.filled")
+                settingsCardLabel(L("appearance.themeCard"), systemImage: "circle.lefthalf.filled")
             }
 
             GroupBox {
                 VStack(alignment: .leading, spacing: 16) {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
-                            Text("Sidebar")
+                            Text(L("appearance.sidebar"))
                             Spacer()
                             Text("\(Int(sidebarFontSize)) pt")
                                 .foregroundStyle(.secondary)
@@ -499,7 +505,7 @@ struct SidebarView: View {
 
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
-                            Text("Tabella")
+                            Text(L("appearance.table"))
                             Spacer()
                             Text("\(Int(contentFontSize)) pt")
                                 .foregroundStyle(.secondary)
@@ -512,14 +518,43 @@ struct SidebarView: View {
                         sidebarFontSize = 13
                         contentFontSize = 13
                     } label: {
-                        Label("Ripristina default", systemImage: "arrow.uturn.backward")
+                        Label(L("appearance.resetDefault"), systemImage: "arrow.uturn.backward")
                     }
                     .buttonStyle(.bordered)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(6)
             } label: {
-                settingsCardLabel("Dimensione caratteri", systemImage: "textformat.size")
+                settingsCardLabel(L("appearance.fontCard"), systemImage: "textformat.size")
+            }
+        }
+    }
+
+    private var languageSettings: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            GroupBox {
+                VStack(alignment: .leading, spacing: 12) {
+                    Picker(L("language.label"), selection: Binding(
+                        get: { loc.language },
+                        set: { loc.language = $0 }
+                    )) {
+                        ForEach(AppLanguage.allCases) { language in
+                            Text(language.displayName).tag(language)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(maxWidth: 340)
+
+                    Text(L("language.note"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+            } label: {
+                settingsCardLabel(L("language.card"), systemImage: "globe")
             }
         }
     }
@@ -530,13 +565,13 @@ struct SidebarView: View {
         let build = info?["CFBundleVersion"] as? String
         switch (short, build) {
         case let (short?, build?) where short != build:
-            return "Versione \(short) (\(build))"
+            return "\(L("about.versionPrefix")) \(short) (\(build))"
         case let (short?, _):
-            return "Versione \(short)"
+            return "\(L("about.versionPrefix")) \(short)"
         case let (_, build?):
-            return "Versione \(build)"
+            return "\(L("about.versionPrefix")) \(build)"
         default:
-            return "Versione di sviluppo"
+            return L("about.devVersion")
         }
     }
 
@@ -545,7 +580,7 @@ struct SidebarView: View {
             GroupBox {
                 VStack(alignment: .leading, spacing: 8) {
                     if templateStore.templates.isEmpty {
-                        Text("Nessun template. Un template definisce un insieme di colonne (nome e tipo) da applicare con un clic a una cartella nuova.")
+                        Text(L("templates.emptyNote"))
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -575,7 +610,7 @@ struct SidebarView: View {
                                     Image(systemName: "pencil")
                                 }
                                 .buttonStyle(.borderless)
-                                .help("Modifica template")
+                                .help(L("templates.editTemplate"))
 
                                 Button {
                                     templateStore.delete(id: template.id)
@@ -584,7 +619,7 @@ struct SidebarView: View {
                                 }
                                 .buttonStyle(.borderless)
                                 .foregroundStyle(.secondary)
-                                .help("Elimina template")
+                                .help(L("templates.deleteTemplate"))
                             }
                             .padding(.vertical, 2)
 
@@ -599,7 +634,7 @@ struct SidebarView: View {
                     Button {
                         isAddingTemplate = true
                     } label: {
-                        Label("Nuovo template", systemImage: "plus")
+                        Label(L("templates.newTemplate"), systemImage: "plus")
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
@@ -607,10 +642,10 @@ struct SidebarView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(6)
             } label: {
-                settingsCardLabel("Template", systemImage: "rectangle.stack")
+                settingsCardLabel(L("templates.card"), systemImage: "rectangle.stack")
             }
 
-            Text("Quando apri una cartella senza colonne FolderBase, usa il pulsante con l'icona dei template in alto a sinistra per generarle automaticamente da un template.")
+            Text(L("templates.footerNote"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -618,7 +653,7 @@ struct SidebarView: View {
     }
 
     private func columnsSummary(_ template: MetadataTemplate) -> String {
-        guard !template.fields.isEmpty else { return "Nessuna colonna" }
+        guard !template.fields.isEmpty else { return L("templates.noColumns") }
         return template.fields.map(\.name).joined(separator: ", ")
     }
 
@@ -637,7 +672,7 @@ struct SidebarView: View {
                         Text(appVersionString)
                             .font(.callout)
                             .foregroundStyle(.secondary)
-                        Text("File manager metadata-first per macOS.")
+                        Text(L("about.tagline"))
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -648,12 +683,12 @@ struct SidebarView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(6)
             } label: {
-                settingsCardLabel("Informazioni", systemImage: "info.circle")
+                settingsCardLabel(L("about.info"), systemImage: "info.circle")
             }
 
             GroupBox {
                 VStack(alignment: .leading, spacing: 14) {
-                    Text("Se FolderBase ti è utile, puoi offrirmi un caffè su Ko-fi. Grazie!")
+                    Text(L("about.supportText"))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
 
@@ -663,7 +698,7 @@ struct SidebarView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(6)
             } label: {
-                settingsCardLabel("Sostieni lo sviluppo", systemImage: "cup.and.saucer")
+                settingsCardLabel(L("about.supportCard"), systemImage: "cup.and.saucer")
             }
         }
     }
@@ -740,6 +775,7 @@ private struct KofiWidgetView: NSViewRepresentable {
 private enum SettingsSection: String, CaseIterable, Identifiable {
     case folders
     case appearance
+    case language
     case templates
     case maintenance
     case support
@@ -749,15 +785,17 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .folders:
-            return "Cartelle"
+            return L("settings.folders.title")
         case .appearance:
-            return "Aspetto"
+            return L("settings.appearance.title")
+        case .language:
+            return L("settings.language.title")
         case .templates:
-            return "Template"
+            return L("settings.templates.title")
         case .maintenance:
-            return "Manutenzione"
+            return L("settings.maintenance.title")
         case .support:
-            return "Info su FolderBase"
+            return L("settings.support.title")
         }
     }
 
@@ -767,6 +805,8 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             return "folder"
         case .appearance:
             return "paintbrush"
+        case .language:
+            return "globe"
         case .templates:
             return "rectangle.stack"
         case .maintenance:
@@ -779,22 +819,33 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .folders:
-            return "Cartelle monitorate, creazione elementi e recenti"
+            return L("settings.folders.subtitle")
         case .appearance:
-            return "Tema e dimensione dei caratteri"
+            return L("settings.appearance.subtitle")
+        case .language:
+            return L("settings.language.subtitle")
         case .templates:
-            return "Insiemi di colonne riutilizzabili"
+            return L("settings.templates.subtitle")
         case .maintenance:
-            return "Sincronizzazione e pulizia dei metadata"
+            return L("settings.maintenance.subtitle")
         case .support:
-            return "Versione, informazioni e supporto"
+            return L("settings.support.subtitle")
         }
     }
 }
 
 private enum NewItemKind: String, CaseIterable, Identifiable {
-    case file = "File vuoto"
-    case directory = "Cartella"
+    case file
+    case directory
 
     var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .file:
+            return L("newItem.file")
+        case .directory:
+            return L("newItem.directory")
+        }
+    }
 }

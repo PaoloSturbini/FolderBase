@@ -25,7 +25,7 @@ final class FileBrowserService {
                     identity: identity,
                     url: fileURL,
                     name: fileURL.lastPathComponent,
-                    type: isFolder ? "Folder" : values.contentType?.localizedDescription ?? fileURL.pathExtension.uppercased(),
+                    type: isFolder ? L("file.folderType") : values.contentType?.localizedDescription ?? fileURL.pathExtension.uppercased(),
                     created: values.creationDate ?? .distantPast,
                     size: isFolder ? nil : Int64(values.fileSize ?? 0),
                     isFolder: isFolder

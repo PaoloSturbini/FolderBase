@@ -7,6 +7,7 @@ struct MetadataFieldEditorView: View {
     var save: (String, MetadataFieldKind, [MetadataSelectOption]) -> Void
     var cancel: () -> Void
 
+    @ObservedObject private var loc = LocalizationManager.shared
     @State private var name = ""
     @State private var kind: MetadataFieldKind = .text
     @State private var newOptionLabel = ""
@@ -23,7 +24,8 @@ struct MetadataFieldEditorView: View {
     }
 
     private var isCreating: Bool {
-        title.localizedCaseInsensitiveContains("nuov")
+        // Vale per entrambe le lingue ("Nuov…" / "New…").
+        title.localizedCaseInsensitiveContains("nuov") || title.localizedCaseInsensitiveContains("new")
     }
 
     var body: some View {
@@ -31,34 +33,34 @@ struct MetadataFieldEditorView: View {
             Text(title)
                 .font(.headline)
 
-            TextField("Nome colonna", text: $name)
+            TextField(L("field.nameColumn"), text: $name)
 
-            Picker("Tipo", selection: $kind) {
+            Picker(L("common.type"), selection: $kind) {
                 ForEach(MetadataFieldKind.allCases) { kind in
-                    Text(kind.rawValue).tag(kind)
+                    Text(kind.displayName).tag(kind)
                 }
             }
 
             if kind.usesOptions {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Valori")
+                    Text(L("field.values"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
                     GroupBox {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Nuovo stato")
+                            Text(L("field.newState"))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
 
                             HStack(spacing: 8) {
-                                TextField("Nome stato", text: $newOptionLabel)
+                                TextField(L("field.stateName"), text: $newOptionLabel)
                                     .frame(minWidth: 260)
                                     .onSubmit {
                                         addOption()
                                     }
 
-                                Picker("Colore", selection: $newOptionColor) {
+                                Picker(L("common.color"), selection: $newOptionColor) {
                                     ForEach(MetadataTagColor.allCases) { color in
                                         ColorSwatchLabel(color: color)
                                             .tag(color)
@@ -72,7 +74,7 @@ struct MetadataFieldEditorView: View {
                     }
 
                     if options.isEmpty {
-                        Text("Nessuno stato definito")
+                        Text(L("field.noState"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .padding(.vertical, 6)
@@ -80,13 +82,13 @@ struct MetadataFieldEditorView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             ForEach(options) { option in
                                 HStack(spacing: 8) {
-                                    TextField("Valore", text: optionLabelBinding(option))
+                                    TextField(L("common.value"), text: optionLabelBinding(option))
                                         .frame(minWidth: 260)
                                         .onSubmit {
                                             normalizeOptions()
                                         }
 
-                                    Picker("Colore", selection: optionColorBinding(option)) {
+                                    Picker(L("common.color"), selection: optionColorBinding(option)) {
                                         ForEach(MetadataTagColor.allCases) { color in
                                             ColorSwatchLabel(color: color)
                                                 .tag(color)
@@ -113,9 +115,9 @@ struct MetadataFieldEditorView: View {
             HStack {
                 Spacer()
 
-                Button("Annulla", action: cancel)
+                Button(L("common.cancel"), action: cancel)
 
-                Button(isCreating ? "Aggiungi" : "Salva") {
+                Button(isCreating ? L("common.add") : L("common.save")) {
                     let normalizedOptions = selectableOptions
                     options = normalizedOptions
                     save(name, kind, normalizedOptions)

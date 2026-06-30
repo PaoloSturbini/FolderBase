@@ -7,6 +7,7 @@ struct TemplateEditorView: View {
     var save: (MetadataTemplate) -> Void
     var cancel: () -> Void
 
+    @ObservedObject private var loc = LocalizationManager.shared
     @State private var templateID: String
     @State private var name: String
     @State private var fields: [FieldTemplate]
@@ -27,13 +28,13 @@ struct TemplateEditorView: View {
             Text(title)
                 .font(.headline)
 
-            TextField("Nome template", text: $name)
+            TextField(L("templateEditor.nameTemplate"), text: $name)
                 .textFieldStyle(.roundedBorder)
 
             GroupBox {
                 VStack(alignment: .leading, spacing: 8) {
                     if fields.isEmpty {
-                        Text("Nessun campo. Aggiungi le colonne che questo template deve generare.")
+                        Text(L("templateEditor.noFields"))
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -47,7 +48,7 @@ struct TemplateEditorView: View {
 
                                 VStack(alignment: .leading, spacing: 1) {
                                     Text(field.name)
-                                    Text(field.kind.rawValue + optionsSummary(field))
+                                    Text(field.kind.displayName + optionsSummary(field))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
@@ -60,7 +61,7 @@ struct TemplateEditorView: View {
                                     Image(systemName: "pencil")
                                 }
                                 .buttonStyle(.borderless)
-                                .help("Modifica campo")
+                                .help(L("templateEditor.editField"))
 
                                 Button {
                                     fields.removeAll { $0.id == field.id }
@@ -69,7 +70,7 @@ struct TemplateEditorView: View {
                                 }
                                 .buttonStyle(.borderless)
                                 .foregroundStyle(.secondary)
-                                .help("Rimuovi campo")
+                                .help(L("templateEditor.removeField"))
                             }
                             .padding(.vertical, 2)
 
@@ -84,21 +85,21 @@ struct TemplateEditorView: View {
                     Button {
                         isAddingField = true
                     } label: {
-                        Label("Aggiungi campo", systemImage: "plus")
+                        Label(L("templateEditor.addField"), systemImage: "plus")
                     }
                     .buttonStyle(.bordered)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(6)
             } label: {
-                Label("Campi", systemImage: "list.bullet.rectangle")
+                Label(L("templateEditor.fields"), systemImage: "list.bullet.rectangle")
                     .font(.headline)
             }
 
             HStack {
                 Spacer()
-                Button("Annulla", action: cancel)
-                Button(title.localizedCaseInsensitiveContains("nuov") ? "Crea" : "Salva") {
+                Button(L("common.cancel"), action: cancel)
+                Button((title.localizedCaseInsensitiveContains("nuov") || title.localizedCaseInsensitiveContains("new")) ? L("common.create") : L("common.save")) {
                     save(MetadataTemplate(id: templateID, name: name.trimmingCharacters(in: .whitespacesAndNewlines), fields: fields))
                 }
                 .keyboardShortcut(.defaultAction)
@@ -108,7 +109,7 @@ struct TemplateEditorView: View {
         .padding(20)
         .frame(width: 520)
         .sheet(isPresented: $isAddingField) {
-            MetadataFieldEditorView(title: "Nuovo campo") { fieldName, kind, options in
+            MetadataFieldEditorView(title: L("templateEditor.newField")) { fieldName, kind, options in
                 fields.append(FieldTemplate(name: fieldName, kind: kind, options: options))
                 isAddingField = false
             } cancel: {
@@ -117,7 +118,7 @@ struct TemplateEditorView: View {
         }
         .sheet(item: $fieldPendingEdit) { field in
             MetadataFieldEditorView(
-                title: "Modifica campo",
+                title: L("templateEditor.editField"),
                 field: MetadataField(id: field.id, name: field.name, kind: field.kind, options: field.options)
             ) { fieldName, kind, options in
                 if let index = fields.firstIndex(where: { $0.id == field.id }) {

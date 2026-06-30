@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct MainWindowView: View {
+    @ObservedObject private var loc = LocalizationManager.shared
     @StateObject private var metadataStore = MetadataStore()
     @StateObject private var recentFoldersStore = RecentFoldersStore()
     @StateObject private var templateStore = TemplateStore()
@@ -121,7 +122,7 @@ struct MainWindowView: View {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
-        panel.prompt = "Scegli"
+        panel.prompt = L("panel.choose")
 
         guard panel.runModal() == .OK, let url = panel.url else {
             return
@@ -288,7 +289,7 @@ struct MainWindowView: View {
             fileExtension: trimmedExtension,
             isDirectory: isDirectory
         ) else {
-            errorMessage = "Nome non valido o elemento già esistente."
+            errorMessage = L("error.invalidName")
             return nil
         }
 
@@ -298,7 +299,7 @@ struct MainWindowView: View {
             } else {
                 let didCreate = FileManager.default.createFile(atPath: itemURL.path, contents: Data())
                 if !didCreate {
-                    errorMessage = "Impossibile creare il file."
+                    errorMessage = L("error.cannotCreateFile")
                     return nil
                 }
             }
@@ -337,7 +338,7 @@ struct MainWindowView: View {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
-        panel.prompt = "Sposta"
+        panel.prompt = L("panel.move")
 
         guard panel.runModal() == .OK,
               let destinationFolderURL = panel.url else { return }

@@ -9,6 +9,7 @@ struct KanbanBoardView: View {
     @ObservedObject var metadataStore: MetadataStore
     let fontSize: Double
     let openItem: (FileItem) -> Void
+    @ObservedObject private var loc = LocalizationManager.shared
 
     private struct Column: Identifiable {
         let id: String
@@ -64,7 +65,7 @@ struct KanbanBoardView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 if column.isUnassigned {
-                    Text("Senza stato")
+                    Text(L("kanban.unassigned"))
                         .font(.caption)
                         .fontWeight(.medium)
                         .foregroundStyle(.secondary)

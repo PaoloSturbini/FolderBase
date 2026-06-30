@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct FileTableView: View {
     @Binding var items: [FileItem]
     @ObservedObject var metadataStore: MetadataStore
+    @ObservedObject private var loc = LocalizationManager.shared
 
     let selectedFolderURL: URL?
     let errorMessage: String?
@@ -68,7 +69,7 @@ struct FileTableView: View {
             }
         }
         .sheet(isPresented: $isAddingField) {
-            MetadataFieldEditorView(title: "Nuova colonna") { name, kind, options in
+            MetadataFieldEditorView(title: L("field.new")) { name, kind, options in
                 if let selectedFolderURL {
                     metadataStore.addField(folderURL: selectedFolderURL, name: name, kind: kind, options: options)
                 }
@@ -78,7 +79,7 @@ struct FileTableView: View {
             }
         }
         .sheet(item: $fieldPendingEdit) { field in
-            MetadataFieldEditorView(title: "Modifica colonna", field: field) { name, kind, options in
+            MetadataFieldEditorView(title: L("field.edit"), field: field) { name, kind, options in
                 if let selectedFolderURL {
                     metadataStore.updateField(folderURL: selectedFolderURL, field: field, name: name, kind: kind, options: options)
                 }
@@ -116,11 +117,11 @@ struct FileTableView: View {
                 .font(.system(size: 44))
                 .foregroundStyle(.secondary)
 
-            Text("Scegli una cartella")
+            Text(L("table.chooseFolder"))
                 .font(.title2)
                 .fontWeight(.semibold)
 
-            Text("Apri Configurazione nella sidebar e aggiungi una cartella.")
+            Text(L("table.chooseFolderHint"))
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -142,9 +143,9 @@ struct FileTableView: View {
                 )
             } else {
                 ContentUnavailableView(
-                    "Nessuna colonna Kanban",
+                    L("table.noKanban"),
                     systemImage: "rectangle.split.3x1",
-                    description: Text("Aggiungi una colonna di tipo Kanban per usare la vista a board.")
+                    description: Text(L("table.noKanbanHint"))
                 )
             }
         }
@@ -156,18 +157,18 @@ struct FileTableView: View {
                 Image(systemName: "chevron.left")
             }
             .disabled(!canGoBack)
-            .help("Indietro")
+            .help(L("nav.back"))
 
             Button(action: goForward) {
                 Image(systemName: "chevron.right")
             }
             .disabled(!canGoForward)
-            .help("Avanti")
+            .help(L("nav.forward"))
 
             Button(action: goUp) {
                 Image(systemName: "arrow.up")
             }
-            .help("Cartella superiore")
+            .help(L("nav.up"))
 
             if metadataFields.isEmpty {
                 templateMenu
@@ -208,7 +209,7 @@ struct FileTableView: View {
         HStack(spacing: 4) {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
-            TextField("Cerca", text: $searchText)
+            TextField(L("table.search"), text: $searchText)
                 .textFieldStyle(.plain)
                 .frame(width: 160)
             if !searchText.isEmpty {
@@ -230,38 +231,38 @@ struct FileTableView: View {
     private var toolbarButtons: some View {
         HStack(spacing: 8) {
             if !selection.isEmpty {
-                Text("\(selection.count) selez.")
+                Text("\(selection.count) \(L("toolbar.selectedSuffix"))")
                     .font(.callout)
                     .foregroundStyle(.secondary)
 
                 Button {
                     isBulkEditing = true
                 } label: {
-                    Label("Modifica", systemImage: "square.and.pencil")
+                    Label(L("toolbar.edit"), systemImage: "square.and.pencil")
                 }
                 .disabled(metadataFields.isEmpty)
-                .help("Imposta un valore metadata sugli elementi selezionati")
+                .help(L("toolbar.editHelp"))
 
                 Button(role: .destructive) {
                     trashItems(selectedItems)
                     selection = []
                 } label: {
-                    Label("Cestina", systemImage: "trash")
+                    Label(L("toolbar.trash"), systemImage: "trash")
                 }
-                .help("Sposta nel Cestino gli elementi selezionati")
+                .help(L("toolbar.trashHelp"))
 
                 Divider().frame(height: 20)
             }
 
             if hasKanbanField {
-                Picker("Vista", selection: $viewMode) {
+                Picker(L("toolbar.view"), selection: $viewMode) {
                     Image(systemName: "tablecells").tag(ViewMode.table)
                     Image(systemName: "rectangle.split.3x1").tag(ViewMode.board)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .frame(width: 90)
-                .help("Tabella o board Kanban")
+                .help(L("toolbar.viewHelp"))
             }
 
             columnsMenu
@@ -269,25 +270,25 @@ struct FileTableView: View {
             Button {
                 tableSortOrder = []
             } label: {
-                Label("Ordine predefinito", systemImage: "arrow.uturn.backward")
+                Label(L("toolbar.defaultOrder"), systemImage: "arrow.uturn.backward")
             }
             .labelStyle(.iconOnly)
             .disabled(tableSortOrder.isEmpty)
-            .help("Ripristina ordine predefinito")
+            .help(L("toolbar.defaultOrderHelp"))
 
             Button {
                 isAddingField = true
             } label: {
-                Label("Colonna", systemImage: "plus")
+                Label(L("toolbar.column"), systemImage: "plus")
             }
-            .help("Aggiungi colonna metadata")
+            .help(L("toolbar.addColumnHelp"))
 
             Button(action: exportCSV) {
-                Label("Esporta CSV", systemImage: "square.and.arrow.up")
+                Label(L("toolbar.exportCSV"), systemImage: "square.and.arrow.up")
             }
             .labelStyle(.iconOnly)
             .disabled(items.isEmpty)
-            .help("Esporta la tabella in CSV")
+            .help(L("toolbar.exportCSVHelp"))
         }
     }
 
@@ -302,15 +303,15 @@ struct FileTableView: View {
 
             if !hiddenColumnIDs.isEmpty {
                 Divider()
-                Button("Mostra tutte le colonne") {
+                Button(L("toolbar.showAllColumns")) {
                     showAllColumns()
                 }
             }
         } label: {
-            Label("Colonne", systemImage: "tablecells")
+            Label(L("toolbar.columns"), systemImage: "tablecells")
         }
         .labelStyle(.iconOnly)
-        .help("Mostra, nascondi o gestisci le colonne")
+        .help(L("toolbar.columnsHelp"))
     }
 
     @ViewBuilder
@@ -318,7 +319,7 @@ struct FileTableView: View {
         if column.id == "name" {
             Button {
             } label: {
-                Label("Nome (sempre visibile)", systemImage: "checkmark")
+                Label(L("column.nameAlwaysVisible"), systemImage: "checkmark")
             }
             .disabled(true)
         } else {
@@ -327,7 +328,7 @@ struct FileTableView: View {
                 Button {
                     toggleColumnVisibility(column.id)
                 } label: {
-                    Label(isHidden ? "Mostra colonna" : "Nascondi colonna", systemImage: isHidden ? "eye" : "eye.slash")
+                    Label(isHidden ? L("column.show") : L("column.hide"), systemImage: isHidden ? "eye" : "eye.slash")
                 }
 
                 if case .metadata(let field) = column.kind {
@@ -336,7 +337,7 @@ struct FileTableView: View {
                     Button {
                         fieldPendingEdit = field
                     } label: {
-                        Label("Modifica…", systemImage: "pencil")
+                        Label(L("column.edit"), systemImage: "pencil")
                     }
 
                     Button(role: .destructive) {
@@ -347,7 +348,7 @@ struct FileTableView: View {
                             hiddenByFolder[folderKey] = set.isEmpty ? nil : set
                         }
                     } label: {
-                        Label("Elimina colonna", systemImage: "trash")
+                        Label(L("column.delete"), systemImage: "trash")
                     }
                 }
             }
@@ -407,23 +408,23 @@ struct FileTableView: View {
     private var templateMenu: some View {
         Menu {
             if templates.isEmpty {
-                Text("Nessun template — creane uno in Configurazione")
+                Text(L("templateMenu.empty"))
             } else {
-                Section("Applica template") {
+                Section(L("templateMenu.apply")) {
                     ForEach(templates) { template in
                         Button {
                             applyTemplate(template)
                         } label: {
-                            Label("\(template.name) (\(template.fields.count) colonne)", systemImage: "rectangle.stack")
+                            Label("\(template.name) (\(template.fields.count) \(L("templateMenu.columnsWord")))", systemImage: "rectangle.stack")
                         }
                     }
                 }
             }
         } label: {
-            Label("Applica template", systemImage: "rectangle.stack.badge.plus")
+            Label(L("templateMenu.apply"), systemImage: "rectangle.stack.badge.plus")
         }
         .labelStyle(.iconOnly)
-        .help("Genera le colonne di questa cartella da un template")
+        .help(L("templateMenu.help"))
     }
 
     // MARK: - Data shaping
@@ -492,10 +493,10 @@ struct FileTableView: View {
     /// Tutte le colonne (standard + metadata), comprese quelle nascoste.
     private var allColumns: [ColumnDescriptor] {
         var result: [ColumnDescriptor] = [
-            ColumnDescriptor(id: "name", title: "Nome", kind: .name, minWidth: 160, idealWidth: 320),
-            ColumnDescriptor(id: "size", title: "Dimensioni", kind: .size, minWidth: 80, idealWidth: 110),
-            ColumnDescriptor(id: "type", title: "Tipo", kind: .type, minWidth: 90, idealWidth: 170),
-            ColumnDescriptor(id: "created", title: "Creato", kind: .created, minWidth: 120, idealWidth: 160)
+            ColumnDescriptor(id: "name", title: L("col.name"), kind: .name, minWidth: 160, idealWidth: 320),
+            ColumnDescriptor(id: "size", title: L("col.size"), kind: .size, minWidth: 80, idealWidth: 110),
+            ColumnDescriptor(id: "type", title: L("col.type"), kind: .type, minWidth: 90, idealWidth: 170),
+            ColumnDescriptor(id: "created", title: L("col.created"), kind: .created, minWidth: 120, idealWidth: 160)
         ]
 
         for field in metadataFields {
@@ -575,19 +576,19 @@ struct FileTableView: View {
             Button {
                 openItem(single)
             } label: {
-                Label("Apri", systemImage: single.isFolder ? "folder" : "doc")
+                Label(L("ctx.open"), systemImage: single.isFolder ? "folder" : "doc")
             }
 
             Button {
                 quickLookItem = single
             } label: {
-                Label("Anteprima rapida", systemImage: "eye")
+                Label(L("ctx.quickLook"), systemImage: "eye")
             }
 
             Button {
                 revealInFinder([single])
             } label: {
-                Label("Mostra nel Finder", systemImage: "magnifyingglass")
+                Label(L("ctx.revealFinder"), systemImage: "magnifyingglass")
             }
 
             Divider()
@@ -595,20 +596,20 @@ struct FileTableView: View {
             Button {
                 copyToPasteboard([single])
             } label: {
-                Label("Copia", systemImage: "doc.on.doc")
+                Label(L("ctx.copy"), systemImage: "doc.on.doc")
             }
             .keyboardShortcut("c", modifiers: .command)
 
             Button {
                 itemPendingRename = single
             } label: {
-                Label("Rinomina", systemImage: "pencil")
+                Label(L("ctx.rename"), systemImage: "pencil")
             }
 
             Button {
                 moveItem(single)
             } label: {
-                Label("Sposta…", systemImage: "folder")
+                Label(L("ctx.move"), systemImage: "folder")
             }
 
             if !metadataFields.isEmpty {
@@ -616,7 +617,7 @@ struct FileTableView: View {
                     selection = [single.id]
                     isBulkEditing = true
                 } label: {
-                    Label("Imposta metadata…", systemImage: "square.and.pencil")
+                    Label(L("ctx.setMetadata"), systemImage: "square.and.pencil")
                 }
             }
 
@@ -626,27 +627,27 @@ struct FileTableView: View {
                 trashItems([single])
                 selection.remove(single.id)
             } label: {
-                Label("Sposta nel Cestino", systemImage: "trash")
+                Label(L("ctx.trash"), systemImage: "trash")
             }
         } else if !targets.isEmpty {
             Button {
                 copyToPasteboard(targets)
             } label: {
-                Label("Copia (\(targets.count))", systemImage: "doc.on.doc")
+                Label("\(L("ctx.copy")) (\(targets.count))", systemImage: "doc.on.doc")
             }
             .keyboardShortcut("c", modifiers: .command)
 
             Button {
                 revealInFinder(targets)
             } label: {
-                Label("Mostra nel Finder", systemImage: "magnifyingglass")
+                Label(L("ctx.revealFinder"), systemImage: "magnifyingglass")
             }
 
             if !metadataFields.isEmpty {
                 Button {
                     isBulkEditing = true
                 } label: {
-                    Label("Imposta metadata su \(targets.count) elementi…", systemImage: "square.and.pencil")
+                    Label("\(L("ctx.setMetadataManyPrefix")) \(targets.count) \(L("ctx.setMetadataManySuffix"))", systemImage: "square.and.pencil")
                 }
             }
 
@@ -656,7 +657,7 @@ struct FileTableView: View {
                 trashItems(targets)
                 selection = []
             } label: {
-                Label("Sposta nel Cestino (\(targets.count))", systemImage: "trash")
+                Label("\(L("ctx.trash")) (\(targets.count))", systemImage: "trash")
             }
         }
     }
@@ -754,7 +755,7 @@ struct FileTableView: View {
             label
         } else {
             label
-                .help(item.isFolder ? "Doppio clic per aprire la cartella · clic singolo per rinominare" : "Doppio clic per aprire con l'app predefinita · clic singolo per rinominare")
+                .help(item.isFolder ? L("name.helpFolder") : L("name.helpFile"))
                 .draggable(item.url)
                 .onTapGesture(count: 2) { openItem(item) }
                 .onTapGesture(count: 1) { beginRename(item) }
@@ -771,7 +772,7 @@ struct FileTableView: View {
                 .frame(width: iconSide, height: iconSide)
 
             if editingItemID == item.id {
-                TextField("Nome", text: $editingName)
+                TextField(L("common.name"), text: $editingName)
                     .textFieldStyle(.plain)
                     .focused($nameFieldFocused)
                     .onSubmit { commitRename(item) }
@@ -827,7 +828,7 @@ struct FileTableView: View {
             selectCell(for: item, field: field)
         case .link:
             HStack(spacing: 6) {
-                TextField("Percorso o URL", text: valueBinding(for: item, field: field))
+                TextField(L("link.placeholder"), text: valueBinding(for: item, field: field))
                     .textFieldStyle(.plain)
 
                 Button {
@@ -836,7 +837,7 @@ struct FileTableView: View {
                     Image(systemName: "link.badge.plus")
                 }
                 .buttonStyle(.borderless)
-                .help("Scegli file o cartella")
+                .help(L("link.chooseFile"))
 
                 Button {
                     chooseWikiLink(for: item, field: field)
@@ -844,7 +845,7 @@ struct FileTableView: View {
                     Image(systemName: "note.text.badge.plus")
                 }
                 .buttonStyle(.borderless)
-                .help("Collega nota come wiki link")
+                .help(L("link.wiki"))
 
                 Button {
                     openLink(for: item, field: field)
@@ -853,7 +854,7 @@ struct FileTableView: View {
                 }
                 .buttonStyle(.borderless)
                 .disabled(metadataStore.value(for: item, field: field).isEmpty)
-                .help("Apri link")
+                .help(L("link.open"))
             }
         }
     }
@@ -861,7 +862,7 @@ struct FileTableView: View {
     private func selectCell(for item: FileItem, field: MetadataField) -> some View {
         ZStack(alignment: .leading) {
             Picker("", selection: valueBinding(for: item, field: field)) {
-                Text("<vuoto>").tag("")
+                Text(L("common.empty")).tag("")
                 ForEach(field.options) { option in
                     Text(option.label).tag(option.label)
                 }
@@ -947,7 +948,7 @@ struct FileTableView: View {
 
     private func exportCSV() {
         let fields = metadataFields
-        var header = ["Nome", "Dimensioni", "Tipo", "Creato"]
+        var header = [L("csv.name"), L("csv.size"), L("csv.type"), L("csv.created")]
         header.append(contentsOf: fields.map(\.name))
 
         var rows: [String] = [header.map(csvEscaped).joined(separator: ",")]
@@ -1012,7 +1013,7 @@ struct FileTableView: View {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
-        panel.prompt = "Collega"
+        panel.prompt = L("panel.link")
 
         guard panel.runModal() == .OK, let url = panel.url else {
             return
@@ -1026,7 +1027,7 @@ struct FileTableView: View {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
-        panel.prompt = "Collega nota"
+        panel.prompt = L("panel.linkNote")
 
         guard panel.runModal() == .OK, let url = panel.url else {
             return
@@ -1284,7 +1285,7 @@ private struct DateMetadataCell: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.borderless)
-                .help("Rimuovi data")
+                .help(L("date.remove"))
 
                 Spacer(minLength: 0)
             }
@@ -1329,6 +1330,7 @@ private struct BulkEditView: View {
     var apply: (MetadataField, String) -> Void
     var cancel: () -> Void
 
+    @ObservedObject private var loc = LocalizationManager.shared
     @State private var selectedFieldID: String = ""
     @State private var textValue = ""
     @State private var dateValue = Date()
@@ -1339,10 +1341,10 @@ private struct BulkEditView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Imposta metadata sulla selezione")
+            Text(L("bulk.title"))
                 .font(.headline)
 
-            Picker("Colonna", selection: $selectedFieldID) {
+            Picker(L("bulk.column"), selection: $selectedFieldID) {
                 ForEach(fields) { field in
                     Text(field.name).tag(field.id)
                 }
@@ -1354,8 +1356,8 @@ private struct BulkEditView: View {
 
             HStack {
                 Spacer()
-                Button("Annulla", action: cancel)
-                Button("Applica") {
+                Button(L("common.cancel"), action: cancel)
+                Button(L("common.apply")) {
                     if let field = selectedField {
                         apply(field, resolvedValue(for: field))
                     }
@@ -1375,19 +1377,19 @@ private struct BulkEditView: View {
     private func valueEditor(for field: MetadataField) -> some View {
         switch field.kind {
         case .kanban, .select:
-            Picker("Valore", selection: $textValue) {
-                Text("<vuoto>").tag("")
+            Picker(L("common.value"), selection: $textValue) {
+                Text(L("common.empty")).tag("")
                 ForEach(field.options) { option in
                     Text(option.label).tag(option.label)
                 }
             }
         case .date:
-            DatePicker("Valore", selection: $dateValue, displayedComponents: .date)
+            DatePicker(L("common.value"), selection: $dateValue, displayedComponents: .date)
         case .number:
-            TextField("Valore numerico", text: $textValue)
+            TextField(L("bulk.numberValue"), text: $textValue)
                 .multilineTextAlignment(.trailing)
         case .text, .link:
-            TextField("Valore", text: $textValue)
+            TextField(L("common.value"), text: $textValue)
         }
     }
 
@@ -1406,6 +1408,7 @@ private struct RenameItemView: View {
     var rename: (String) -> Void
     var cancel: () -> Void
 
+    @ObservedObject private var loc = LocalizationManager.shared
     @State private var name: String
 
     init(item: FileItem, rename: @escaping (String) -> Void, cancel: @escaping () -> Void) {
@@ -1417,17 +1420,17 @@ private struct RenameItemView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Rinomina")
+            Text(L("ctx.rename"))
                 .font(.headline)
 
-            TextField("Nome", text: $name)
+            TextField(L("common.name"), text: $name)
 
             HStack {
                 Spacer()
 
-                Button("Annulla", action: cancel)
+                Button(L("common.cancel"), action: cancel)
 
-                Button("Rinomina") {
+                Button(L("ctx.rename")) {
                     rename(name)
                 }
                 .keyboardShortcut(.defaultAction)

@@ -10,6 +10,25 @@ enum MetadataFieldKind: String, CaseIterable, Codable, Identifiable {
 
     var id: String { rawValue }
 
+    /// Nome localizzato mostrato nei menù (il rawValue resta invariato: è la chiave
+    /// salvata nel database e nei template, quindi NON va tradotto).
+    var displayName: String {
+        switch self {
+        case .text:
+            return L("kind.text")
+        case .number:
+            return L("kind.number")
+        case .date:
+            return L("kind.date")
+        case .kanban:
+            return L("kind.kanban")
+        case .select:
+            return L("kind.select")
+        case .link:
+            return L("kind.link")
+        }
+    }
+
     /// I tipi che usano un elenco di opzioni colorate.
     var usesOptions: Bool {
         self == .select || self == .kanban
@@ -31,21 +50,21 @@ enum MetadataTagColor: String, CaseIterable, Codable, Identifiable {
     var title: String {
         switch self {
         case .gray:
-            return "Grigio"
+            return L("tagColor.gray")
         case .red:
-            return "Rosso"
+            return L("tagColor.red")
         case .orange:
-            return "Arancio"
+            return L("tagColor.orange")
         case .yellow:
-            return "Giallo"
+            return L("tagColor.yellow")
         case .green:
-            return "Verde"
+            return L("tagColor.green")
         case .blue:
-            return "Blu"
+            return L("tagColor.blue")
         case .purple:
-            return "Viola"
+            return L("tagColor.purple")
         case .pink:
-            return "Rosa"
+            return L("tagColor.pink")
         }
     }
 }
