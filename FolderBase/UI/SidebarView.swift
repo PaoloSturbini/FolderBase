@@ -46,8 +46,15 @@ struct SidebarView: View {
     let navigateTo: (URL) -> Void
     let createItem: (String, String, Bool) -> String?
     let moveItems: ([String], URL) -> Void
+    @ObservedObject var templateStore: TemplateStore
+    @ObservedObject var metadataStore: MetadataStore
 
     @State private var isShowingSettings = false
+    @State private var isAddingTemplate = false
+    @State private var templatePendingEdit: MetadataTemplate?
+    @State private var maintenanceMessage: String?
+    @State private var maintenanceOrphans = 0
+    @AppStorage("autoPurgeOrphans") private var autoPurgeOrphans = false
     @State private var newItemName = ""
     @State private var newFileExtension = "txt"
     @State private var newItemKind: NewItemKind = .file
@@ -149,42 +156,56 @@ struct SidebarView: View {
             Divider()
             settingsDetail
         }
-        .frame(width: 780, height: 560)
+        .frame(width: 760, height: 540)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .sheet(isPresented: $isAddingTemplate) {
+            TemplateEditorView(title: "Nuovo template") { template in
+                templateStore.add(template)
+                isAddingTemplate = false
+            } cancel: {
+                isAddingTemplate = false
+            }
+        }
+        .sheet(item: $templatePendingEdit) { template in
+            TemplateEditorView(title: "Modifica template", template: template) { updated in
+                templateStore.update(updated)
+                templatePendingEdit = nil
+            } cancel: {
+                templatePendingEdit = nil
+            }
+        }
     }
 
     private var settingsSidebar: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Configurazione")
-                .font(.title3)
-                .fontWeight(.bold)
-                .padding(.horizontal, 12)
-                .padding(.top, 18)
-                .padding(.bottom, 12)
+                .font(.headline)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.top, 16)
+                .padding(.bottom, 10)
 
             ForEach(SettingsSection.allCases) { section in
+                let isSelected = settingsSection == section
                 Button {
                     settingsSection = section
                 } label: {
-                    HStack(spacing: 10) {
+                    HStack(spacing: 8) {
                         Image(systemName: section.systemImage)
                             .font(.body)
-                            .foregroundStyle(settingsSection == section ? Color.white : Color.accentColor)
-                            .frame(width: 26, height: 26)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .fill(settingsSection == section ? Color.accentColor : Color.accentColor.opacity(0.12))
-                            )
+                            .frame(width: 20)
+                            .foregroundStyle(isSelected ? Color.white : Color.accentColor)
 
                         Text(section.title)
-                            .foregroundStyle(.primary)
+                            .foregroundStyle(isSelected ? Color.white : Color.primary)
 
                         Spacer(minLength: 0)
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 6)
                     .background(
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(settingsSection == section ? Color.primary.opacity(0.08) : Color.clear)
+                        RoundedRectangle(cornerRadius: 7)
+                            .fill(isSelected ? Color.accentColor : Color.clear)
                     )
                     .contentShape(Rectangle())
                 }
@@ -194,7 +215,7 @@ struct SidebarView: View {
             Spacer()
         }
         .padding(8)
-        .frame(width: 220)
+        .frame(width: 210)
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
@@ -234,6 +255,10 @@ struct SidebarView: View {
                         foldersSettings
                     case .appearance:
                         appearanceSettings
+                    case .templates:
+                        templatesSettings
+                    case .maintenance:
+                        maintenanceSettings
                     case .support:
                         supportSettings
                     }
@@ -243,7 +268,7 @@ struct SidebarView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .underPageBackgroundColor))
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private var foldersSettings: some View {
@@ -368,6 +393,68 @@ struct SidebarView: View {
         }
     }
 
+    private var maintenanceSettings: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            GroupBox {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Riallinea i metadata al filesystem se hai spostato, rinominato o cancellato file da un'altra parte del Mac.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(spacing: 12) {
+                        Button {
+                            let result = metadataStore.reconcileManagedFiles()
+                            maintenanceOrphans = result.missing
+                            maintenanceMessage = "Aggiornati \(result.relocated) · orfani \(result.missing)"
+                        } label: {
+                            Label("Verifica e ripara", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+
+                        if maintenanceOrphans > 0 {
+                            Button(role: .destructive) {
+                                let removed = metadataStore.purgeOrphans()
+                                maintenanceOrphans = 0
+                                maintenanceMessage = "Rimossi \(removed) metadata orfani"
+                            } label: {
+                                Label("Rimuovi \(maintenanceOrphans) orfani", systemImage: "trash")
+                            }
+                            .buttonStyle(.bordered)
+                        }
+
+                        if let maintenanceMessage {
+                            Text(maintenanceMessage)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+            } label: {
+                settingsCardLabel("Riallineamento metadata", systemImage: "arrow.triangle.2.circlepath")
+            }
+
+            GroupBox {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Rimuovi automaticamente i metadata orfani all'avvio", isOn: $autoPurgeOrphans)
+                        .toggleStyle(.checkbox)
+
+                    Text("Un metadata è “orfano” quando il file a cui era associato non è più raggiungibile (cancellato o spostato su un volume non disponibile).")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+            } label: {
+                settingsCardLabel("Pulizia automatica", systemImage: "trash")
+            }
+        }
+    }
+
     private func settingsCardLabel(_ title: String, systemImage: String) -> some View {
         Label(title, systemImage: systemImage)
             .font(.headline)
@@ -437,8 +524,133 @@ struct SidebarView: View {
         }
     }
 
+    private var appVersionString: String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String
+        let build = info?["CFBundleVersion"] as? String
+        switch (short, build) {
+        case let (short?, build?) where short != build:
+            return "Versione \(short) (\(build))"
+        case let (short?, _):
+            return "Versione \(short)"
+        case let (_, build?):
+            return "Versione \(build)"
+        default:
+            return "Versione di sviluppo"
+        }
+    }
+
+    private var templatesSettings: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            GroupBox {
+                VStack(alignment: .leading, spacing: 8) {
+                    if templateStore.templates.isEmpty {
+                        Text("Nessun template. Un template definisce un insieme di colonne (nome e tipo) da applicare con un clic a una cartella nuova.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 4)
+                    } else {
+                        ForEach(templateStore.templates) { template in
+                            HStack(spacing: 10) {
+                                Image(systemName: "rectangle.stack")
+                                    .foregroundStyle(Color.accentColor)
+                                    .frame(width: 18)
+
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(template.name)
+                                        .fontWeight(.medium)
+                                    Text(columnsSummary(template))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+
+                                Spacer(minLength: 0)
+
+                                Button {
+                                    templatePendingEdit = template
+                                } label: {
+                                    Image(systemName: "pencil")
+                                }
+                                .buttonStyle(.borderless)
+                                .help("Modifica template")
+
+                                Button {
+                                    templateStore.delete(id: template.id)
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .buttonStyle(.borderless)
+                                .foregroundStyle(.secondary)
+                                .help("Elimina template")
+                            }
+                            .padding(.vertical, 2)
+
+                            if template.id != templateStore.templates.last?.id {
+                                Divider()
+                            }
+                        }
+                    }
+
+                    Divider()
+
+                    Button {
+                        isAddingTemplate = true
+                    } label: {
+                        Label("Nuovo template", systemImage: "plus")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+            } label: {
+                settingsCardLabel("Template", systemImage: "rectangle.stack")
+            }
+
+            Text("Quando apri una cartella senza colonne FolderBase, usa il pulsante con l'icona dei template in alto a sinistra per generarle automaticamente da un template.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func columnsSummary(_ template: MetadataTemplate) -> String {
+        guard !template.fields.isEmpty else { return "Nessuna colonna" }
+        return template.fields.map(\.name).joined(separator: ", ")
+    }
+
     private var supportSettings: some View {
         VStack(alignment: .leading, spacing: 18) {
+            GroupBox {
+                HStack(alignment: .center, spacing: 14) {
+                    Image(nsImage: NSApp.applicationIconImage)
+                        .resizable()
+                        .frame(width: 64, height: 64)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("FolderBase")
+                            .font(.title2)
+                            .fontWeight(.semibold)
+                        Text(appVersionString)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Text("File manager metadata-first per macOS.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+            } label: {
+                settingsCardLabel("Informazioni", systemImage: "info.circle")
+            }
+
             GroupBox {
                 VStack(alignment: .leading, spacing: 14) {
                     Text("Se FolderBase ti è utile, puoi offrirmi un caffè su Ko-fi. Grazie!")
@@ -497,6 +709,8 @@ private struct KofiWidgetView: NSViewRepresentable {
 private enum SettingsSection: String, CaseIterable, Identifiable {
     case folders
     case appearance
+    case templates
+    case maintenance
     case support
 
     var id: String { rawValue }
@@ -507,8 +721,12 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             return "Cartelle"
         case .appearance:
             return "Aspetto"
+        case .templates:
+            return "Template"
+        case .maintenance:
+            return "Manutenzione"
         case .support:
-            return "Sostieni"
+            return "Info su FolderBase"
         }
     }
 
@@ -518,8 +736,12 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             return "folder"
         case .appearance:
             return "paintbrush"
+        case .templates:
+            return "rectangle.stack"
+        case .maintenance:
+            return "wrench.and.screwdriver"
         case .support:
-            return "cup.and.saucer"
+            return "info.circle"
         }
     }
 
@@ -529,8 +751,12 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             return "Cartelle monitorate, creazione elementi e recenti"
         case .appearance:
             return "Tema e dimensione dei caratteri"
+        case .templates:
+            return "Insiemi di colonne riutilizzabili"
+        case .maintenance:
+            return "Sincronizzazione e pulizia dei metadata"
         case .support:
-            return "Offri un contributo allo sviluppo"
+            return "Versione, informazioni e supporto"
         }
     }
 }

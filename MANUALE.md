@@ -1,67 +1,172 @@
-# FolderBase — Manuale iniziale
+# FolderBase — Manuale
 
-FolderBase è un file manager *metadata-first* per macOS. Prende cartelle e file reali del tuo Mac e li mostra in una tabella alla quale puoi aggiungere colonne personalizzate (note, stati, link…). I file non vengono spostati né duplicati: i metadata sono salvati a parte.
+**FolderBase** è un file manager *metadata-first* per macOS. Mostra cartelle e file reali del tuo Mac in una tabella alla quale puoi aggiungere colonne personalizzate — note, numeri, date, stati Kanban, tag Select, link — senza mai spostare, copiare o modificare i file originali. I metadata vivono in un database locale separato e seguono i file anche quando li rinomini o li sposti.
 
-## Requisiti
+L'idea è avvicinare l'esperienza di uno strumento tipo Notion/Airtable ai file veri del filesystem: il Finder mostra solo nome, dimensione e data; FolderBase ti lascia annotare, classificare e organizzare lo stesso contenuto con campi tuoi.
 
-- **macOS 14.4 o superiore** (necessario per le colonne dinamiche della tabella nativa).
-- Toolchain Swift / Xcode recente (Swift 5.9+).
+---
 
-## Come compilare ed eseguire
+## 1. Requisiti
 
-Da terminale, nella cartella del progetto:
+- **macOS 14.4 o superiore** — necessario per le colonne dinamiche del componente tabella nativo (`Table` + `TableColumnForEach`).
+- **Toolchain Swift 5.9+** (Xcode recente oppure i Command Line Tools).
+
+---
+
+## 2. Installazione ed esecuzione
+
+Hai tre modi per avviare FolderBase, dal più rapido al più "definitivo".
+
+### 2.1 Avvio diretto da terminale
 
 ```bash
 cd "/Users/paolosturbini/Documents/Sviluppo App/FolderBase"
-swift run --build-path /tmp/folderbase-run FolderBase   # compila ed avvia
+swift run --build-path /tmp/folderbase-run FolderBase
 ```
 
-La build finisce in `/tmp/folderbase-run` (fuori dal progetto), così la cartella resta pulita. Scorciatoie: `./build.sh` (solo compila), `./run.sh` (compila e avvia). In alternativa apri `Package.swift` con Xcode e premi ▶︎.
+La build viene messa in `/tmp/folderbase-run`, **fuori** dalla cartella del progetto, così la directory resta pulita ed evita problemi di sincronizzazione.
 
-I metadata vengono salvati in un database locale non invasivo:
+### 2.2 Script di comodo
+
+```bash
+./build.sh            # solo compilazione (debug)
+./build.sh -c release # build di release
+./run.sh              # compila e avvia
+```
+
+### 2.3 Creare una vera app in /Applications
+
+```bash
+./make-app.sh
+```
+
+Lo script compila in release e assembla un bundle `FolderBase.app` in `/Applications`, con `Info.plist` (bundle id `com.paolosturbini.folderbase`, min OS 14.4) e icona generata da `AppIcon.png` (idealmente 1024×1024) presente nella cartella del progetto. Applica anche una firma ad-hoc per ridurre gli avvisi all'avvio locale. Da qui in poi puoi lanciare FolderBase come una normale app dal Launchpad/Dock.
+
+In alternativa puoi aprire `Package.swift` con Xcode e premere ▶︎.
+
+---
+
+## 3. Dove vengono salvati i dati
+
+Tutti i metadata e l'indice dei file stanno in un singolo database SQLite locale:
 
 ```
 ~/Library/Application Support/FolderBase/folderbase.sqlite
 ```
 
-Per ripartire "puliti" basta cancellare quel file (verrà ricreato). Le cartelle osservate non vengono modificate.
+Punti importanti:
 
-## Come si usa
+- Le **cartelle osservate non vengono mai modificate**: FolderBase non scrive file nascosti dentro le tue directory.
+- Per ripartire "puliti" basta cancellare quel file: verrà ricreato vuoto al successivo avvio.
+- Se esiste un vecchio `metadata.json` (formato legacy), viene importato **una sola volta** in SQLite quando il database è ancora vuoto, poi non è più usato.
 
-1. **Aggiungi una cartella** — apri *Configurazione* nella sidebar, entra in *Cartelle* e usa **Aggiungi cartella**. La cartella viene aggiunta all'elenco di quelle recenti.
-2. **Naviga** — **doppio click** (o Invio) sul nome di una sottocartella per entrarci, oppure usa l'albero nella sidebar. Il singolo click seleziona la riga. In alto trovi i pulsanti Indietro / Avanti / Su e il percorso corrente.
-3. **Albero a sinistra** — mostra la struttura a partire dalla cartella selezionata; cliccando un nodo la tabella si aggiorna. Puoi **trascinare file dalla tabella (o dalla board) su una cartella dell'albero** per spostarli lì. Per risalire usa il pulsante **Su** (↑).
-4. **Aggiungi colonne metadata** — pulsante **+ Colonna** in alto a destra. Tipi disponibili:
-   - **Nota libera** — campo di testo (anteprima al passaggio del mouse).
-   - **Numero** — valore numerico, ordinamento numerico reale.
-   - **Data** — selettore data; ordinamento cronologico.
-   - **Kanban** — tag con stati ToDo, Doing e Done già pronti; abilita la vista a board.
-   - **Select** — tag con valori liberi e colore. Il valore vuoto appare come `<vuoto>`.
-   - **Link** — URL, path locale, markdown link o wiki link `[[Nota]]`, con pulsanti per scegliere file/cartelle, collegare una nota e aprire.
-   Le colonne valgono **solo per la cartella in cui le crei**.
-5. **Ridimensiona, riordina e nascondi le colonne** — trascina i bordi/intestazioni; clic destro sull'intestazione per mostrare/nascondere. Larghezza, ordine e visibilità sono **persistenti**.
-6. **Ordina** — clicca l'intestazione; riclicca per invertire. I valori vuoti finiscono sempre in fondo. "Ordine predefinito" ripristina (cartelle prima, poi per nome).
-7. **Cerca e filtra** — la barra di ricerca in alto filtra per nome e per qualsiasi valore metadata; il menù **Filtri** permette di mostrare solo elementi con certi valori Select/Kanban. I filtri attivi appaiono come chip rimovibili.
-8. **Selezione multipla e modifica in blocco** — seleziona più righe (Cmd/Shift-click); compaiono i pulsanti **Modifica** (imposta uno stesso valore metadata su tutta la selezione) e **Cestina**.
-9. **Vista Kanban (board)** — se esiste una colonna Kanban, l'interruttore tabella/board in alto mostra le card raggruppate per stato; **trascina una card** in un'altra colonna per cambiarne lo stato.
-10. **Gestisci file e cartelle** — clic destro su un elemento: Apri, **Anteprima rapida** (Quick Look), **Mostra nel Finder**, Rinomina, Sposta, Imposta metadata, **Sposta nel Cestino**. Dalla configurazione puoi creare file vuoti/cartelle. **Esporta CSV** (icona condividi) salva la tabella corrente (rispetta filtri e ordinamento).
-11. **Modifica i metadata** — scrivi direttamente nelle celle; il salvataggio è automatico (le note di testo vengono salvate con un breve ritardo per non scrivere ad ogni tasto).
-12. **Impostazioni** — *Configurazione* (ingranaggio): sezioni Cartelle, Aspetto (tema + caratteri), Sostieni.
+---
 
-All'avvio l'app riapre automaticamente l'ultima cartella usata e mostra subito l'albero. La tabella si **aggiorna da sola** quando aggiungi/rimuovi/rinomini file nella cartella corrente dall'esterno (Finder, terminale…).
+## 4. Guida all'uso
 
-## Architettura del codice
+### 4.1 Aggiungere e aprire una cartella
+
+1. Apri **Configurazione** nella sidebar, vai in **Cartelle** e usa **Aggiungi cartella**. La cartella entra nell'elenco delle recenti.
+2. All'avvio l'app riapre automaticamente l'ultima cartella usata e mostra subito l'albero.
+
+### 4.2 Navigare
+
+- **Singolo click**: seleziona una riga.
+- **Doppio click** (o **Invio**) sul nome di una sottocartella: ci entra, come nel Finder.
+- In alto trovi i pulsanti **Indietro / Avanti / Su (↑)** e il percorso corrente.
+- L'**albero a sinistra** parte dalla cartella selezionata: cliccando un nodo la tabella si aggiorna. Puoi **trascinare file dalla tabella (o dalla board) su una cartella dell'albero** per spostarli lì.
+
+La tabella si **aggiorna da sola** quando aggiungi, rimuovi o rinomini file nella cartella corrente dall'esterno (Finder, terminale…), grazie al `FolderWatcher`.
+
+### 4.3 Colonne standard
+
+Ogni tabella mostra di base: **Name**, **Type**, **Created**, **Size**. Le cartelle non hanno dimensione (`—`).
+
+### 4.4 Aggiungere colonne metadata
+
+Pulsante **+ Colonna** in alto a destra. Le colonne valgono **solo per la cartella in cui le crei**. Tipi disponibili:
+
+| Tipo | A cosa serve | Ordinamento |
+|------|--------------|-------------|
+| **Nota libera** | Campo di testo libero (anteprima al passaggio del mouse) | Alfabetico |
+| **Numero** | Valore numerico (accetta sia `.` sia `,` come separatore) | Numerico reale |
+| **Data** | Selettore data; salvata come `yyyy-MM-dd`, mostrata in formato localizzato | Cronologico |
+| **Kanban** | Tag con stati **ToDo, Doing, Done** già pronti; abilita la vista a board | Per stato |
+| **Select** | Tag a valori liberi con colore scelto; il vuoto appare come `<vuoto>` | Per valore |
+| **Link** | URL, path locale, markdown link o wiki link `[[Nota]]`, con pulsanti per scegliere file/cartelle, collegare una nota e aprire | — |
+
+I tag colorati (Select e Kanban) possono usare 8 colori: grigio, rosso, arancio, giallo, verde, blu, viola, rosa. Se rinomini un'opzione, i valori già assegnati in tabella vengono aggiornati; se la elimini, viene rimossa anche dalle righe che la usavano.
+
+### 4.5 Gestire le colonne
+
+- **Ridimensiona / riordina**: trascina bordi e intestazioni.
+- **Mostra / nascondi**: clic destro sull'intestazione.
+- **Elimina**: dal menù **Colonne**.
+- Larghezza, ordine e visibilità sono **persistenti** (salvati via `TableColumnCustomization` in `@AppStorage`).
+
+### 4.6 Ordinare
+
+Clicca l'intestazione di una colonna per ordinare; ricliccala per invertire. I valori vuoti finiscono **sempre in fondo**. **Ordine predefinito** ripristina la disposizione base (cartelle prima, poi per nome).
+
+### 4.7 Cercare e filtrare
+
+- La **barra di ricerca** in alto filtra per nome e per qualsiasi valore metadata.
+- Il menù **Filtri** mostra solo gli elementi con certi valori Select/Kanban.
+- I filtri attivi appaiono come **chip rimovibili**.
+
+### 4.8 Selezione multipla e modifica in blocco
+
+Seleziona più righe con **Cmd-click** / **Shift-click**. Compaiono:
+
+- **Modifica** — imposta lo stesso valore metadata su tutta la selezione (in un'unica transazione).
+- **Cestina** — sposta gli elementi nel Cestino.
+
+### 4.9 Vista Kanban (board)
+
+Se nella cartella esiste una colonna **Kanban**, l'interruttore **tabella / board** in alto mostra le card raggruppate per stato. **Trascina una card** in un'altra colonna per cambiarne lo stato.
+
+### 4.10 Gestire file e cartelle
+
+Clic destro su un elemento per: **Apri**, **Anteprima rapida** (Quick Look), **Mostra nel Finder**, **Rinomina**, **Sposta**, **Imposta metadata**, **Sposta nel Cestino**.
+
+- Dalla **Configurazione** puoi creare file vuoti e cartelle nella directory corrente.
+- **Esporta CSV** (icona condividi) salva la tabella corrente rispettando filtri e ordinamento attivi.
+
+### 4.11 Modificare i metadata
+
+Scrivi direttamente nelle celle: il salvataggio è **automatico**. Le note di testo vengono salvate con un breve ritardo (debounce ~0,4 s) per non scrivere su disco a ogni tasto.
+
+### 4.12 Impostazioni (Configurazione ⚙︎)
+
+- **Cartelle** — gestione cartelle recenti, creazione file/cartelle.
+- **Aspetto** — tema **automatico / chiaro / scuro** e scelta dei caratteri.
+- **Sostieni** — link Ko-fi per supportare lo sviluppo.
+
+---
+
+## 5. Come funziona l'identità dei file
+
+Il cuore di FolderBase è il modo in cui lega i metadata ai file:
+
+- Ogni file/cartella ha un'**identità stabile** calcolata dagli identificatori filesystem di macOS (`fileResourceIdentifier` + `volumeIdentifier`), con fallback al path solo se l'identificatore non è disponibile.
+- I metadata sono legati a questa identità, **non al path**: il path è solo l'ultima posizione nota. Per questo le note "seguono" un file quando lo rinomini o lo sposti sullo stesso volume.
+- Se un'operazione fatta dall'app genera una nuova identità, FolderBase **migra** metadata e colonne sulla nuova identità (`reconcileMovedItem`).
+- Le colonne metadata sono **per-cartella**: la chiave è l'identità filesystem della cartella.
+
+---
+
+## 6. Architettura del codice
 
 ```
 FolderBase/
-├── Package.swift            # target macOS 14.4, eseguibile "FolderBase"
+├── Package.swift            # target macOS 14.4, eseguibile "FolderBase", linka sqlite3
 └── FolderBase/
     ├── App/        FolderBaseApp.swift      # entry point + finestra
-    ├── Models/     FileItem.swift           # file/cartella
-    │               MetadataField.swift      # colonna metadata (text/number/date/kanban/select/link) + formatter
-    ├── Services/   FileBrowserService.swift # legge il contenuto di una cartella
+    ├── Models/     FileItem.swift           # file/cartella (identity, url, name, type, created, size)
+    │               MetadataField.swift      # colonna metadata + tipi + tag colorati + formatter
+    ├── Services/   FileBrowserService.swift # legge il contenuto di una cartella (puro, thread-safe)
     │               MetadataStore.swift      # metadata e colonne per-cartella (SQLite, cache identità, scritture debounced)
-    │               FolderWatcher.swift      # auto-refresh con debounce
+    │               FolderWatcher.swift      # auto-refresh con debounce (DispatchSource sul vnode)
     │               RecentFoldersStore.swift # cartelle recenti (UserDefaults)
     └── UI/         MainWindowView.swift     # layout, navigazione, trash, spostamenti
                     SidebarView.swift        # sidebar: cartelle, albero, impostazioni
@@ -71,43 +176,46 @@ FolderBase/
                     QuickLookSheet.swift     # anteprima rapida (QLPreviewView)
 ```
 
-Punti chiave:
-- Le colonne metadata sono **per-cartella** (`MetadataStore.fieldsByFolder`, chiave = identità filesystem della cartella).
-- I valori metadata sono legati all'identità filesystem del file, non al path; il path è solo l'ultima posizione nota.
-- La tabella usa il componente nativo `Table` con un'unica `TableColumnForEach` su una lista unificata di colonne.
-- L'albero ha la radice agganciata alla cartella selezionata.
+### Database SQLite
 
-## Funzionalità implementate di recente
+Tre tabelle:
 
-- **Tipi colonna Numero e Data** con ordinamento numerico/cronologico.
-- **Ricerca e filtri** per nome e valori metadata, con chip rimovibili.
-- **Selezione multipla** con modifica metadata in blocco e cestino.
-- **Vista Kanban a board** con drag tra colonne per cambiare stato.
-- **Anteprima rapida (Quick Look)** e **Mostra nel Finder** dal menu contestuale.
-- **Sposta nel Cestino** e **drag&drop di file su cartelle dell'albero**.
-- **Esporta CSV** della tabella corrente (rispetta filtri e ordinamento).
-- **Performance**: l'identità file è in cache (niente scritture su disco durante il render) e le note di testo vengono salvate con debounce; le modifiche in blocco usano una singola transazione.
-- **Eliminazione colonne** dal menù *Colonne*.
-- **Larghezze, ordine e visibilità colonne persistenti** (via `TableColumnCustomization`, salvati in `@AppStorage`).
-- **Ordinamento diretto sulle intestazioni** per qualsiasi colonna, incluse quelle metadata.
-- **Auto-refresh** della cartella tramite `FolderWatcher` (DispatchSource sul vnode della directory).
-- **SQLite locale** in Application Support per metadata e indice file, senza scrivere file nascosti nelle directory utente.
-- **Identità stabile file/cartelle** tramite identificatori filesystem macOS, con fallback al path solo se l'identificatore non è disponibile.
-- **Creazione file vuoti/cartelle** dalla configurazione in sidebar, dentro la directory corrente.
-- **Kanban e Select con tag colorati**: Kanban propone ToDo, Doing e Done; Select parte vuota. I valori selezionati vengono mostrati come pill colorate; se svuoti il nome di uno stato e salvi, quello stato viene eliminato anche dai valori già assegnati in tabella.
-- **Rinomina e spostamento file/cartelle** dal menu contestuale della tabella, con aggiornamento del DB SQLite e migrazione metadata se cambia identità.
-- **Tema app** automatico, chiaro o scuro nella sezione Aspetto.
-- **Donazione Ko-fi** dalla sezione Sostieni.
+- **`files`** — `identity` (PK), identificatori filesystem, `last_known_path`, nome, flag directory, timestamp.
+- **`metadata_fields`** — definizione delle colonne per cartella: `id`, `folder_identity`, nome, tipo, `options_json`, posizione (FK su `files`, `ON DELETE CASCADE`).
+- **`metadata_values`** — i valori: `file_identity` + `field_id` (PK composta) → `value` (FK su `files` e `metadata_fields`, `ON DELETE CASCADE`).
 
-## Cosa manca / migliorie possibili
+Pragma attivi: `foreign_keys = ON`, `journal_mode = WAL`.
 
-- **Navigazione**: ora il singolo click seleziona e il doppio click (o Invio) apre/naviga, come nel Finder.
-- Gli identificatori filesystem seguono rename e spostamenti sullo stesso volume. Se un'operazione fatta dall'app genera una nuova identità, FolderBase migra metadata e colonne sulla nuova identità.
-- Il vecchio `metadata.json`, se presente, viene usato solo per una migrazione iniziale verso SQLite quando il DB è ancora vuoto.
-- **Robustezza identità**: l'identità si basa su `String(describing:)` dell'identificatore filesystem; valutare di ancorarla al `bookmark_data` già salvato per maggiore stabilità tra riavvii.
-- **Sandbox/distribuzione**: per distribuire l'app fuori da `swift run` servono security-scoped bookmark risolti all'avvio e una revisione del widget Ko-fi (usa una WKWebView con JS remoto).
+### Scelte di performance
 
-## Note
+- L'identità file è **in cache** per path: nessuna scrittura su disco durante il rendering di SwiftUI.
+- Le note di testo si salvano con **debounce**; le modifiche in blocco usano una **singola transazione**.
+- `FileBrowserService` è puro e senza stato, quindi le letture delle cartelle possono girare in background.
 
-- Tutte le modifiche recenti **non sono ancora committate** su git (esiste solo il commit iniziale). Conviene fare un commit quando la build è verde.
-- Il salvataggio metadata è legato all'identità filesystem del file/cartella quando disponibile; le directory utente restano pulite.
+---
+
+## 7. FAQ e risoluzione problemi
+
+**I miei metadata sono spariti dopo aver spostato un file.**
+Dovrebbero seguirlo automaticamente sullo stesso volume. Se sposti tra volumi diversi (es. su un disco esterno) l'identità filesystem cambia e i metadata potrebbero non migrare.
+
+**Voglio azzerare tutto.**
+Chiudi l'app e cancella `~/Library/Application Support/FolderBase/folderbase.sqlite`. Le tue cartelle e i tuoi file restano intatti.
+
+**La build "sporca" la cartella del progetto.**
+Usa sempre `--build-path /tmp/folderbase-run` (o gli script forniti): la cartella `.build` è già in `.gitignore`.
+
+**L'app non parte come bundle dopo `make-app.sh`.**
+Manca `AppIcon.png` o la firma ad-hoc non è andata a buon fine: l'app userà l'icona generica ma dovrebbe comunque avviarsi. Per la distribuzione fuori dal tuo Mac servono notarizzazione e security-scoped bookmark.
+
+---
+
+## 8. Limiti noti e migliorie possibili
+
+- **Robustezza identità**: l'identità si basa su `String(describing:)` dell'identificatore filesystem; si potrebbe ancorarla a `bookmark_data` per maggiore stabilità tra riavvii.
+- **Sandbox/distribuzione**: per distribuire l'app fuori da `swift run` servono security-scoped bookmark risolti all'avvio e una revisione del widget Ko-fi (usa una `WKWebView` con JS remoto).
+- **Volumi diversi**: lo spostamento tra volumi può generare una nuova identità e richiedere la migrazione manuale dei metadata.
+
+---
+
+*Repository: https://github.com/PaoloSturbini/FolderBase*

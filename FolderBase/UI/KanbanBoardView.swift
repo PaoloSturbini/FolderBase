@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Vista a board: raggruppa gli elementi nelle colonne definite da un campo Kanban.
@@ -92,15 +93,17 @@ struct KanbanBoardView: View {
         .frame(width: 250)
         .padding(8)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
-        .dropDestination(for: String.self) { paths, _ in
-            applyDrop(paths: paths, toLabel: column.assignmentLabel)
+        .dropDestination(for: URL.self) { urls, _ in
+            applyDrop(paths: urls.map(\.path), toLabel: column.assignmentLabel)
         }
     }
 
     private func card(_ item: FileItem) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: item.isFolder ? "folder.fill" : "doc.fill")
-                .foregroundStyle(item.isFolder ? .blue : .secondary)
+            Image(nsImage: FileIconProvider.icon(for: item))
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: max(fontSize + 3, 16), height: max(fontSize + 3, 16))
             Text(item.name)
                 .font(.system(size: fontSize))
                 .lineLimit(2)
@@ -114,7 +117,7 @@ struct KanbanBoardView: View {
                 .stroke(.secondary.opacity(0.15), lineWidth: 1)
         }
         .contentShape(Rectangle())
-        .draggable(item.url.path)
+        .draggable(item.url)
         .onTapGesture(count: 2) {
             openItem(item)
         }

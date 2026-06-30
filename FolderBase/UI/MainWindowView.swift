@@ -3,6 +3,7 @@ import SwiftUI
 struct MainWindowView: View {
     @StateObject private var metadataStore = MetadataStore()
     @StateObject private var recentFoldersStore = RecentFoldersStore()
+    @StateObject private var templateStore = TemplateStore()
     @State private var selectedFolderURL: URL?
     /// Radice STABILE dell'albero nella sidebar. Resta la cartella "base" scelta:
     /// navigando nelle sottocartelle non cambia, così l'albero non viene ricostruito/riletto.
@@ -14,7 +15,8 @@ struct MainWindowView: View {
     @AppStorage("sidebarFontSize") private var sidebarFontSize = 14.0
     @AppStorage("contentFontSize") private var contentFontSize = 13.0
     @AppStorage("appearanceMode") private var appearanceMode = AppearanceMode.system.rawValue
-    @State private var folderWatcher: FolderWatcher?
+    @AppStorage("autoPurgeOrphans") private var autoPurgeOrphans = false
+    @State private var managedWatcher: FSEventsWatcher?
     @State private var treeRefreshID = UUID()
     @State private var isLoading = false
 
@@ -35,7 +37,9 @@ struct MainWindowView: View {
                 chooseFolder: chooseFolder,
                 navigateTo: navigate,
                 createItem: createItemInCurrentFolder,
-                moveItems: moveItemsByPath
+                moveItems: moveItemsByPath,
+                templateStore: templateStore,
+                metadataStore: metadataStore
             )
             .frame(minWidth: 220, idealWidth: 260, maxWidth: 380, maxHeight: .infinity)
 
@@ -54,13 +58,47 @@ struct MainWindowView: View {
                 moveItem: moveItem,
                 trashItems: trashItems,
                 isLoading: isLoading,
-                contentFontSize: contentFontSize
+                contentFontSize: contentFontSize,
+                templates: templateStore.templates,
+                applyTemplate: applyTemplate
             )
             .frame(minWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 1100, minHeight: 650)
         .preferredColorScheme(AppearanceMode(rawValue: appearanceMode)?.colorScheme)
-        .onAppear(perform: loadInitialFolderIfNeeded)
+        .onAppear {
+            loadInitialFolderIfNeeded()
+            performInitialSync()
+        }
+    }
+
+    /// All'avvio riallinea il DB al filesystem (file spostati/rinominati/cancellati mentre
+    /// l'app era chiusa) e avvia l'osservazione FSEvents delle cartelle gestite.
+    private func performInitialSync() {
+        let result = metadataStore.reconcileManagedFiles()
+        if autoPurgeOrphans, result.missing > 0 {
+            _ = metadataStore.purgeOrphans()
+        }
+        refreshManagedWatcher()
+    }
+
+    /// Riconfigura l'osservatore FSEvents sull'insieme delle cartelle gestite più quella aperta.
+    private func refreshManagedWatcher() {
+        if managedWatcher == nil {
+            managedWatcher = FSEventsWatcher {
+                let result = metadataStore.reconcileManagedFiles()
+                if autoPurgeOrphans, result.missing > 0 {
+                    _ = metadataStore.purgeOrphans()
+                }
+                reloadCurrentFolder()
+            }
+        }
+
+        var dirs = Set(metadataStore.managedDirectories())
+        if let selectedFolderURL {
+            dirs.insert(selectedFolderURL.path)
+        }
+        managedWatcher?.watch(paths: Array(dirs))
     }
 
     private func loadInitialFolderIfNeeded() {
@@ -114,9 +152,9 @@ struct MainWindowView: View {
             treeRootURL = nil
             items = []
             errorMessage = nil
-            folderWatcher?.stop()
-            folderWatcher = nil
         }
+
+        refreshManagedWatcher()
     }
 
     /// Mantiene stabile la radice dell'albero finché si naviga DENTRO il suo sottoalbero;
@@ -130,6 +168,11 @@ struct MainWindowView: View {
             }
         }
         treeRootURL = url
+    }
+
+    private func applyTemplate(_ template: MetadataTemplate) {
+        guard let selectedFolderURL else { return }
+        metadataStore.applyTemplate(template, to: selectedFolderURL)
     }
 
     private func openItem(_ item: FileItem) {
@@ -186,14 +229,8 @@ struct MainWindowView: View {
     private func loadFolder(_ url: URL) {
         // Registra la cartella (cheap, serve per agganciarvi le colonne metadata).
         _ = try? metadataStore.registerFile(at: url)
-        startWatching(url)
+        refreshManagedWatcher()
         fetchItems(at: url, refreshTree: false)
-    }
-
-    private func startWatching(_ url: URL) {
-        folderWatcher = FolderWatcher(url: url) {
-            reloadCurrentFolder()
-        }
     }
 
     private func reloadCurrentFolder() {

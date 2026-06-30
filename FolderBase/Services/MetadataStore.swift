@@ -84,28 +84,36 @@ final class MetadataStore: ObservableObject {
         let identity = Self.fileIdentity(fileIdentifier: fileIdentifier, volumeIdentifier: volumeIdentifier, path: fileURL.path)
         identityCacheByPath[fileURL.path] = identity
 
-        // Nota: niente più `bookmarkData` qui — era una syscall costosa fatta per ogni file
-        // ad ogni navigazione e non veniva mai riletta. Si può reintrodurre lazy se servirà.
+        // Bookmark + dimensione: salvati solo qui (cartelle, file con metadata, elementi
+        // spostati) — non nel percorso caldo di navigazione — quindi il costo è trascurabile.
+        // Il bookmark è l'àncora autorevole per ritrovare il file dopo spostamenti/rinomini
+        // (anche tra volumi) e per distinguere una cancellazione dal riuso di un inode.
+        let size = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize)
+        let bookmark = try? fileURL.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+
         try execute(
             """
-            INSERT INTO files (identity, file_resource_identifier, volume_identifier, bookmark_data, last_known_path, name, is_directory, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO files (identity, file_resource_identifier, volume_identifier, bookmark_data, last_known_path, name, is_directory, size, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(identity) DO UPDATE SET
                 file_resource_identifier = excluded.file_resource_identifier,
                 volume_identifier = excluded.volume_identifier,
+                bookmark_data = excluded.bookmark_data,
                 last_known_path = excluded.last_known_path,
                 name = excluded.name,
                 is_directory = excluded.is_directory,
+                size = excluded.size,
                 updated_at = excluded.updated_at
             """,
             bindings: [
                 .text(identity),
                 .text(fileIdentifier),
                 .text(volumeIdentifier),
-                .blob(nil),
+                .blob(bookmark),
                 .text(fileURL.path),
                 .text(fileURL.lastPathComponent),
                 .int((values.isDirectory ?? false) ? 1 : 0),
+                .intOptional(size),
                 .real(Date().timeIntervalSince1970)
             ]
         )
@@ -259,6 +267,13 @@ final class MetadataStore: ObservableObject {
         }
     }
 
+    /// Applica un template a una cartella creando una colonna per ogni campo definito.
+    func applyTemplate(_ template: MetadataTemplate, to folderURL: URL) {
+        for field in template.fields {
+            addField(folderURL: folderURL, name: field.name, kind: field.kind, options: field.options)
+        }
+    }
+
     func removeField(folderURL: URL, field: MetadataField) {
         do {
             let folderIdentity = try registerFile(at: folderURL)
@@ -362,6 +377,186 @@ final class MetadataStore: ObservableObject {
         return newIdentity
     }
 
+    // MARK: - Sincronizzazione con il filesystem
+
+    /// Riga della tabella `files` usata per la riconciliazione.
+    private struct FileRow {
+        var identity: String
+        var bookmark: Data?
+        var lastKnownPath: String
+        var name: String
+        var isDirectory: Bool
+        var size: Int64?
+    }
+
+    private enum RowResolution {
+        case present(URL)    // stesso file (eventuale rinomina/spostamento sullo stesso volume)
+        case relocated(URL)  // file ritrovato ma con identità cambiata → serve ri-aggancio
+        case missing         // non più trovabile → orfano
+    }
+
+    /// Ritrova la posizione attuale del file di una riga, con salvaguardia anti riuso-inode.
+    private func resolve(_ row: FileRow) -> RowResolution {
+        let fm = FileManager.default
+
+        // 1) Bookmark: àncora autorevole (segue spostamenti/rinomini, anche tra volumi).
+        if let data = row.bookmark {
+            var stale = false
+            if let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale),
+               fm.fileExists(atPath: url.path) {
+                let newIdentity = Self.computeIdentity(for: url)
+                if let newIdentity, newIdentity != row.identity {
+                    return .relocated(url)
+                }
+                return .present(url)
+            }
+        }
+
+        // 2) Fallback sull'ultimo percorso noto.
+        if fm.fileExists(atPath: row.lastKnownPath) {
+            let url = URL(fileURLWithPath: row.lastKnownPath)
+            let newIdentity = Self.computeIdentity(for: url)
+            if let newIdentity, newIdentity != row.identity {
+                // Stesso percorso ma inode diverso: potrebbe essere un altro file (inode riusato).
+                // Riaggancio solo se nome E dimensione coincidono con quanto memorizzato.
+                let current = Self.nameAndSize(for: url)
+                if current.name == row.name, current.size == row.size {
+                    return .relocated(url)
+                }
+                return .missing
+            }
+            return .present(url)
+        }
+
+        return .missing
+    }
+
+    /// Riallinea il DB al filesystem: aggiorna percorsi/nomi/bookmark dei file spostati o
+    /// rinominati altrove, e conta quelli non più trovabili (orfani). Non cancella nulla.
+    @discardableResult
+    func reconcileManagedFiles() -> (relocated: Int, missing: Int) {
+        let rows = (try? loadFileRows()) ?? []
+        var relocated = 0
+        var missing = 0
+
+        for row in rows {
+            switch resolve(row) {
+            case .present(let url):
+                if url.path != row.lastKnownPath {
+                    relocated += 1
+                }
+                updateTracking(row, to: url)
+            case .relocated(let url):
+                _ = try? reconcileMovedItem(previousIdentity: row.identity, newURL: url)
+                relocated += 1
+            case .missing:
+                missing += 1
+            }
+        }
+
+        identityCacheByPath.removeAll()
+        refreshPublishedState()
+        return (relocated, missing)
+    }
+
+    /// Identità delle righe il cui file non è più trovabile (metadata orfani).
+    func orphanedIdentities() -> [String] {
+        let rows = (try? loadFileRows()) ?? []
+        return rows.compactMap { row in
+            if case .missing = resolve(row) { return row.identity }
+            return nil
+        }
+    }
+
+    /// Numero di metadata orfani (file cancellati o non più raggiungibili).
+    func orphanCount() -> Int {
+        orphanedIdentities().count
+    }
+
+    /// Rimuove le righe orfane (cancellazione a cascata di campi/valori collegati).
+    @discardableResult
+    func purgeOrphans() -> Int {
+        let identities = orphanedIdentities()
+        guard !identities.isEmpty else { return 0 }
+
+        do {
+            try execute("BEGIN IMMEDIATE TRANSACTION")
+            for identity in identities {
+                try execute("DELETE FROM files WHERE identity = ?", bindings: [.text(identity)])
+                registeredIdentities.remove(identity)
+            }
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            assertionFailure("Failed to purge orphans: \(error)")
+        }
+
+        refreshPublishedState()
+        return identities.count
+    }
+
+    /// Cartelle da osservare con FSEvents: per ogni elemento gestito la sua cartella
+    /// (se cartella, sé stessa; se file, la cartella che lo contiene).
+    func managedDirectories() -> [String] {
+        let rows = (try? loadFileRows()) ?? []
+        var dirs: Set<String> = []
+        for row in rows {
+            let url = URL(fileURLWithPath: row.lastKnownPath)
+            dirs.insert(row.isDirectory ? url.path : url.deletingLastPathComponent().path)
+        }
+        return Array(dirs)
+    }
+
+    private func updateTracking(_ row: FileRow, to url: URL) {
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize)
+        let bookmark = row.bookmark ?? (try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil))
+        try? execute(
+            "UPDATE files SET last_known_path = ?, name = ?, size = ?, bookmark_data = ?, updated_at = ? WHERE identity = ?",
+            bindings: [
+                .text(url.path),
+                .text(url.lastPathComponent),
+                .intOptional(size),
+                .blob(bookmark),
+                .real(Date().timeIntervalSince1970),
+                .text(row.identity)
+            ]
+        )
+    }
+
+    private func loadFileRows() throws -> [FileRow] {
+        var rows: [FileRow] = []
+        var statement: OpaquePointer?
+        try prepare("SELECT identity, bookmark_data, last_known_path, name, is_directory, size FROM files", statement: &statement)
+        defer { sqlite3_finalize(statement) }
+
+        while sqlite3_step(statement) == SQLITE_ROW {
+            rows.append(
+                FileRow(
+                    identity: columnText(statement, 0),
+                    bookmark: columnBlob(statement, 1),
+                    lastKnownPath: columnText(statement, 2),
+                    name: columnText(statement, 3),
+                    isDirectory: sqlite3_column_int(statement, 4) != 0,
+                    size: columnInt64Optional(statement, 5)
+                )
+            )
+        }
+
+        return rows
+    }
+
+    private static func computeIdentity(for url: URL) -> String? {
+        guard let values = try? url.resourceValues(forKeys: [.fileResourceIdentifierKey, .volumeIdentifierKey]) else {
+            return nil
+        }
+        return identity(for: url, resourceValues: values)
+    }
+
+    private static func nameAndSize(for url: URL) -> (name: String, size: Int64?) {
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
+        return (url.lastPathComponent, size)
+    }
+
     private func openDatabase() throws {
         if sqlite3_open(dbURL.path, &db) != SQLITE_OK {
             throw StoreError.sqlite(message: lastErrorMessage)
@@ -382,10 +577,14 @@ final class MetadataStore: ObservableObject {
                 last_known_path TEXT NOT NULL,
                 name TEXT NOT NULL,
                 is_directory INTEGER NOT NULL,
+                size INTEGER,
                 updated_at REAL NOT NULL
             )
             """
         )
+
+        // Migrazione incrementale per DB creati prima dell'aggiunta della colonna size.
+        try addColumnIfMissing(table: "files", column: "size", definition: "INTEGER")
 
         try execute(
             """
@@ -560,6 +759,7 @@ final class MetadataStore: ObservableObject {
 private enum SQLiteBinding {
     case text(String)
     case int(Int)
+    case intOptional(Int?)
     case real(Double)
     case blob(Data?)
 }
@@ -621,6 +821,12 @@ private extension MetadataStore {
                 result = sqlite3_bind_text(statement, position, value, -1, SQLITE_TRANSIENT)
             case .int(let value):
                 result = sqlite3_bind_int(statement, position, Int32(value))
+            case .intOptional(let value):
+                if let value {
+                    result = sqlite3_bind_int64(statement, position, Int64(value))
+                } else {
+                    result = sqlite3_bind_null(statement, position)
+                }
             case .real(let value):
                 result = sqlite3_bind_double(statement, position, value)
             case .blob(let data):
@@ -642,6 +848,37 @@ private extension MetadataStore {
     func columnText(_ statement: OpaquePointer?, _ index: Int32) -> String {
         guard let text = sqlite3_column_text(statement, index) else { return "" }
         return String(cString: text)
+    }
+
+    func columnBlob(_ statement: OpaquePointer?, _ index: Int32) -> Data? {
+        guard let pointer = sqlite3_column_blob(statement, index) else { return nil }
+        let length = sqlite3_column_bytes(statement, index)
+        guard length > 0 else { return nil }
+        return Data(bytes: pointer, count: Int(length))
+    }
+
+    func columnInt64Optional(_ statement: OpaquePointer?, _ index: Int32) -> Int64? {
+        guard sqlite3_column_type(statement, index) != SQLITE_NULL else { return nil }
+        return sqlite3_column_int64(statement, index)
+    }
+
+    /// Aggiunge una colonna se non già presente (migrazione incrementale dello schema).
+    func addColumnIfMissing(table: String, column: String, definition: String) throws {
+        var statement: OpaquePointer?
+        try prepare("PRAGMA table_info(\(table))", statement: &statement)
+        defer { sqlite3_finalize(statement) }
+
+        var exists = false
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if columnText(statement, 1) == column {
+                exists = true
+                break
+            }
+        }
+
+        if !exists {
+            try execute("ALTER TABLE \(table) ADD COLUMN \(column) \(definition)")
+        }
     }
 
     func deleteValuesNotInOptions(fieldID: String, allowedLabels: Set<String>) throws {

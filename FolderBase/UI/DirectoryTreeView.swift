@@ -111,8 +111,8 @@ private struct DirectoryNodeView: View {
                 .fill(isSelected ? Color.accentColor.opacity(0.15) : (isDropTargeted ? Color.accentColor.opacity(0.10) : Color.clear))
         )
         .contentShape(Rectangle())
-        .dropDestination(for: String.self) { paths, _ in
-            onMoveItems(paths, url)
+        .dropDestination(for: URL.self) { urls, _ in
+            onMoveItems(urls.map(\.path), url)
             return true
         } isTargeted: { targeted in
             isDropTargeted = targeted

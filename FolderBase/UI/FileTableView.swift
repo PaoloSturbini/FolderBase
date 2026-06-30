@@ -19,10 +19,15 @@ struct FileTableView: View {
     let trashItems: ([FileItem]) -> Void
     let isLoading: Bool
     let contentFontSize: Double
+    let templates: [MetadataTemplate]
+    let applyTemplate: (MetadataTemplate) -> Void
 
     @State private var isAddingField = false
     @State private var fieldPendingEdit: MetadataField?
     @State private var itemPendingRename: FileItem?
+    @State private var editingItemID: FileItem.ID?
+    @State private var editingName: String = ""
+    @FocusState private var nameFieldFocused: Bool
     @State private var quickLookItem: FileItem?
     @State private var isBulkEditing = false
     @State private var tableSortOrder: [FileItemSortComparator] = []
@@ -33,6 +38,8 @@ struct FileTableView: View {
     @State private var boardFieldID: String?
     @State private var columnCustomization = TableColumnCustomization<FileItem>()
     @AppStorage("columnCustomization") private var columnCustomizationData = Data()
+    @State private var hiddenColumnIDs: Set<String> = []
+    @AppStorage("hiddenColumns") private var hiddenColumnsData = Data()
 
     private enum ViewMode: String, CaseIterable, Identifiable {
         case table
@@ -162,6 +169,10 @@ struct FileTableView: View {
             }
             .help("Cartella superiore")
 
+            if metadataFields.isEmpty {
+                templateMenu
+            }
+
             Divider()
                 .frame(height: 20)
 
@@ -169,7 +180,8 @@ struct FileTableView: View {
                 .foregroundStyle(.secondary)
 
             Text(selectedFolderURL?.path ?? "")
-                .font(.system(.body, design: .monospaced))
+                .font(.system(size: contentFontSize))
+                .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .textSelection(.enabled)
@@ -252,7 +264,7 @@ struct FileTableView: View {
                 .help("Tabella o board Kanban")
             }
 
-            filtersMenu
+            columnsMenu
 
             Button {
                 tableSortOrder = []
@@ -270,8 +282,6 @@ struct FileTableView: View {
             }
             .help("Aggiungi colonna metadata")
 
-            columnsMenu
-
             Button(action: exportCSV) {
                 Label("Esporta CSV", systemImage: "square.and.arrow.up")
             }
@@ -281,39 +291,65 @@ struct FileTableView: View {
         }
     }
 
-    private var filtersMenu: some View {
+    /// Menù unico di gestione colonne: per ogni colonna un sotto-menù con mostra/nascondi e,
+    /// per le colonne aggiunte (metadata), anche Rinomina ed Elimina. Slegato dalle righe,
+    /// quindi nessuna ambiguità con le azioni sui file.
+    private var columnsMenu: some View {
         Menu {
-            if optionFields.isEmpty {
-                Text("Nessuna colonna filtrabile")
-            } else {
-                ForEach(optionFields) { field in
-                    Menu(field.name) {
-                        ForEach(field.options) { option in
-                            Button {
-                                toggleFilter(fieldID: field.id, label: option.label)
-                            } label: {
-                                if isFilterActive(fieldID: field.id, label: option.label) {
-                                    Label(option.label, systemImage: "checkmark")
-                                } else {
-                                    Text(option.label)
-                                }
-                            }
-                        }
-                    }
-                }
+            ForEach(allColumns) { column in
+                columnSubmenu(column)
+            }
 
-                if !optionFilters.isEmpty {
-                    Divider()
-                    Button("Rimuovi tutti i filtri", role: .destructive) {
-                        optionFilters = [:]
-                    }
+            if !hiddenColumnIDs.isEmpty {
+                Divider()
+                Button("Mostra tutte le colonne") {
+                    hiddenColumnIDs = []
                 }
             }
         } label: {
-            Label("Filtri", systemImage: optionFilters.isEmpty ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
+            Label("Colonne", systemImage: "tablecells")
         }
         .labelStyle(.iconOnly)
-        .help("Filtra per valore")
+        .help("Mostra, nascondi o gestisci le colonne")
+    }
+
+    @ViewBuilder
+    private func columnSubmenu(_ column: ColumnDescriptor) -> some View {
+        if column.id == "name" {
+            Button {
+            } label: {
+                Label("Nome (sempre visibile)", systemImage: "checkmark")
+            }
+            .disabled(true)
+        } else {
+            Menu(column.title) {
+                let isHidden = hiddenColumnIDs.contains(column.id)
+                Button {
+                    toggleColumnVisibility(column.id)
+                } label: {
+                    Label(isHidden ? "Mostra colonna" : "Nascondi colonna", systemImage: isHidden ? "eye" : "eye.slash")
+                }
+
+                if case .metadata(let field) = column.kind {
+                    Divider()
+
+                    Button {
+                        fieldPendingEdit = field
+                    } label: {
+                        Label("Rinomina…", systemImage: "pencil")
+                    }
+
+                    Button(role: .destructive) {
+                        if let selectedFolderURL {
+                            metadataStore.removeField(folderURL: selectedFolderURL, field: field)
+                            hiddenColumnIDs.remove(field.id)
+                        }
+                    } label: {
+                        Label("Elimina colonna", systemImage: "trash")
+                    }
+                }
+            }
+        }
     }
 
     private var activeFiltersBar: some View {
@@ -364,48 +400,34 @@ struct FileTableView: View {
         }
     }
 
-    private var columnsMenu: some View {
+    /// Pulsante (in alto a sinistra) per applicare un template a una cartella priva di
+    /// struttura FolderBase. Appare solo quando non ci sono ancora colonne metadata.
+    private var templateMenu: some View {
         Menu {
-            if metadataFields.isEmpty {
-                Text("Nessuna colonna metadata")
+            if templates.isEmpty {
+                Text("Nessun template — creane uno in Configurazione")
             } else {
-                Section("Modifica colonna") {
-                    ForEach(metadataFields) { field in
+                Section("Applica template") {
+                    ForEach(templates) { template in
                         Button {
-                            fieldPendingEdit = field
+                            applyTemplate(template)
                         } label: {
-                            Label(field.name, systemImage: "pencil")
-                        }
-                    }
-                }
-
-                Section("Elimina colonna") {
-                    ForEach(metadataFields) { field in
-                        Button(role: .destructive) {
-                            if let selectedFolderURL {
-                                metadataStore.removeField(folderURL: selectedFolderURL, field: field)
-                            }
-                        } label: {
-                            Label(field.name, systemImage: "trash")
+                            Label("\(template.name) (\(template.fields.count) colonne)", systemImage: "rectangle.stack")
                         }
                     }
                 }
             }
         } label: {
-            Label("Colonne", systemImage: "slider.horizontal.3")
+            Label("Applica template", systemImage: "rectangle.stack.badge.plus")
         }
         .labelStyle(.iconOnly)
-        .help("Gestisci colonne metadata")
+        .help("Genera le colonne di questa cartella da un template")
     }
 
     // MARK: - Data shaping
 
     private var metadataFields: [MetadataField] {
         metadataStore.fields(for: selectedFolderURL)
-    }
-
-    private var optionFields: [MetadataField] {
-        metadataFields.filter { $0.kind.usesOptions }
     }
 
     private var hasKanbanField: Bool {
@@ -465,7 +487,8 @@ struct FileTableView: View {
         items.filter { selection.contains($0.id) }
     }
 
-    private var columns: [ColumnDescriptor] {
+    /// Tutte le colonne (standard + metadata), comprese quelle nascoste.
+    private var allColumns: [ColumnDescriptor] {
         var result: [ColumnDescriptor] = [
             ColumnDescriptor(id: "name", title: "Nome", kind: .name, minWidth: 160, idealWidth: 320),
             ColumnDescriptor(id: "size", title: "Dimensioni", kind: .size, minWidth: 80, idealWidth: 110),
@@ -479,8 +502,8 @@ struct FileTableView: View {
                     id: field.id,
                     title: field.name,
                     kind: .metadata(field),
-                    minWidth: 90,
-                    idealWidth: width(for: field)
+                    minWidth: minWidth(for: field),
+                    idealWidth: idealWidth(for: field)
                 )
             )
         }
@@ -488,15 +511,28 @@ struct FileTableView: View {
         return result
     }
 
+    /// La colonna Nome non è mai nascondibile (come nel Finder).
+    private var hideableColumns: [ColumnDescriptor] {
+        allColumns.filter { $0.id != "name" }
+    }
+
+    /// Le colonne effettivamente mostrate in tabella (escluse quelle nascoste dall'utente).
+    private var visibleColumns: [ColumnDescriptor] {
+        allColumns.filter { $0.id == "name" || !hiddenColumnIDs.contains($0.id) }
+    }
+
     private var table: some View {
         let index = metadataIndex
         return Table(visibleItems, selection: $selection, sortOrder: $tableSortOrder, columnCustomization: $columnCustomization) {
-            TableColumnForEach(columns) { column in
+            TableColumnForEach(visibleColumns) { column in
                 TableColumn(column.title, sortUsing: sortComparator(for: column, index: index)) { item in
                     cell(for: item, column: column)
                 }
                 .width(min: column.minWidth, ideal: column.idealWidth)
                 .customizationID(column.id)
+                // La visibilità è gestita da noi (menù "Colonne"): disattiviamo quella nativa
+                // così il menù di sistema sull'header non mostra più "Nascondi/Mostra".
+                .disabledCustomizationBehavior(.visibility)
             }
         }
         .font(.system(size: contentFontSize))
@@ -507,9 +543,15 @@ struct FileTableView: View {
                 openItem(item)
             }
         }
-        .onAppear(perform: restoreColumnCustomization)
+        .onAppear {
+            restoreColumnCustomization()
+            restoreHiddenColumns()
+        }
         .onChange(of: columnCustomization) {
             persistColumnCustomization()
+        }
+        .onChange(of: hiddenColumnIDs) {
+            persistHiddenColumns()
         }
     }
 
@@ -537,6 +579,13 @@ struct FileTableView: View {
             }
 
             Divider()
+
+            Button {
+                copyToPasteboard([single])
+            } label: {
+                Label("Copia", systemImage: "doc.on.doc")
+            }
+            .keyboardShortcut("c", modifiers: .command)
 
             Button {
                 itemPendingRename = single
@@ -569,6 +618,13 @@ struct FileTableView: View {
             }
         } else if !targets.isEmpty {
             Button {
+                copyToPasteboard(targets)
+            } label: {
+                Label("Copia (\(targets.count))", systemImage: "doc.on.doc")
+            }
+            .keyboardShortcut("c", modifiers: .command)
+
+            Button {
                 revealInFinder(targets)
             } label: {
                 Label("Mostra nel Finder", systemImage: "magnifyingglass")
@@ -594,14 +650,42 @@ struct FileTableView: View {
     }
 
     private func restoreColumnCustomization() {
-        guard !columnCustomizationData.isEmpty,
-              let decoded = try? JSONDecoder().decode(TableColumnCustomization<FileItem>.self, from: columnCustomizationData) else { return }
-        columnCustomization = decoded
+        if !columnCustomizationData.isEmpty,
+           let decoded = try? JSONDecoder().decode(TableColumnCustomization<FileItem>.self, from: columnCustomizationData) {
+            columnCustomization = decoded
+        }
+
+        // La visibilità è ora gestita da noi (menù "Colonne"): forziamo visibili tutte le
+        // colonne nella personalizzazione nativa, così quelle nascoste in passato col vecchio
+        // menù di sistema tornano visibili e non restano blottate.
+        for column in allColumns {
+            columnCustomization[visibility: column.id] = .visible
+        }
     }
 
     private func persistColumnCustomization() {
         if let data = try? JSONEncoder().encode(columnCustomization) {
             columnCustomizationData = data
+        }
+    }
+
+    private func restoreHiddenColumns() {
+        guard !hiddenColumnsData.isEmpty,
+              let decoded = try? JSONDecoder().decode(Set<String>.self, from: hiddenColumnsData) else { return }
+        hiddenColumnIDs = decoded
+    }
+
+    private func persistHiddenColumns() {
+        if let data = try? JSONEncoder().encode(hiddenColumnIDs) {
+            hiddenColumnsData = data
+        }
+    }
+
+    private func toggleColumnVisibility(_ id: String) {
+        if hiddenColumnIDs.contains(id) {
+            hiddenColumnIDs.remove(id)
+        } else {
+            hiddenColumnIDs.insert(id)
         }
     }
 
@@ -638,34 +722,71 @@ struct FileTableView: View {
         }
     }
 
-    /// Stessa cella (testo semplice) per file e cartelle: niente Button, così l'altezza
-    /// riga è identica ovunque ed è il percorso di rendering più leggero/nativo.
-    /// Le cartelle si aprono con clic singolo (tap gesture, non altera il layout);
-    /// i file con doppio clic / Invio (azione primaria della Table).
+    /// Stessa cella (icona reale + nome) per file e cartelle, altezza riga uniforme.
+    /// Clic singolo sul nome → rinomina sul posto (TextField in linea); doppio clic →
+    /// apre l'elemento (cartella: entra nella sottocartella; file: app predefinita).
+    /// Durante la modifica niente tap/drag, così i clic vanno al campo di testo.
     @ViewBuilder
     private func nameCell(_ item: FileItem) -> some View {
         let label = nameLabel(item)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
-            .help(item.isFolder ? "Apri sottocartella" : "Apri con l'app predefinita")
-            .draggable(item.url.path)
 
-        if item.isFolder {
-            // Clic singolo su un punto qualsiasi della cella nome → entra nella sottocartella.
-            label.onTapGesture { openItem(item) }
+        if editingItemID == item.id {
+            label
         } else {
             label
+                .help(item.isFolder ? "Doppio clic per aprire la cartella · clic singolo per rinominare" : "Doppio clic per aprire con l'app predefinita · clic singolo per rinominare")
+                .draggable(item.url)
+                .onTapGesture(count: 2) { openItem(item) }
+                .onTapGesture(count: 1) { beginRename(item) }
         }
     }
 
+    @ViewBuilder
     private func nameLabel(_ item: FileItem) -> some View {
+        let iconSide = max(contentFontSize + 3, 16)
         HStack(spacing: 8) {
-            Image(systemName: item.isFolder ? "folder.fill" : "doc.fill")
-                .foregroundStyle(item.isFolder ? .blue : .secondary)
-            Text(item.name)
-                .lineLimit(1)
+            Image(nsImage: FileIconProvider.icon(for: item))
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: iconSide, height: iconSide)
+
+            if editingItemID == item.id {
+                TextField("Nome", text: $editingName)
+                    .textFieldStyle(.plain)
+                    .focused($nameFieldFocused)
+                    .onSubmit { commitRename(item) }
+                    .onExitCommand { cancelRename() }
+                    .onChange(of: nameFieldFocused) { _, focused in
+                        if !focused { commitRename(item) }
+                    }
+            } else {
+                Text(item.name)
+                    .lineLimit(1)
+            }
+
             Spacer(minLength: 0)
         }
+    }
+
+    private func beginRename(_ item: FileItem) {
+        editingName = item.name
+        editingItemID = item.id
+        nameFieldFocused = true
+    }
+
+    private func commitRename(_ item: FileItem) {
+        guard editingItemID == item.id else { return }
+        editingItemID = nil
+        let trimmed = editingName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty, trimmed != item.name {
+            renameItem(item, trimmed)
+        }
+    }
+
+    private func cancelRename() {
+        editingItemID = nil
     }
 
     @ViewBuilder
@@ -790,14 +911,20 @@ struct FileTableView: View {
         }
     }
 
-    private func isFilterActive(fieldID: String, label: String) -> Bool {
-        optionFilters[fieldID]?.contains(label) ?? false
-    }
-
     // MARK: - Actions
 
     private func revealInFinder(_ items: [FileItem]) {
         NSWorkspace.shared.activateFileViewerSelecting(items.map(\.url))
+    }
+
+    /// Copia gli elementi selezionati negli appunti come fa il Finder: scrive gli URL dei
+    /// file, così un Incolla (⌘V) nel Finder o in un'altra app crea copie reali dei file.
+    private func copyToPasteboard(_ items: [FileItem]) {
+        let urls = items.map(\.url) as [NSURL]
+        guard !urls.isEmpty else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.writeObjects(urls)
     }
 
     private func exportCSV() {
@@ -828,18 +955,35 @@ struct FileTableView: View {
         return "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
     }
 
-    private func width(for field: MetadataField) -> CGFloat {
+    /// Larghezza iniziale "standard" di una colonna appena creata: minima per il tipo di
+    /// dato, ma ampia (~60 caratteri) per le note libere.
+    private func idealWidth(for field: MetadataField) -> CGFloat {
         switch field.kind {
         case .text:
-            return 240
+            return 420   // ~60 caratteri a font 13
         case .number:
-            return 110
+            return 100
         case .date:
             return 140
         case .kanban, .select:
             return 150
         case .link:
-            return 320
+            return 260
+        }
+    }
+
+    private func minWidth(for field: MetadataField) -> CGFloat {
+        switch field.kind {
+        case .text:
+            return 240
+        case .number:
+            return 70
+        case .date:
+            return 120
+        case .kanban, .select:
+            return 110
+        case .link:
+            return 160
         }
     }
 
@@ -1081,7 +1225,8 @@ private struct NumberMetadataCell: View {
     @Binding var text: String
 
     var body: some View {
-        TextField("0", text: $text)
+        // Nessun placeholder: una cella vuota appena creata non mostra nulla.
+        TextField("", text: $text)
             .textFieldStyle(.plain)
             .multilineTextAlignment(.trailing)
             .monospacedDigit()
@@ -1101,14 +1246,14 @@ private struct DateMetadataCell: View {
     var body: some View {
         HStack(spacing: 4) {
             if text.isEmpty {
-                Button {
-                    text = MetadataValueFormatter.string(from: Date())
-                } label: {
-                    Label("Imposta data", systemImage: "calendar.badge.plus")
-                        .labelStyle(.iconOnly)
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.borderless)
+                // Cella vuota appena creata: non mostra nulla. Un clic imposta la data odierna
+                // e fa apparire il selettore.
+                Color.clear
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        text = MetadataValueFormatter.string(from: Date())
+                    }
             } else {
                 DatePicker("", selection: dateBinding, displayedComponents: .date)
                     .labelsHidden()
@@ -1122,28 +1267,8 @@ private struct DateMetadataCell: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Rimuovi data")
-            }
-            Spacer(minLength: 0)
-        }
-    }
-}
 
-private struct ColorSwatchLabel: View {
-    let color: MetadataTagColor
-    var showsTitle = true
-
-    var body: some View {
-        HStack(spacing: 6) {
-            RoundedRectangle(cornerRadius: 3)
-                .fill(color.swiftUIColor)
-                .frame(width: 16, height: 16)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 3)
-                        .stroke(.secondary.opacity(0.25), lineWidth: 1)
-                }
-
-            if showsTitle {
-                Text(color.title)
+                Spacer(minLength: 0)
             }
         }
     }
@@ -1177,200 +1302,6 @@ extension MetadataTagColor {
             return .black
         default:
             return .white
-        }
-    }
-}
-
-private struct MetadataFieldEditorView: View {
-    let title: String
-    var save: (String, MetadataFieldKind, [MetadataSelectOption]) -> Void
-    var cancel: () -> Void
-
-    @State private var name = ""
-    @State private var kind: MetadataFieldKind = .text
-    @State private var newOptionLabel = ""
-    @State private var newOptionColor: MetadataTagColor = .blue
-    @State private var options: [MetadataSelectOption] = []
-
-    init(title: String, field: MetadataField? = nil, save: @escaping (String, MetadataFieldKind, [MetadataSelectOption]) -> Void, cancel: @escaping () -> Void) {
-        self.title = title
-        self.save = save
-        self.cancel = cancel
-        _name = State(initialValue: field?.name ?? "")
-        _kind = State(initialValue: field?.kind ?? .text)
-        _options = State(initialValue: field?.options ?? [])
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(title)
-                .font(.headline)
-
-            TextField("Nome colonna", text: $name)
-
-            Picker("Tipo", selection: $kind) {
-                ForEach(MetadataFieldKind.allCases) { kind in
-                    Text(kind.rawValue).tag(kind)
-                }
-            }
-
-            if kind.usesOptions {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Valori")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    GroupBox {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Nuovo stato")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-
-                            HStack(spacing: 8) {
-                                TextField("Nome stato", text: $newOptionLabel)
-                                    .frame(minWidth: 260)
-                                    .onSubmit {
-                                        addOption()
-                                    }
-
-                                Picker("Colore", selection: $newOptionColor) {
-                                    ForEach(MetadataTagColor.allCases) { color in
-                                        ColorSwatchLabel(color: color)
-                                            .tag(color)
-                                    }
-                                }
-                                .labelsHidden()
-                                .frame(width: 150)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-
-                    if options.isEmpty {
-                        Text("Nessuno stato definito")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .padding(.vertical, 6)
-                    } else {
-                        VStack(alignment: .leading, spacing: 8) {
-                            ForEach(options) { option in
-                                HStack(spacing: 8) {
-                                    TextField("Valore", text: optionLabelBinding(option))
-                                        .frame(minWidth: 260)
-                                        .onSubmit {
-                                            normalizeOptions()
-                                        }
-
-                                    Picker("Colore", selection: optionColorBinding(option)) {
-                                        ForEach(MetadataTagColor.allCases) { color in
-                                            ColorSwatchLabel(color: color)
-                                                .tag(color)
-                                        }
-                                    }
-                                    .labelsHidden()
-                                    .frame(width: 150)
-
-                                    Button {
-                                        removeOption(option)
-                                    } label: {
-                                        Image(systemName: "minus.circle")
-                                    }
-                                    .buttonStyle(.borderless)
-                                    .foregroundStyle(.secondary)
-                                }
-                            }
-                        }
-                        .padding(.vertical, 4)
-                    }
-                }
-            }
-
-            HStack {
-                Spacer()
-
-                Button("Annulla", action: cancel)
-
-                Button(title == "Nuova colonna" ? "Aggiungi" : "Salva") {
-                    let normalizedOptions = selectableOptions
-                    options = normalizedOptions
-                    save(name, kind, normalizedOptions)
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-        }
-        .padding(20)
-        .frame(width: 460)
-        .onChange(of: kind) {
-            applyDefaultsForKind()
-        }
-    }
-
-    private var selectableOptions: [MetadataSelectOption] {
-        kind.usesOptions ? normalizedEditorOptions() : []
-    }
-
-    private func addOption() {
-        let label = newOptionLabel.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !label.isEmpty,
-              !options.contains(where: { $0.label.caseInsensitiveCompare(label) == .orderedSame }) else { return }
-
-        options.append(MetadataSelectOption(label: label, color: newOptionColor))
-        newOptionLabel = ""
-    }
-
-    private func removeOption(_ option: MetadataSelectOption) {
-        options.removeAll { $0.id == option.id }
-    }
-
-    private func normalizeOptions() {
-        options = normalizedEditorOptions()
-    }
-
-    private func normalizedEditorOptions() -> [MetadataSelectOption] {
-        var seenLabels: Set<String> = []
-        return options.compactMap { option in
-            let label = option.label.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !label.isEmpty, !seenLabels.contains(label.lowercased()) else { return nil }
-            seenLabels.insert(label.lowercased())
-            return MetadataSelectOption(id: option.id, label: label, color: option.color)
-        }
-    }
-
-    private func optionLabelBinding(_ option: MetadataSelectOption) -> Binding<String> {
-        Binding(
-            get: {
-                options.first { $0.id == option.id }?.label ?? ""
-            },
-            set: { newValue in
-                guard let index = options.firstIndex(where: { $0.id == option.id }) else { return }
-                options[index].label = newValue
-            }
-        )
-    }
-
-    private func optionColorBinding(_ option: MetadataSelectOption) -> Binding<MetadataTagColor> {
-        Binding(
-            get: {
-                options.first { $0.id == option.id }?.color ?? .gray
-            },
-            set: { newValue in
-                guard let index = options.firstIndex(where: { $0.id == option.id }) else { return }
-                options[index].color = newValue
-            }
-        )
-    }
-
-    private func applyDefaultsForKind() {
-        switch kind {
-        case .kanban:
-            options = [
-                MetadataSelectOption(label: "ToDo", color: .gray),
-                MetadataSelectOption(label: "Doing", color: .blue),
-                MetadataSelectOption(label: "Done", color: .green)
-            ]
-        case .select, .text, .link, .number, .date:
-            options = []
         }
     }
 }
