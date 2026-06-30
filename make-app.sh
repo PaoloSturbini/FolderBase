@@ -49,6 +49,17 @@ cat > "${APP}/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+# Copia le guide HTML (Italiano/Inglese) tra le risorse del bundle, così che
+# HelpService le trovi via Bundle.main e le apra nel browser.
+for help_file in FolderBase/Resources/help_it.html FolderBase/Resources/help_en.html; do
+    if [ -f "${help_file}" ]; then
+        cp "${help_file}" "${APP}/Contents/Resources/"
+        echo ">> Copiata guida $(basename "${help_file}")"
+    else
+        echo "Attenzione: ${help_file} non trovato, la guida non sara' inclusa nel bundle."
+    fi
+done
+
 if [ -f "${ICON_PNG}" ]; then
     echo ">> Genero l'icona da ${ICON_PNG}..."
     WORK="$(mktemp -d)"

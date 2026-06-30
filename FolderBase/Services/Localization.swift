@@ -90,6 +90,7 @@ enum LocalizedStrings {
         "settings.language.title": ("Lingua", "Language"),
         "settings.templates.title": ("Template", "Templates"),
         "settings.maintenance.title": ("Manutenzione", "Maintenance"),
+        "settings.help.title": ("Aiuto", "Help"),
         "settings.support.title": ("Info su FolderBase", "About FolderBase"),
 
         "settings.folders.subtitle": ("Cartelle monitorate, creazione elementi e recenti", "Tracked folders, item creation and recents"),
@@ -97,7 +98,14 @@ enum LocalizedStrings {
         "settings.language.subtitle": ("Lingua dell'interfaccia", "Interface language"),
         "settings.templates.subtitle": ("Insiemi di colonne riutilizzabili", "Reusable sets of columns"),
         "settings.maintenance.subtitle": ("Sincronizzazione e pulizia dei metadata", "Metadata sync and cleanup"),
+        "settings.help.subtitle": ("Guida all'uso di FolderBase", "FolderBase user guide"),
         "settings.support.subtitle": ("Versione, informazioni e supporto", "Version, information and support"),
+
+        // MARK: Aiuto
+        "help.card": ("Guida all'uso", "User guide"),
+        "help.intro": ("Apri la guida completa di FolderBase nel tuo browser. La pagina viene mostrata nella lingua attualmente selezionata.", "Open the full FolderBase guide in your browser. The page is shown in the currently selected language."),
+        "help.open": ("Apri la guida nel browser", "Open the guide in the browser"),
+        "help.note": ("La guida si apre come pagina web nel browser predefinito del sistema.", "The guide opens as a web page in your system's default browser."),
 
         // MARK: Lingua
         "language.card": ("Lingua dell'interfaccia", "Interface language"),

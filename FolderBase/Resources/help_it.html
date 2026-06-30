@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FolderBase — Guida all'uso</title>
+<style>
+  :root {
+    --bg: #f5f5f7;
+    --card: #ffffff;
+    --text: #1d1d1f;
+    --muted: #6e6e73;
+    --accent: #0a6cff;
+    --border: #e3e3e6;
+    --code-bg: #f0f0f3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1b1b1d;
+      --card: #262629;
+      --text: #f5f5f7;
+      --muted: #9c9ca1;
+      --accent: #4d9bff;
+      --border: #3a3a3d;
+      --code-bg: #313135;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 0 24px 80px; }
+  header.hero {
+    text-align: center;
+    padding: 56px 24px 40px;
+  }
+  header.hero h1 { font-size: 2.4rem; margin: 0 0 6px; letter-spacing: -0.5px; }
+  header.hero p { color: var(--muted); font-size: 1.1rem; margin: 0; }
+  nav.toc {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 18px 22px;
+    margin-bottom: 36px;
+  }
+  nav.toc h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 0 0 12px; }
+  nav.toc ol { margin: 0; padding-left: 20px; columns: 2; column-gap: 28px; }
+  nav.toc a { color: var(--accent); text-decoration: none; }
+  nav.toc a:hover { text-decoration: underline; }
+  section {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 24px 28px;
+    margin-bottom: 22px;
+  }
+  h2 { font-size: 1.5rem; margin: 0 0 14px; letter-spacing: -0.3px; scroll-margin-top: 20px; }
+  h3 { font-size: 1.1rem; margin: 22px 0 8px; }
+  p { margin: 0 0 12px; }
+  ul, ol.steps { margin: 0 0 12px; padding-left: 22px; }
+  li { margin-bottom: 6px; }
+  code, kbd {
+    background: var(--code-bg);
+    border-radius: 5px;
+    padding: 2px 6px;
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: 0.88em;
+  }
+  kbd { border: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 0.95rem; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.5px; }
+  .tip {
+    border-left: 3px solid var(--accent);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    padding: 12px 16px;
+    border-radius: 0 8px 8px 0;
+    margin: 14px 0;
+  }
+  .tip strong { color: var(--accent); }
+  footer { text-align: center; color: var(--muted); font-size: 0.85rem; margin-top: 40px; }
+  footer a { color: var(--accent); text-decoration: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <h1>FolderBase</h1>
+    <p>Guida all'uso · file manager <em>metadata-first</em> per macOS</p>
+  </header>
+
+  <nav class="toc">
+    <h2>Indice</h2>
+    <ol>
+      <li><a href="#cos-e">Cos'è FolderBase</a></li>
+      <li><a href="#cartelle">Aggiungere e aprire cartelle</a></li>
+      <li><a href="#navigare">Navigare tra i file</a></li>
+      <li><a href="#colonne">Colonne e metadata</a></li>
+      <li><a href="#gestire-colonne">Gestire le colonne</a></li>
+      <li><a href="#ordinare">Ordinare, cercare, filtrare</a></li>
+      <li><a href="#selezione">Selezione multipla</a></li>
+      <li><a href="#kanban">Vista Kanban</a></li>
+      <li><a href="#file">Operazioni sui file</a></li>
+      <li><a href="#template">Template</a></li>
+      <li><a href="#impostazioni">Impostazioni</a></li>
+      <li><a href="#dati">Dove finiscono i dati</a></li>
+      <li><a href="#faq">FAQ</a></li>
+    </ol>
+  </nav>
+
+  <section id="cos-e">
+    <h2>Cos'è FolderBase</h2>
+    <p>FolderBase mostra cartelle e file reali del tuo Mac in una tabella alla quale puoi aggiungere colonne personalizzate — note, numeri, date, stati Kanban, tag e link — senza mai spostare, copiare o modificare i file originali.</p>
+    <p>I metadata vivono in un database locale separato e <strong>seguono i file</strong> anche quando li rinomini o li sposti. L'idea è avvicinare l'esperienza di uno strumento tipo Notion/Airtable ai file veri del filesystem: il Finder mostra solo nome, dimensione e data; FolderBase ti lascia annotare, classificare e organizzare lo stesso contenuto con campi tuoi.</p>
+  </section>
+
+  <section id="cartelle">
+    <h2>Aggiungere e aprire una cartella</h2>
+    <ol class="steps">
+      <li>Apri <strong>Configurazione</strong> nella sidebar, vai in <strong>Cartelle</strong> e usa <strong>Aggiungi cartella</strong>. La cartella entra nell'elenco delle recenti.</li>
+      <li>All'avvio l'app riapre automaticamente l'ultima cartella usata e mostra subito l'albero.</li>
+    </ol>
+  </section>
+
+  <section id="navigare">
+    <h2>Navigare tra i file</h2>
+    <ul>
+      <li><strong>Singolo click</strong>: seleziona una riga.</li>
+      <li><strong>Doppio click</strong> (o <kbd>Invio</kbd>) sul nome di una sottocartella: ci entra, come nel Finder.</li>
+      <li>In alto trovi i pulsanti <strong>Indietro / Avanti / Su (↑)</strong> e il percorso corrente.</li>
+      <li>L'<strong>albero a sinistra</strong> parte dalla cartella selezionata: cliccando un nodo la tabella si aggiorna. Puoi <strong>trascinare file dalla tabella su una cartella dell'albero</strong> per spostarli lì.</li>
+    </ul>
+    <div class="tip"><strong>Auto-refresh.</strong> La tabella si aggiorna da sola quando aggiungi, rimuovi o rinomini file dall'esterno (Finder, terminale…).</div>
+  </section>
+
+  <section id="colonne">
+    <h2>Colonne e metadata</h2>
+    <p>Ogni tabella mostra di base <strong>Nome</strong>, <strong>Tipo</strong>, <strong>Creato</strong> e <strong>Dimensioni</strong>. Con il pulsante <strong>+ Colonna</strong> in alto a destra aggiungi colonne metadata, che valgono <strong>solo per la cartella in cui le crei</strong>.</p>
+    <table>
+      <thead><tr><th>Tipo</th><th>A cosa serve</th><th>Ordinamento</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Nota libera</strong></td><td>Testo libero, con anteprima al passaggio del mouse</td><td>Alfabetico</td></tr>
+        <tr><td><strong>Numero</strong></td><td>Valore numerico (accetta <code>.</code> e <code>,</code>)</td><td>Numerico</td></tr>
+        <tr><td><strong>Data</strong></td><td>Selettore data, mostrata in formato localizzato</td><td>Cronologico</td></tr>
+        <tr><td><strong>Kanban</strong></td><td>Stati <em>ToDo / Doing / Done</em>; abilita la vista a board</td><td>Per stato</td></tr>
+        <tr><td><strong>Select</strong></td><td>Tag a valori liberi con colore scelto</td><td>Per valore</td></tr>
+        <tr><td><strong>Link</strong></td><td>URL, path locale, markdown o wiki link <code>[[Nota]]</code></td><td>—</td></tr>
+      </tbody>
+    </table>
+    <p>I tag colorati (Select e Kanban) possono usare 8 colori. Se rinomini un'opzione, i valori già assegnati vengono aggiornati; se la elimini, viene rimossa anche dalle righe che la usavano.</p>
+    <h3>Modificare i metadata</h3>
+    <p>Scrivi direttamente nelle celle: il salvataggio è <strong>automatico</strong>. Le note di testo vengono salvate con un breve ritardo per non scrivere su disco a ogni tasto.</p>
+  </section>
+
+  <section id="gestire-colonne">
+    <h2>Gestire le colonne</h2>
+    <ul>
+      <li><strong>Ridimensiona / riordina</strong>: trascina bordi e intestazioni.</li>
+      <li><strong>Mostra / nascondi</strong> e <strong>Rinomina / Elimina</strong>: dal menù <strong>Colonne</strong> nella toolbar.</li>
+      <li>Larghezza, ordine e visibilità sono <strong>persistenti</strong> tra una sessione e l'altra.</li>
+    </ul>
+  </section>
+
+  <section id="ordinare">
+    <h2>Ordinare, cercare, filtrare</h2>
+    <ul>
+      <li>Clicca l'intestazione di una colonna per ordinare; ricliccala per invertire. I valori vuoti finiscono <strong>sempre in fondo</strong>. <strong>Ordine predefinito</strong> ripristina cartelle prima, poi per nome.</li>
+      <li>La <strong>barra di ricerca</strong> filtra per nome e per qualsiasi valore metadata.</li>
+      <li>Il menù <strong>Filtri</strong> mostra solo gli elementi con certi valori Select/Kanban; i filtri attivi appaiono come <strong>chip rimovibili</strong>.</li>
+    </ul>
+  </section>
+
+  <section id="selezione">
+    <h2>Selezione multipla e modifica in blocco</h2>
+    <p>Seleziona più righe con <kbd>Cmd</kbd>-click / <kbd>Shift</kbd>-click. Compaiono:</p>
+    <ul>
+      <li><strong>Modifica</strong> — imposta lo stesso valore metadata su tutta la selezione, in un'unica operazione.</li>
+      <li><strong>Cestina</strong> — sposta gli elementi nel Cestino.</li>
+    </ul>
+  </section>
+
+  <section id="kanban">
+    <h2>Vista Kanban (board)</h2>
+    <p>Se nella cartella esiste una colonna <strong>Kanban</strong>, l'interruttore <strong>tabella / board</strong> in alto mostra le card raggruppate per stato. <strong>Trascina una card</strong> in un'altra colonna per cambiarne lo stato.</p>
+  </section>
+
+  <section id="file">
+    <h2>Operazioni sui file</h2>
+    <p>Clic destro su un elemento per: <strong>Apri</strong>, <strong>Anteprima rapida</strong> (Quick Look), <strong>Mostra nel Finder</strong>, <strong>Rinomina</strong>, <strong>Sposta</strong>, <strong>Imposta metadata</strong>, <strong>Sposta nel Cestino</strong>.</p>
+    <ul>
+      <li>Dalla <strong>Configurazione</strong> puoi creare file vuoti e cartelle nella directory corrente.</li>
+      <li><strong>Esporta CSV</strong> salva la tabella corrente rispettando filtri e ordinamento attivi.</li>
+    </ul>
+  </section>
+
+  <section id="template">
+    <h2>Template</h2>
+    <p>Un <strong>template</strong> è un insieme riutilizzabile di colonne (nome e tipo). Lo crei e gestisci nella sezione <strong>Template</strong> della Configurazione. Quando apri una cartella ancora senza colonne FolderBase, il pulsante con l'icona dei template (in alto a sinistra) genera le colonne automaticamente dal template scelto.</p>
+  </section>
+
+  <section id="impostazioni">
+    <h2>Impostazioni (Configurazione ⚙︎)</h2>
+    <ul>
+      <li><strong>Cartelle</strong> — cartelle recenti e creazione di file/cartelle.</li>
+      <li><strong>Aspetto</strong> — tema automatico / chiaro / scuro e dimensione dei caratteri.</li>
+      <li><strong>Lingua</strong> — italiano o inglese, con effetto immediato.</li>
+      <li><strong>Template</strong> — gestione degli insiemi di colonne riutilizzabili.</li>
+      <li><strong>Manutenzione</strong> — riallineamento e pulizia dei metadata.</li>
+      <li><strong>Aiuto</strong> — questa guida.</li>
+      <li><strong>Info su FolderBase</strong> — versione e supporto.</li>
+    </ul>
+  </section>
+
+  <section id="dati">
+    <h2>Dove finiscono i dati</h2>
+    <p>Tutti i metadata e l'indice dei file stanno in un singolo database SQLite locale:</p>
+    <p><code>~/Library/Application Support/FolderBase/folderbase.sqlite</code></p>
+    <ul>
+      <li>Le <strong>cartelle osservate non vengono mai modificate</strong>: FolderBase non scrive file nascosti dentro le tue directory.</li>
+      <li>Per ripartire da zero basta cancellare quel file: verrà ricreato vuoto al successivo avvio.</li>
+      <li>I metadata sono legati all'<strong>identità del file</strong>, non al path: per questo "seguono" un file quando lo rinomini o lo sposti sullo stesso volume.</li>
+    </ul>
+  </section>
+
+  <section id="faq">
+    <h2>FAQ</h2>
+    <h3>I miei metadata sono spariti dopo aver spostato un file.</h3>
+    <p>Dovrebbero seguirlo automaticamente sullo stesso volume. Se sposti tra volumi diversi (es. un disco esterno) l'identità filesystem cambia e i metadata potrebbero non migrare: usa <strong>Manutenzione → Verifica e ripara</strong>.</p>
+    <h3>Voglio azzerare tutto.</h3>
+    <p>Chiudi l'app e cancella <code>~/Library/Application Support/FolderBase/folderbase.sqlite</code>. Le tue cartelle e i tuoi file restano intatti.</p>
+    <h3>FolderBase modifica i miei file?</h3>
+    <p>No. Legge solo nome, tipo, data e dimensione. Tutto ciò che aggiungi vive nel database separato.</p>
+  </section>
+
+  <footer>
+    FolderBase — file manager metadata-first per macOS · <a href="https://github.com/PaoloSturbini/FolderBase">Repository</a>
+  </footer>
+
+</div>
+</body>
+</html>

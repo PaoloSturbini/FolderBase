@@ -263,6 +263,8 @@ struct SidebarView: View {
                         templatesSettings
                     case .maintenance:
                         maintenanceSettings
+                    case .help:
+                        helpSettings
                     case .support:
                         supportSettings
                     }
@@ -457,6 +459,36 @@ struct SidebarView: View {
                 .padding(6)
             } label: {
                 settingsCardLabel(L("maint.autoCard"), systemImage: "trash")
+            }
+        }
+    }
+
+    private var helpSettings: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            GroupBox {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text(L("help.intro"))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Button {
+                        HelpService.openGuide(language: loc.language)
+                    } label: {
+                        Label(L("help.open"), systemImage: "safari")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+
+                    Text(L("help.note"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+            } label: {
+                settingsCardLabel(L("help.card"), systemImage: "questionmark.circle")
             }
         }
     }
@@ -778,6 +810,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     case language
     case templates
     case maintenance
+    case help
     case support
 
     var id: String { rawValue }
@@ -794,6 +827,8 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             return L("settings.templates.title")
         case .maintenance:
             return L("settings.maintenance.title")
+        case .help:
+            return L("settings.help.title")
         case .support:
             return L("settings.support.title")
         }
@@ -811,6 +846,8 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             return "rectangle.stack"
         case .maintenance:
             return "wrench.and.screwdriver"
+        case .help:
+            return "questionmark.circle"
         case .support:
             return "info.circle"
         }
@@ -828,6 +865,8 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             return L("settings.templates.subtitle")
         case .maintenance:
             return L("settings.maintenance.subtitle")
+        case .help:
+            return L("settings.help.subtitle")
         case .support:
             return L("settings.support.subtitle")
         }
