@@ -8,3 +8,4 @@ DerivedData/
 *.moved-aside
 *.xccheckout
 *.xcscmblueprint
+dist/

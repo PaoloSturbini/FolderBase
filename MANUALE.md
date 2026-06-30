@@ -20,7 +20,8 @@ Hai tre modi per avviare FolderBase, dal più rapido al più "definitivo".
 ### 2.1 Avvio diretto da terminale
 
 ```bash
-cd "/Users/paolosturbini/Documents/Sviluppo App/FolderBase"
+git clone https://github.com/PaoloSturbini/FolderBase.git
+cd FolderBase
 swift run --build-path /tmp/folderbase-run FolderBase
 ```
 
