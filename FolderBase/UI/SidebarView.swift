@@ -754,7 +754,7 @@ private struct KofiWidgetView: NSViewRepresentable {
     func updateNSView(_ webView: WKWebView, context: Context) {}
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
-        private let fallback = URL(string: "https://ko-fi.com/pst")!
+        private let target = URL(string: "https://ko-fi.com/s/d68bf91199")!
 
         // Clic sul bottone del widget: apri nel browser e annulla la navigazione interna.
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
@@ -773,7 +773,7 @@ private struct KofiWidgetView: NSViewRepresentable {
         }
 
         private func openExternally(_ url: URL?) {
-            let target = (url?.host?.contains("ko-fi.com") == true) ? url! : fallback
+            // Qualunque clic sul widget apre sempre la pagina Ko-fi dedicata.
             NSWorkspace.shared.open(target)
         }
     }
