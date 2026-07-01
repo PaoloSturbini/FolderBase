@@ -493,10 +493,10 @@ struct FileTableView: View {
     /// Tutte le colonne (standard + metadata), comprese quelle nascoste.
     private var allColumns: [ColumnDescriptor] {
         var result: [ColumnDescriptor] = [
-            ColumnDescriptor(id: "name", title: L("col.name"), kind: .name, minWidth: 160, idealWidth: 320),
-            ColumnDescriptor(id: "size", title: L("col.size"), kind: .size, minWidth: 80, idealWidth: 110),
-            ColumnDescriptor(id: "type", title: L("col.type"), kind: .type, minWidth: 90, idealWidth: 170),
-            ColumnDescriptor(id: "created", title: L("col.created"), kind: .created, minWidth: 120, idealWidth: 160)
+            ColumnDescriptor(id: "name", title: L("col.name"), kind: .name, minWidth: 80, idealWidth: 320),
+            ColumnDescriptor(id: "size", title: L("col.size"), kind: .size, minWidth: 50, idealWidth: 110),
+            ColumnDescriptor(id: "type", title: L("col.type"), kind: .type, minWidth: 50, idealWidth: 170),
+            ColumnDescriptor(id: "created", title: L("col.created"), kind: .created, minWidth: 60, idealWidth: 160)
         ]
 
         for field in metadataFields {
@@ -991,18 +991,20 @@ struct FileTableView: View {
         }
     }
 
+    /// Larghezza minima molto contenuta: la larghezza iniziale (idealWidth) resta ampia,
+    /// ma l'utente può sempre rimpicciolire ogni colonna, note comprese.
     private func minWidth(for field: MetadataField) -> CGFloat {
         switch field.kind {
         case .text:
-            return 240
+            return 50
         case .number:
-            return 70
+            return 50
         case .date:
-            return 120
+            return 60
         case .kanban, .select:
-            return 110
+            return 60
         case .link:
-            return 160
+            return 70
         }
     }
 
@@ -1227,15 +1229,15 @@ private struct NoteTextCell: View {
                 isHovering = hovering && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
             .popover(isPresented: $isHovering, arrowEdge: .bottom) {
-                ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
                     Text(text)
                         .font(.body)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(12)
+                        .lineLimit(nil)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .frame(width: 360)
-                .frame(minHeight: 80, maxHeight: 220)
+                .frame(width: 360, alignment: .leading)
+                .padding(12)
             }
     }
 }
