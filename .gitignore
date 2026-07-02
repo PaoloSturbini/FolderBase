@@ -10,3 +10,10 @@ DerivedData/
 *.xcscmblueprint
 dist/
 COME_TROVARE_E_USARE.md
+
+# Artefatti sito/landing e zip spuri
+FolderBase-site.zip
+zijiZzrm
+index.html
+assets/
+*.zip
