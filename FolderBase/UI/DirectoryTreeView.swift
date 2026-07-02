@@ -142,18 +142,32 @@ private struct DirectoryNodeView: View {
         if isExpanded { loadChildrenIfNeeded() }
     }
 
+    /// Legge le sottocartelle su un thread di background: su cartelle grandi o volumi
+    /// di rete la lettura sincrona bloccava il main thread a ogni espansione del nodo.
     private func loadChildrenIfNeeded() {
         guard !didLoad else { return }
         didLoad = true
 
-        let contents = (try? FileManager.default.contentsOfDirectory(
-            at: url,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        )) ?? []
+        let targetURL = url
+        DispatchQueue.global(qos: .userInitiated).async {
+            let contents = (try? FileManager.default.contentsOfDirectory(
+                at: targetURL,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )) ?? []
 
-        children = contents
-            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false }
-            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+            let loaded = contents
+                .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false }
+                .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+
+            DispatchQueue.main.async {
+                // Senza animazione, come il resto della navigazione dell'albero.
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    children = loaded
+                }
+            }
+        }
     }
 }

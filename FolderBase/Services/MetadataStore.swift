@@ -14,7 +14,11 @@ private struct LegacyMetadataDocument: Codable {
 
 final class MetadataStore: ObservableObject {
     @Published private(set) var fieldsByFolder: [String: [MetadataField]] = [:]
-    @Published private(set) var metadataByFileIdentity: [String: FileMetadata] = [:]
+
+    /// Non-@Published: la notifica a SwiftUI è gestita manualmente (vedi
+    /// `notifyMetadataChanged`) così le modifiche "per tasto" vengono coalizzate invece
+    /// di invalidare l'intera tabella a ogni carattere digitato.
+    private(set) var metadataByFileIdentity: [String: FileMetadata] = [:]
 
     private let dbURL: URL
     private let legacyMetadataURL: URL
@@ -29,8 +33,17 @@ final class MetadataStore: ObservableObject {
     private var pendingValues: [String: (identity: String, fieldID: String, value: String)] = [:]
     private let writeDebounce: TimeInterval = 0.4
 
+    /// Notifica posticipata a SwiftUI per i cambi metadata (vedi `notifyMetadataChanged`).
+    private var pendingChangeNotification: DispatchWorkItem?
+    private let notifyDebounce: TimeInterval = 0.2
+
     /// Identità già presenti nella tabella `files`: evita di registrare di nuovo file noti.
     private var registeredIdentities: Set<String> = []
+
+    /// Cache di `managedDirectories()`: viene chiamata a ogni navigazione (per
+    /// riconfigurare FSEvents) ma il suo contenuto cambia solo quando si registrano,
+    /// spostano o eliminano file gestiti.
+    private var managedDirectoriesCache: [String]?
 
     init(fileManager: FileManager = .default) {
         let supportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -118,7 +131,10 @@ final class MetadataStore: ObservableObject {
             ]
         )
 
-        registeredIdentities.insert(identity)
+        if !registeredIdentities.contains(identity) {
+            registeredIdentities.insert(identity)
+            invalidateManagedDirectoriesCache()
+        }
         return identity
     }
 
@@ -144,17 +160,42 @@ final class MetadataStore: ObservableObject {
         metadata(for: item).values[field.id] ?? ""
     }
 
-    /// Aggiorna subito lo stato in memoria (UI reattiva) e posticipa la scrittura su disco.
+    /// Aggiorna subito lo stato in memoria e posticipa sia la scrittura su disco sia la
+    /// notifica a SwiftUI: durante la digitazione la cella attiva resta reattiva (usa il
+    /// proprio stato locale) mentre il resto della tabella si aggiorna una sola volta.
     func update(item: FileItem, field: MetadataField, value: String) {
         ensureRegistered(item)
         setInMemoryValue(identity: item.identity, fieldID: field.id, value: value)
         scheduleWrite(identity: item.identity, fieldID: field.id, value: value)
+        notifyMetadataChanged()
+    }
+
+    /// Notifica SwiftUI che i metadata sono cambiati. Debounced nei percorsi "per tasto"
+    /// (una sola invalidazione per pausa di digitazione invece di una per carattere);
+    /// immediata per i cambi strutturali (bulk, reload dal DB, riconciliazioni).
+    private func notifyMetadataChanged(immediate: Bool = false) {
+        pendingChangeNotification?.cancel()
+        pendingChangeNotification = nil
+
+        if immediate {
+            objectWillChange.send()
+            return
+        }
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingChangeNotification = nil
+            self.objectWillChange.send()
+        }
+        pendingChangeNotification = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + notifyDebounce, execute: work)
     }
 
     /// Assegna lo stesso valore a più elementi in un'unica transazione (modifica in blocco).
     func updateBulk(items: [FileItem], field: MetadataField, value: String) {
         guard !items.isEmpty else { return }
 
+        notifyMetadataChanged(immediate: true)
         for item in items {
             ensureRegistered(item)
             setInMemoryValue(identity: item.identity, fieldID: field.id, value: value)
@@ -261,16 +302,52 @@ final class MetadataStore: ObservableObject {
                 """,
                 bindings: [.text(field.id), .text(folderIdentity), .text(field.name), .text(field.kind.rawValue), .text(optionsJSON), .text(folderIdentity)]
             )
-            refreshPublishedState()
+            // Aggiornamento incrementale: niente ricarica completa del DB per un solo campo.
+            fieldsByFolder[folderIdentity, default: []].append(field)
         } catch {
             assertionFailure("Failed to add metadata field: \(error)")
         }
     }
 
     /// Applica un template a una cartella creando una colonna per ogni campo definito.
+    /// Un'unica transazione e un solo aggiornamento dello stato pubblicato: prima ogni
+    /// campo faceva registerFile + INSERT + ricarica completa del DB.
     func applyTemplate(_ template: MetadataTemplate, to folderURL: URL) {
-        for field in template.fields {
-            addField(folderURL: folderURL, name: field.name, kind: field.kind, options: field.options)
+        guard !template.fields.isEmpty else { return }
+
+        do {
+            let folderIdentity = try registerFile(at: folderURL)
+            var appended: [MetadataField] = []
+
+            try execute("BEGIN IMMEDIATE TRANSACTION")
+            for templateField in template.fields {
+                let trimmedName = templateField.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmedName.isEmpty else { continue }
+
+                let field = MetadataField(
+                    id: UUID().uuidString,
+                    name: trimmedName,
+                    kind: templateField.kind,
+                    options: normalizedOptions(for: templateField.kind, options: templateField.options)
+                )
+                let optionsData = try JSONEncoder().encode(field.options)
+                let optionsJSON = String(data: optionsData, encoding: .utf8) ?? "[]"
+
+                try execute(
+                    """
+                    INSERT INTO metadata_fields (id, folder_identity, name, kind, options_json, position)
+                    VALUES (?, ?, ?, ?, ?, COALESCE((SELECT MAX(position) + 1 FROM metadata_fields WHERE folder_identity = ?), 0))
+                    """,
+                    bindings: [.text(field.id), .text(folderIdentity), .text(field.name), .text(field.kind.rawValue), .text(optionsJSON), .text(folderIdentity)]
+                )
+                appended.append(field)
+            }
+            try execute("COMMIT")
+
+            fieldsByFolder[folderIdentity, default: []].append(contentsOf: appended)
+        } catch {
+            try? execute("ROLLBACK")
+            assertionFailure("Failed to apply template: \(error)")
         }
     }
 
@@ -282,7 +359,14 @@ final class MetadataStore: ObservableObject {
                 bindings: [.text(field.id), .text(folderIdentity)]
             )
             try execute("DELETE FROM metadata_values WHERE field_id = ?", bindings: [.text(field.id)])
-            refreshPublishedState()
+
+            // Aggiornamento incrementale dello stato in memoria.
+            fieldsByFolder[folderIdentity]?.removeAll { $0.id == field.id }
+            for (identity, var metadata) in metadataByFileIdentity where metadata.values[field.id] != nil {
+                metadata.values.removeValue(forKey: field.id)
+                metadataByFileIdentity[identity] = metadata
+            }
+            notifyMetadataChanged(immediate: true)
         } catch {
             assertionFailure("Failed to remove metadata field: \(error)")
         }
@@ -332,12 +416,13 @@ final class MetadataStore: ObservableObject {
     }
 
     @discardableResult
-    func reconcileMovedItem(previousIdentity: String, newURL: URL) throws -> String {
-        // La cache path→identity può contenere voci stale dopo uno spostamento/rinomina.
+    func reconcileMovedItem(previousIdentity: String, newURL: URL, refreshingState: Bool = true) throws -> String {
+        // Le cache possono contenere voci stale dopo uno spostamento/rinomina.
         identityCacheByPath.removeAll()
+        invalidateManagedDirectoriesCache()
         let newIdentity = try registerFile(at: newURL)
         guard previousIdentity != newIdentity else {
-            refreshPublishedState()
+            if refreshingState { refreshPublishedState() }
             return newIdentity
         }
 
@@ -373,7 +458,7 @@ final class MetadataStore: ObservableObject {
         )
         try execute("DELETE FROM metadata_fields WHERE folder_identity = ?", bindings: [.text(previousIdentity)])
 
-        refreshPublishedState()
+        if refreshingState { refreshPublishedState() }
         return newIdentity
     }
 
@@ -431,32 +516,59 @@ final class MetadataStore: ObservableObject {
         return .missing
     }
 
-    /// Riallinea il DB al filesystem: aggiorna percorsi/nomi/bookmark dei file spostati o
-    /// rinominati altrove, e conta quelli non più trovabili (orfani). Non cancella nulla.
-    @discardableResult
-    func reconcileManagedFiles() -> (relocated: Int, missing: Int) {
-        let rows = (try? loadFileRows()) ?? []
-        var relocated = 0
-        var missing = 0
+    /// Evita riconciliazioni sovrapposte (es. raffiche di eventi FSEvents).
+    private var isReconciling = false
 
-        for row in rows {
-            switch resolve(row) {
-            case .present(let url):
-                if url.path != row.lastKnownPath {
-                    relocated += 1
-                }
-                updateTracking(row, to: url)
-            case .relocated(let url):
-                _ = try? reconcileMovedItem(previousIdentity: row.identity, newURL: url)
-                relocated += 1
-            case .missing:
-                missing += 1
-            }
+    /// Riallinea il DB al filesystem: aggiorna percorsi/nomi/bookmark dei file spostati o
+    /// rinominati altrove, e raccoglie quelli non più trovabili (orfani). Non cancella nulla.
+    ///
+    /// La parte costosa (risoluzione bookmark + stat sul filesystem per ogni file gestito)
+    /// gira su un thread di background: prima bloccava il main thread all'avvio e a ogni
+    /// evento FSEvents. Le letture/scritture del DB restano sul main thread.
+    func reconcileManagedFiles(completion: @escaping (_ relocated: Int, _ missingIdentities: [String]) -> Void) {
+        guard !isReconciling else {
+            completion(0, [])
+            return
         }
 
-        identityCacheByPath.removeAll()
-        refreshPublishedState()
-        return (relocated, missing)
+        let rows = (try? loadFileRows()) ?? []
+        guard !rows.isEmpty else {
+            completion(0, [])
+            return
+        }
+
+        isReconciling = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            // `resolve` è puro filesystem (bookmark, stat): nessuno stato del DB toccato.
+            let resolutions = rows.map { row in (row, self.resolve(row)) }
+
+            DispatchQueue.main.async {
+                var relocated = 0
+                var missingIdentities: [String] = []
+
+                for (row, resolution) in resolutions {
+                    switch resolution {
+                    case .present(let url):
+                        if url.path != row.lastKnownPath {
+                            relocated += 1
+                        }
+                        self.updateTracking(row, to: url)
+                    case .relocated(let url):
+                        // La refresh completa avviene una sola volta a fine ciclo.
+                        _ = try? self.reconcileMovedItem(previousIdentity: row.identity, newURL: url, refreshingState: false)
+                        relocated += 1
+                    case .missing:
+                        missingIdentities.append(row.identity)
+                    }
+                }
+
+                self.identityCacheByPath.removeAll()
+                self.refreshPublishedState()
+                self.isReconciling = false
+                completion(relocated, missingIdentities)
+            }
+        }
     }
 
     /// Identità delle righe il cui file non è più trovabile (metadata orfani).
@@ -476,7 +588,13 @@ final class MetadataStore: ObservableObject {
     /// Rimuove le righe orfane (cancellazione a cascata di campi/valori collegati).
     @discardableResult
     func purgeOrphans() -> Int {
-        let identities = orphanedIdentities()
+        purge(identities: orphanedIdentities())
+    }
+
+    /// Rimuove le righe indicate. Usata anche dopo la riconciliazione async, che conosce
+    /// già gli orfani: evita di ri-risolvere tutti i file una seconda volta.
+    @discardableResult
+    func purge(identities: [String]) -> Int {
         guard !identities.isEmpty else { return 0 }
 
         do {
@@ -491,23 +609,37 @@ final class MetadataStore: ObservableObject {
             assertionFailure("Failed to purge orphans: \(error)")
         }
 
+        invalidateManagedDirectoriesCache()
         refreshPublishedState()
         return identities.count
     }
 
     /// Cartelle da osservare con FSEvents: per ogni elemento gestito la sua cartella
-    /// (se cartella, sé stessa; se file, la cartella che lo contiene).
+    /// (se cartella, sé stessa; se file, la cartella che lo contiene). Il risultato è
+    /// cachato: senza cache ogni navigazione rifarebbe una scansione completa del DB.
     func managedDirectories() -> [String] {
+        if let cached = managedDirectoriesCache { return cached }
+
         let rows = (try? loadFileRows()) ?? []
         var dirs: Set<String> = []
         for row in rows {
             let url = URL(fileURLWithPath: row.lastKnownPath)
             dirs.insert(row.isDirectory ? url.path : url.deletingLastPathComponent().path)
         }
-        return Array(dirs)
+
+        let result = Array(dirs)
+        managedDirectoriesCache = result
+        return result
+    }
+
+    private func invalidateManagedDirectoriesCache() {
+        managedDirectoriesCache = nil
     }
 
     private func updateTracking(_ row: FileRow, to url: URL) {
+        if url.path != row.lastKnownPath {
+            invalidateManagedDirectoriesCache()
+        }
         let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize)
         let bookmark = row.bookmark ?? (try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil))
         try? execute(
@@ -564,6 +696,9 @@ final class MetadataStore: ObservableObject {
 
         try execute("PRAGMA foreign_keys = ON")
         try execute("PRAGMA journal_mode = WAL")
+        // Con WAL, NORMAL è lo standard consigliato: dimezza il costo dei commit
+        // mantenendo la durabilità a livello di checkpoint.
+        try execute("PRAGMA synchronous = NORMAL")
     }
 
     private func migrateSchema() throws {
@@ -612,6 +747,12 @@ final class MetadataStore: ObservableObject {
             )
             """
         )
+
+        // Indici per le query che filtrano su colonne non coperte dalle chiavi primarie:
+        // DELETE/UPDATE metadata_values WHERE field_id = ? e il caricamento dei campi
+        // per cartella farebbero altrimenti una scansione completa della tabella.
+        try execute("CREATE INDEX IF NOT EXISTS idx_metadata_values_field ON metadata_values(field_id)")
+        try execute("CREATE INDEX IF NOT EXISTS idx_metadata_fields_folder ON metadata_fields(folder_identity)")
     }
 
     private func migrateLegacyJSONIfNeeded() throws {
@@ -655,6 +796,7 @@ final class MetadataStore: ObservableObject {
     }
 
     private func refreshPublishedState() {
+        notifyMetadataChanged(immediate: true)
         fieldsByFolder = (try? loadFields()) ?? [:]
         metadataByFileIdentity = (try? loadMetadata()) ?? [:]
     }

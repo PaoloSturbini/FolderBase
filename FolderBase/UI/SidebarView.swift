@@ -55,6 +55,10 @@ struct SidebarView: View {
     @State private var templatePendingEdit: MetadataTemplate?
     @State private var maintenanceMessage: String?
     @State private var maintenanceOrphans = 0
+    /// Identità degli orfani trovati dall'ultima riconciliazione: il purge le riusa
+    /// senza dover ri-risolvere tutti i file gestiti.
+    @State private var maintenanceOrphanIdentities: [String] = []
+    @State private var isReconciling = false
     @AppStorage("autoPurgeOrphans") private var autoPurgeOrphans = false
     @State private var newItemName = ""
     @State private var newFileExtension = "txt"
@@ -412,19 +416,30 @@ struct SidebarView: View {
 
                     HStack(spacing: 12) {
                         Button {
-                            let result = metadataStore.reconcileManagedFiles()
-                            maintenanceOrphans = result.missing
-                            maintenanceMessage = "\(L("maint.updated")) \(result.relocated) · \(L("maint.orphans")) \(result.missing)"
+                            isReconciling = true
+                            metadataStore.reconcileManagedFiles { relocated, missingIdentities in
+                                isReconciling = false
+                                maintenanceOrphans = missingIdentities.count
+                                maintenanceOrphanIdentities = missingIdentities
+                                maintenanceMessage = "\(L("maint.updated")) \(relocated) · \(L("maint.orphans")) \(missingIdentities.count)"
+                            }
                         } label: {
                             Label(L("maint.repair"), systemImage: "arrow.triangle.2.circlepath")
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.large)
+                        .disabled(isReconciling)
+
+                        if isReconciling {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
 
                         if maintenanceOrphans > 0 {
                             Button(role: .destructive) {
-                                let removed = metadataStore.purgeOrphans()
+                                let removed = metadataStore.purge(identities: maintenanceOrphanIdentities)
                                 maintenanceOrphans = 0
+                                maintenanceOrphanIdentities = []
                                 maintenanceMessage = "\(L("maint.removedPrefix")) \(removed) \(L("maint.orphanMetadataSuffix"))"
                             } label: {
                                 Label("\(L("maint.removePrefix")) \(maintenanceOrphans) \(L("maint.orphans"))", systemImage: "trash")

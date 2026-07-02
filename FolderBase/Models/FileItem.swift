@@ -10,15 +10,27 @@ struct FileItem: Identifiable, Hashable {
     var size: Int64?
     var isFolder: Bool
 
-    var createdDescription: String {
+    /// Formatter condivisi: crearne uno nuovo per ogni cella a ogni render (come prima)
+    /// è molto costoso — l'inizializzazione di DateFormatter richiede millisecondi.
+    private static let createdFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .short
         formatter.timeStyle = .medium
-        return formatter.string(from: created)
+        return formatter
+    }()
+
+    private static let sizeFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter
+    }()
+
+    var createdDescription: String {
+        Self.createdFormatter.string(from: created)
     }
 
     var sizeDescription: String {
         guard let size else { return "—" }
-        return ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+        return Self.sizeFormatter.string(fromByteCount: size)
     }
 }

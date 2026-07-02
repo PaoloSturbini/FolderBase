@@ -31,6 +31,8 @@ struct FileTableView: View {
     @FocusState private var nameFieldFocused: Bool
     @State private var quickLookItem: FileItem?
     @State private var isBulkEditing = false
+    @State private var itemsPendingDeletion: [FileItem] = []
+    @State private var showDeleteConfirmation = false
     @State private var tableSortOrder: [FileItemSortComparator] = []
     @State private var selection: Set<FileItem.ID> = []
     @State private var searchText = ""
@@ -41,6 +43,12 @@ struct FileTableView: View {
     @AppStorage("columnCustomization") private var columnCustomizationData = Data()
     @State private var hiddenByFolder: [String: Set<String>] = [:]
     @AppStorage("hiddenColumnsByFolder") private var hiddenColumnsData = Data()
+
+    /// Cache di indice metadata ed elenco visibile (filtrato+ordinato): ricalcolati SOLO
+    /// quando cambiano dati, ricerca, filtri o ordinamento (vedi `refreshDisplayCache`),
+    /// non a ogni render della view come accadeva con le computed property.
+    @State private var cachedIndex: [String: [String: String]] = [:]
+    @State private var cachedVisibleItems: [FileItem] = []
 
     private enum ViewMode: String, CaseIterable, Identifiable {
         case table
@@ -109,6 +117,13 @@ struct FileTableView: View {
                 isBulkEditing = false
             }
         }
+        .onAppear { refreshDisplayCache() }
+        .onChange(of: items) { refreshDisplayCache() }
+        .onChange(of: searchText) { refreshDisplayCache() }
+        .onChange(of: optionFilters) { refreshDisplayCache() }
+        .onChange(of: tableSortOrder) { refreshDisplayCache() }
+        .onChange(of: metadataFields) { refreshDisplayCache() }
+        .onChange(of: metadataStore.metadataByFileIdentity) { refreshDisplayCache() }
     }
 
     private var emptyState: some View {
@@ -244,8 +259,7 @@ struct FileTableView: View {
                 .help(L("toolbar.editHelp"))
 
                 Button(role: .destructive) {
-                    trashItems(selectedItems)
-                    selection = []
+                    requestTrash(selectedItems)
                 } label: {
                     Label(L("toolbar.trash"), systemImage: "trash")
                 }
@@ -445,9 +459,16 @@ struct FileTableView: View {
         return kanbanFields.first
     }
 
-    /// Indice metadata [fieldID: [itemID: value]], costruito una volta e riusato per
-    /// ordinamento, filtro e ricerca (evita scansioni ripetute durante il render).
-    private var metadataIndex: [String: [String: String]] {
+    /// Elenco visibile (filtrato e ordinato), servito dalla cache.
+    private var visibleItems: [FileItem] {
+        cachedVisibleItems
+    }
+
+    /// Ricostruisce l'indice metadata [fieldID: [itemID: value]] e l'elenco visibile.
+    /// Chiamata dai vari `onChange` in `body`: filtro e ordinamento (costosi, soprattutto
+    /// `localizedStandardCompare`) vengono così eseguiti una sola volta per cambiamento
+    /// reale invece che a ogni invalidazione di SwiftUI.
+    private func refreshDisplayCache() {
         var index: [String: [String: String]] = [:]
         for field in metadataFields {
             var perItem: [String: String] = [:]
@@ -457,37 +478,53 @@ struct FileTableView: View {
             }
             index[field.id] = perItem
         }
-        return index
-    }
+        cachedIndex = index
 
-    private var filteredItems: [FileItem] {
-        let index = metadataIndex
         let needle = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var result: [FileItem]
 
-        return items.filter { item in
-            // Filtri per opzione (AND tra campi, OR tra valori dello stesso campo).
-            for (fieldID, labels) in optionFilters where !labels.isEmpty {
-                let value = index[fieldID]?[item.id] ?? ""
-                if !labels.contains(value) { return false }
-            }
+        if optionFilters.isEmpty, needle.isEmpty {
+            result = items
+        } else {
+            result = items.filter { item in
+                // Filtri per opzione (AND tra campi, OR tra valori dello stesso campo).
+                for (fieldID, labels) in optionFilters where !labels.isEmpty {
+                    let value = index[fieldID]?[item.id] ?? ""
+                    if !labels.contains(value) { return false }
+                }
 
-            guard !needle.isEmpty else { return true }
-            if item.name.lowercased().contains(needle) { return true }
-            for (_, perItem) in index {
-                if let value = perItem[item.id], value.lowercased().contains(needle) { return true }
+                guard !needle.isEmpty else { return true }
+                if item.name.lowercased().contains(needle) { return true }
+                for (_, perItem) in index {
+                    if let value = perItem[item.id], value.lowercased().contains(needle) { return true }
+                }
+                return false
             }
-            return false
         }
-    }
 
-    private var visibleItems: [FileItem] {
-        let base = filteredItems
-        guard let comparator = tableSortOrder.first else { return base }
-        return base.sorted { comparator.compare($0, $1) == .orderedAscending }
+        if let comparator = tableSortOrder.first {
+            result.sort { comparator.compare($0, $1) == .orderedAscending }
+        }
+        cachedVisibleItems = result
     }
 
     private var selectedItems: [FileItem] {
         items.filter { selection.contains($0.id) }
+    }
+
+    /// Punto unico da cui passano tutte le cancellazioni: mostra il popup di conferma
+    /// invece di cestinare subito. La cancellazione vera avviene solo su "Conferma".
+    private func requestTrash(_ targets: [FileItem]) {
+        guard !targets.isEmpty else { return }
+        itemsPendingDeletion = targets
+        showDeleteConfirmation = true
+    }
+
+    private var deleteConfirmationMessage: String {
+        if itemsPendingDeletion.count == 1 {
+            return L("delete.confirm.messageOne")
+        }
+        return "\(L("delete.confirm.messageManyPrefix")) \(itemsPendingDeletion.count) \(L("delete.confirm.messageManySuffix"))"
     }
 
     /// Tutte le colonne (standard + metadata), comprese quelle nascoste.
@@ -535,10 +572,9 @@ struct FileTableView: View {
     }
 
     private var table: some View {
-        let index = metadataIndex
-        return Table(visibleItems, selection: $selection, sortOrder: $tableSortOrder, columnCustomization: $columnCustomization) {
+        Table(cachedVisibleItems, selection: $selection, sortOrder: $tableSortOrder, columnCustomization: $columnCustomization) {
             TableColumnForEach(visibleColumns) { column in
-                TableColumn(column.title, sortUsing: sortComparator(for: column, index: index)) { item in
+                TableColumn(column.title, sortUsing: sortComparator(for: column, index: cachedIndex)) { item in
                     cell(for: item, column: column)
                 }
                 .width(min: column.minWidth, ideal: column.idealWidth)
@@ -565,6 +601,22 @@ struct FileTableView: View {
         }
         .onChange(of: hiddenByFolder) {
             persistHiddenColumns()
+        }
+        // Tasto Cancella (⌫): chiede conferma prima di cestinare la selezione.
+        .onDeleteCommand {
+            requestTrash(selectedItems)
+        }
+        .alert(L("delete.confirm.title"), isPresented: $showDeleteConfirmation) {
+            Button(L("common.cancel"), role: .cancel) {
+                itemsPendingDeletion = []
+            }
+            Button(L("delete.confirm.button"), role: .destructive) {
+                trashItems(itemsPendingDeletion)
+                selection = []
+                itemsPendingDeletion = []
+            }
+        } message: {
+            Text(deleteConfirmationMessage)
         }
     }
 
@@ -624,8 +676,7 @@ struct FileTableView: View {
             Divider()
 
             Button(role: .destructive) {
-                trashItems([single])
-                selection.remove(single.id)
+                requestTrash([single])
             } label: {
                 Label(L("ctx.trash"), systemImage: "trash")
             }
@@ -654,8 +705,7 @@ struct FileTableView: View {
             Divider()
 
             Button(role: .destructive) {
-                trashItems(targets)
-                selection = []
+                requestTrash(targets)
             } label: {
                 Label("\(L("ctx.trash")) (\(targets.count))", systemImage: "trash")
             }
@@ -812,9 +862,9 @@ struct FileTableView: View {
     private func metadataCell(for item: FileItem, field: MetadataField) -> some View {
         switch field.kind {
         case .text:
-            NoteTextCell(text: valueBinding(for: item, field: field))
+            EditableTextCell(text: valueBinding(for: item, field: field), showsHoverPreview: true)
         case .number:
-            NumberMetadataCell(text: valueBinding(for: item, field: field))
+            EditableTextCell(text: valueBinding(for: item, field: field), alignment: .trailing, monospacedDigits: true)
         case .date:
             DateMetadataCell(text: valueBinding(for: item, field: field))
         case .kanban:
@@ -828,8 +878,7 @@ struct FileTableView: View {
             selectCell(for: item, field: field)
         case .link:
             HStack(spacing: 6) {
-                TextField(L("link.placeholder"), text: valueBinding(for: item, field: field))
-                    .textFieldStyle(.plain)
+                EditableTextCell(text: valueBinding(for: item, field: field), placeholder: L("link.placeholder"))
 
                 Button {
                     chooseLink(for: item, field: field)
@@ -1218,39 +1267,95 @@ struct MetadataTagView: View {
     }
 }
 
-private struct NoteTextCell: View {
+/// Cella di testo "leggera": a riposo mostra un semplice `Text` e monta il `TextField`
+/// solo quando l'utente clicca per modificare. Un TextField vivo per ogni cella visibile
+/// è molto più pesante di un Text statico: con molte righe e colonne questo riduce
+/// drasticamente il costo di rendering della Table. Il valore viene scritto nello store
+/// a ogni tasto (come prima), ma la notifica alla UI è coalizzata dallo store stesso.
+private struct EditableTextCell: View {
     @Binding var text: String
+    var placeholder = ""
+    var alignment: TextAlignment = .leading
+    var monospacedDigits = false
+    var showsHoverPreview = false
+
+    @State private var isEditing = false
+    @State private var draft = ""
     @State private var isHovering = false
+    @FocusState private var focused: Bool
 
     var body: some View {
-        TextField("", text: $text)
+        if isEditing {
+            editor
+        } else {
+            display
+        }
+    }
+
+    @ViewBuilder
+    private var editor: some View {
+        let field = TextField(placeholder, text: $draft)
             .textFieldStyle(.plain)
-            .onHover { hovering in
-                isHovering = hovering && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            .multilineTextAlignment(alignment)
+            .focused($focused)
+            .onSubmit { endEditing() }
+            .onExitCommand { endEditing() }
+            .onChange(of: draft) { text = draft }
+            .onChange(of: focused) { _, isFocused in
+                if !isFocused { endEditing() }
             }
-            .popover(isPresented: $isHovering, arrowEdge: .bottom) {
-                VStack(alignment: .leading, spacing: 0) {
+
+        if monospacedDigits {
+            field.monospacedDigit()
+        } else {
+            field
+        }
+    }
+
+    @ViewBuilder
+    private var display: some View {
+        let label = displayText
+            .lineLimit(1)
+            .foregroundStyle(text.isEmpty ? Color.secondary : Color.primary)
+            .frame(maxWidth: .infinity, alignment: alignment == .trailing ? .trailing : .leading)
+            .contentShape(Rectangle())
+            .onTapGesture { beginEditing() }
+
+        if showsHoverPreview {
+            label
+                .onHover { hovering in
+                    isHovering = hovering && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                }
+                .popover(isPresented: $isHovering, arrowEdge: .bottom) {
                     Text(text)
                         .font(.body)
-                        .lineLimit(nil)
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
+                        .frame(width: 360, alignment: .leading)
+                        .padding(12)
                 }
-                .frame(width: 360, alignment: .leading)
-                .padding(12)
-            }
+        } else {
+            label
+        }
     }
-}
 
-private struct NumberMetadataCell: View {
-    @Binding var text: String
+    private var displayText: Text {
+        let base = Text(text.isEmpty ? placeholder : text)
+        return monospacedDigits ? base.monospacedDigit() : base
+    }
 
-    var body: some View {
-        // Nessun placeholder: una cella vuota appena creata non mostra nulla.
-        TextField("", text: $text)
-            .textFieldStyle(.plain)
-            .multilineTextAlignment(.trailing)
-            .monospacedDigit()
+    private func beginEditing() {
+        draft = text
+        isHovering = false
+        isEditing = true
+        // Il focus va assegnato dopo che il TextField è montato nella gerarchia.
+        DispatchQueue.main.async { focused = true }
+    }
+
+    private func endEditing() {
+        guard isEditing else { return }
+        isEditing = false
+        if draft != text { text = draft }
     }
 }
 

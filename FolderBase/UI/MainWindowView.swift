@@ -76,22 +76,24 @@ struct MainWindowView: View {
     /// All'avvio riallinea il DB al filesystem (file spostati/rinominati/cancellati mentre
     /// l'app era chiusa) e avvia l'osservazione FSEvents delle cartelle gestite.
     private func performInitialSync() {
-        let result = metadataStore.reconcileManagedFiles()
-        if autoPurgeOrphans, result.missing > 0 {
-            _ = metadataStore.purgeOrphans()
+        metadataStore.reconcileManagedFiles { _, missingIdentities in
+            if autoPurgeOrphans, !missingIdentities.isEmpty {
+                _ = metadataStore.purge(identities: missingIdentities)
+            }
+            refreshManagedWatcher()
         }
-        refreshManagedWatcher()
     }
 
     /// Riconfigura l'osservatore FSEvents sull'insieme delle cartelle gestite più quella aperta.
     private func refreshManagedWatcher() {
         if managedWatcher == nil {
             managedWatcher = FSEventsWatcher {
-                let result = metadataStore.reconcileManagedFiles()
-                if autoPurgeOrphans, result.missing > 0 {
-                    _ = metadataStore.purgeOrphans()
+                metadataStore.reconcileManagedFiles { _, missingIdentities in
+                    if autoPurgeOrphans, !missingIdentities.isEmpty {
+                        _ = metadataStore.purge(identities: missingIdentities)
+                    }
+                    reloadCurrentFolder()
                 }
-                reloadCurrentFolder()
             }
         }
 
