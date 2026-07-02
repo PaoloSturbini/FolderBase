@@ -17,6 +17,8 @@ struct MainWindowView: View {
     @AppStorage("contentFontSize") private var contentFontSize = 13.0
     @AppStorage("appearanceMode") private var appearanceMode = AppearanceMode.system.rawValue
     @AppStorage("autoPurgeOrphans") private var autoPurgeOrphans = false
+    @AppStorage("showHiddenFiles") private var showHiddenFiles = false
+    @AppStorage("showFileExtensions") private var showFileExtensions = false
     @State private var managedWatcher: FSEventsWatcher?
     @State private var treeRefreshID = UUID()
     @State private var isLoading = false
@@ -33,6 +35,8 @@ struct MainWindowView: View {
                 sidebarFontSize: $sidebarFontSize,
                 contentFontSize: $contentFontSize,
                 appearanceMode: $appearanceMode,
+                showHiddenFiles: $showHiddenFiles,
+                showFileExtensions: $showFileExtensions,
                 selectFolder: selectFolder,
                 removeFolder: removeRecentFolder,
                 chooseFolder: chooseFolder,
@@ -60,6 +64,7 @@ struct MainWindowView: View {
                 trashItems: trashItems,
                 isLoading: isLoading,
                 contentFontSize: contentFontSize,
+                showFileExtensions: showFileExtensions,
                 templates: templateStore.templates,
                 applyTemplate: applyTemplate
             )
@@ -70,6 +75,9 @@ struct MainWindowView: View {
         .onAppear {
             loadInitialFolderIfNeeded()
             performInitialSync()
+        }
+        .onChange(of: showHiddenFiles) { _, _ in
+            reloadCurrentFolder()
         }
     }
 
@@ -246,11 +254,12 @@ struct MainWindowView: View {
     /// i risultati arrivati in ritardo se nel frattempo si è navigato altrove.
     private func fetchItems(at url: URL, refreshTree: Bool) {
         isLoading = true
+        let includeHidden = showHiddenFiles
 
         DispatchQueue.global(qos: .userInitiated).async {
             let outcome: (items: [FileItem]?, error: String?)
             do {
-                outcome = (try FileBrowserService().contentsOfDirectory(at: url), nil)
+                outcome = (try FileBrowserService().contentsOfDirectory(at: url, showHiddenFiles: includeHidden), nil)
             } catch {
                 outcome = (nil, error.localizedDescription)
             }

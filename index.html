@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FolderBase — dai contesto ai file del tuo Mac</title>
+  <meta name="description" content="FolderBase aggiunge colonne, note, Kanban, tag e link ai file veri del tuo Mac — senza spostarli e senza toccare le cartelle originali. Gratis, open source, tutto in locale.">
+  <meta name="theme-color" content="#f7f4ed">
+
+  <meta property="og:title" content="FolderBase — dai contesto ai file del tuo Mac">
+  <meta property="og:description" content="Un file manager metadata-first per macOS: organizza file e cartelle reali con colonne personalizzate, Kanban, note, tag e link.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://folderbase.pst.my/">
+  <meta property="og:image" content="https://folderbase.pst.my/assets/folderbase-og.png">
+
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/assets/app-icon.png">
+
+  <style>
+    :root{
+      --bg:#f7f4ed;
+      --surface:#fffdf8;
+      --ink:#1d1b16;
+      --muted:#6b6559;
+      --line:#e4ddcf;
+      --accent:#c2410c;      /* terracotta */
+      --accent-ink:#fff;
+      --blue:#2563eb;
+      --green:#15803d;
+      --amber:#b45309;
+      --radius:16px;
+      --shadow:0 20px 50px -24px rgba(40,30,10,.4);
+      --max:1120px;
+    }
+    *{box-sizing:border-box}
+    html{scroll-behavior:smooth}
+    body{
+      margin:0;background:var(--bg);color:var(--ink);
+      font:16px/1.6 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+      -webkit-font-smoothing:antialiased;
+    }
+    a{color:inherit}
+    h1,h2,h3{line-height:1.12;letter-spacing:-.02em;margin:0}
+    h1{font-size:clamp(2.2rem,5vw,3.6rem);font-weight:800}
+    h2{font-size:clamp(1.7rem,3.4vw,2.5rem);font-weight:800}
+    h3{font-size:1.15rem;font-weight:700}
+    p{margin:0}
+    .wrap{max-width:var(--max);margin:0 auto;padding:0 24px}
+    .eyebrow{
+      text-transform:uppercase;letter-spacing:.14em;font-size:.78rem;font-weight:700;
+      color:var(--accent);margin:0 0 14px;
+    }
+    .lead{font-size:clamp(1.05rem,1.8vw,1.28rem);color:var(--muted);max-width:44ch}
+
+    /* Buttons */
+    .button{
+      display:inline-flex;align-items:center;gap:.5rem;
+      padding:.85rem 1.4rem;border-radius:12px;font-weight:700;text-decoration:none;
+      transition:transform .15s ease,box-shadow .15s ease,background .15s ease;
+      border:1px solid transparent;white-space:nowrap;
+    }
+    .button:hover{transform:translateY(-2px)}
+    .button.primary{background:var(--accent);color:var(--accent-ink);box-shadow:0 12px 24px -12px rgba(194,65,12,.7)}
+    .button.secondary{background:var(--surface);border-color:var(--line);color:var(--ink)}
+    .button .sub{display:block;font-weight:500;font-size:.72rem;opacity:.85;letter-spacing:.02em}
+    .button.big{padding:1rem 1.7rem;font-size:1.05rem}
+    .button.full{width:100%;justify-content:center}
+
+    /* Header */
+    .site-header{
+      position:sticky;top:0;z-index:50;background:rgba(247,244,237,.82);
+      backdrop-filter:saturate(160%) blur(12px);border-bottom:1px solid var(--line);
+    }
+    .site-header .wrap{display:flex;align-items:center;justify-content:space-between;height:64px}
+    .brand{display:flex;align-items:center;gap:.6rem;font-weight:800;text-decoration:none;font-size:1.05rem}
+    .brand img{border-radius:9px}
+    .site-header nav{display:flex;align-items:center;gap:1.4rem}
+    .site-header nav a{text-decoration:none;color:var(--muted);font-weight:600;font-size:.95rem}
+    .site-header nav a:hover{color:var(--ink)}
+    .site-header nav a.nav-cta{color:var(--accent)}
+    @media(max-width:760px){.site-header nav a:not(.nav-cta){display:none}}
+
+    /* Hero */
+    .hero{padding:72px 0 40px}
+    .hero .wrap{display:grid;grid-template-columns:1.05fr .95fr;gap:56px;align-items:center}
+    .hero-actions{display:flex;flex-wrap:wrap;gap:14px;margin:28px 0 20px}
+    .trust-strip{display:flex;flex-wrap:wrap;gap:10px}
+    .trust-strip span{
+      font-size:.82rem;font-weight:600;color:var(--muted);
+      background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:.35rem .8rem;
+    }
+    @media(max-width:900px){.hero .wrap{grid-template-columns:1fr;gap:36px}.hero{padding:48px 0 24px}}
+
+    /* Product shot */
+    .shot{
+      background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
+      box-shadow:var(--shadow);overflow:hidden;
+    }
+    .shot img{display:block;width:100%;height:auto}
+    .window-bar{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--line);background:#f2ecdf}
+    .window-bar i{width:11px;height:11px;border-radius:50%;background:#d8cdb6;display:inline-block}
+    .window-bar strong{margin-left:8px;font-size:.85rem;color:var(--muted);font-weight:700}
+    .app-layout{display:grid;grid-template-columns:120px 1fr;min-height:280px}
+    .mock-sidebar{background:#faf6ee;border-right:1px solid var(--line);padding:14px 12px;font-size:.82rem;display:flex;flex-direction:column;gap:6px}
+    .mock-sidebar b{font-size:.7rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted)}
+    .mock-sidebar span{padding:.3rem .5rem;border-radius:7px;color:var(--muted)}
+    .mock-sidebar span.sel{background:#fdeee5;color:var(--accent);font-weight:700}
+    .mock-table{padding:14px}
+    .mtoolbar{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+    .mtoolbar strong{font-size:.9rem}
+    .mtoolbar .pill{margin-left:auto;font-size:.72rem;color:var(--muted);border:1px solid var(--line);border-radius:7px;padding:.2rem .5rem}
+    .mtoolbar .pill.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+    .grid-row{display:grid;grid-template-columns:1.4fr .8fr .8fr 1.2fr;gap:8px;align-items:center;padding:.5rem .2rem;font-size:.82rem;border-top:1px solid var(--line)}
+    .grid-row.head{color:var(--muted);font-weight:700;border-top:none;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em}
+    .tag{font-size:.72rem;font-weight:700;border-radius:6px;padding:.15rem .45rem;display:inline-block}
+    .t-todo{background:#fdeede;color:var(--amber)}
+    .t-doing{background:#e0edff;color:var(--blue)}
+    .t-done{background:#e2f4e6;color:var(--green)}
+    .t-hi{background:#fde4e1;color:var(--accent)}
+
+    /* Sections */
+    section.block{padding:64px 0;border-top:1px solid var(--line)}
+    .section-heading{max-width:60ch;margin-bottom:36px}
+    .section-heading p{color:var(--muted);margin-top:12px}
+
+    /* Audience */
+    .audience{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+    .audience .card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:20px}
+    .audience .card b{display:block;margin-bottom:6px}
+    .audience .card span{color:var(--muted);font-size:.92rem}
+    @media(max-width:820px){.audience{grid-template-columns:repeat(2,1fr)}}
+    @media(max-width:480px){.audience{grid-template-columns:1fr}}
+
+    /* Feature grid */
+    .feature-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:18px}
+    .feature-grid article{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:26px}
+    .feature-grid .k{font-size:.8rem;font-weight:800;color:var(--accent);letter-spacing:.08em}
+    .feature-grid h3{margin:10px 0 8px}
+    .feature-grid p{color:var(--muted)}
+    .feature-grid code{background:#f2ecdf;padding:.1rem .35rem;border-radius:5px;font-size:.85em}
+    @media(max-width:760px){.feature-grid{grid-template-columns:1fr}}
+
+    /* Workflow */
+    .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;counter-reset:step}
+    .steps .step{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:24px;position:relative}
+    .steps .step::before{
+      counter-increment:step;content:counter(step);
+      display:flex;align-items:center;justify-content:center;
+      width:34px;height:34px;border-radius:50%;background:var(--accent);color:#fff;font-weight:800;margin-bottom:14px;
+    }
+    .steps .step b{display:block;margin-bottom:6px}
+    .steps .step p{color:var(--muted);font-size:.95rem}
+    @media(max-width:760px){.steps{grid-template-columns:1fr}}
+
+    /* Split sections */
+    .split{display:grid;grid-template-columns:1fr 1fr;gap:40px;align-items:start}
+    .split p{color:var(--muted);margin-top:12px}
+    @media(max-width:820px){.split{grid-template-columns:1fr;gap:24px}}
+    .panel{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:24px}
+    .panel pre{background:var(--ink);color:#f4efe3;border-radius:10px;padding:16px;overflow:auto;font-size:.82rem;margin:14px 0 0}
+    .install-steps{list-style:none;padding:0;margin:0 0 18px;display:grid;gap:10px}
+    .install-steps li{display:flex;gap:12px;align-items:flex-start}
+    .install-steps b{background:var(--ink);color:#fff;border-radius:7px;min-width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center;font-size:.85rem}
+    .notice{background:#fdf6ec;border:1px solid #eadfc7;border-radius:12px;padding:18px 20px;margin-top:18px}
+    .notice strong{display:block;margin-bottom:6px}
+    .notice p{color:var(--muted);font-size:.92rem}
+
+    /* Support */
+    .support-card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:26px;display:grid;gap:16px}
+    .amounts{display:flex;flex-wrap:wrap;gap:10px}
+    .amounts span{border:1px solid var(--line);border-radius:999px;padding:.35rem .85rem;font-size:.85rem;font-weight:600;color:var(--muted)}
+    .amounts span.free{background:#e2f4e6;color:var(--green);border-color:#c4e6cb}
+
+    /* FAQ */
+    details{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:0 20px;margin-bottom:12px}
+    details summary{cursor:pointer;font-weight:700;padding:16px 0;list-style:none}
+    details summary::-webkit-details-marker{display:none}
+    details summary::after{content:"+";float:right;color:var(--accent);font-weight:800}
+    details[open] summary::after{content:"–"}
+    details p{color:var(--muted);padding:0 0 16px}
+
+    /* Final CTA */
+    .final-cta{text-align:center;background:var(--ink);color:#faf6ee;border-radius:22px;padding:56px 28px;margin:64px auto}
+    .final-cta h2{color:#fff}
+    .final-cta p{color:#d8cfbd;margin:14px auto 26px;max-width:48ch}
+    .final-cta .button.secondary{background:transparent;border-color:#4a463d;color:#faf6ee}
+
+    /* Footer */
+    .site-footer{border-top:1px solid var(--line);padding:28px 0;color:var(--muted);font-size:.9rem}
+    .site-footer .wrap{display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px}
+    .site-footer a{color:var(--muted)}
+  </style>
+</head>
+<body id="top">
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="#top" aria-label="FolderBase home">
+        <img src="/assets/app-icon.png" alt="" width="34" height="34">
+        <span>FolderBase</span>
+      </a>
+      <nav aria-label="Navigazione principale">
+        <a href="#per-chi">Per chi è</a>
+        <a href="#funzioni">Funzioni</a>
+        <a href="#installa">Installa</a>
+        <a href="#privacy">Privacy</a>
+        <a class="nav-cta" href="https://github.com/PaoloSturbini/FolderBase/raw/main/downloads/FolderBase.dmg">Scarica gratis</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <!-- HERO -->
+    <section class="hero">
+      <div class="wrap">
+        <div class="hero-content">
+          <p class="eyebrow">macOS 14.4+ · gratis · open source</p>
+          <h1>Il Finder mostra i file. FolderBase mostra il contesto.</h1>
+          <p class="lead">
+            Aggiungi note, scadenze, stati Kanban, tag e link ai file che hai già —
+            senza spostarli e senza toccare le cartelle originali. È come Notion o Airtable,
+            ma sopra il tuo filesystem vero.
+          </p>
+          <div class="hero-actions">
+            <a class="button primary big" href="https://github.com/PaoloSturbini/FolderBase/raw/main/downloads/FolderBase.dmg">
+              Scarica gratis per Mac
+              <span class="sub">.dmg · macOS 14.4+</span>
+            </a>
+            <a class="button secondary big" href="#come-funziona">Guarda come funziona</a>
+          </div>
+          <div class="trust-strip" aria-label="Caratteristiche principali">
+            <span>✓ Tutto in locale</span>
+            <span>✓ Cartelle mai modificate</span>
+            <span>✓ Italiano e inglese</span>
+          </div>
+        </div>
+
+        <!-- VISUAL: sostituisci il mockup con uno screenshot o GIF reale quando disponibile.
+             Basta scommentare l'<img> e (opzionale) rimuovere il blocco .shot mockup sotto.
+        <div class="shot">
+          <img src="/assets/screenshot.png" alt="Interfaccia di FolderBase: tabella con colonne personalizzate e vista Kanban" width="1200" height="800">
+        </div>
+        -->
+        <div class="shot" aria-label="Anteprima dell'interfaccia FolderBase">
+          <div class="window-bar"><i></i><i></i><i></i><strong>FolderBase — Progetto Cliente</strong></div>
+          <div class="app-layout">
+            <aside class="mock-sidebar">
+              <b>Cartelle</b>
+              <span class="sel">Clienti</span>
+              <span>Progetti</span>
+              <span>Archivio</span>
+              <span>Documenti</span>
+            </aside>
+            <section class="mock-table">
+              <div class="mtoolbar">
+                <strong>Progetto Cliente</strong>
+                <span class="pill on">Table</span>
+                <span class="pill">Board</span>
+              </div>
+              <div class="grid-row head"><span>Nome</span><span>Stato</span><span>Priorità</span><span>Nota</span></div>
+              <div class="grid-row"><span>Brief.pdf</span><span><i class="tag t-todo">ToDo</i></span><span><i class="tag t-hi">Alta</i></span><span>Da validare</span></div>
+              <div class="grid-row"><span>Contratto.docx</span><span><i class="tag t-doing">Doing</i></span><span><i class="tag">Media</i></span><span>Inviare bozza</span></div>
+              <div class="grid-row"><span>Assets</span><span><i class="tag t-done">Done</i></span><span><i class="tag">Bassa</i></span><span>Pronto</span></div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- PER CHI È -->
+    <section class="block" id="per-chi">
+      <div class="wrap">
+        <div class="section-heading">
+          <p class="eyebrow">Per chi è</p>
+          <h2>Se le tue cartelle sono piene ma disordinate.</h2>
+          <p>FolderBase è per chi lavora davvero su file e documenti locali e vuole ritrovarli, ordinarli e seguirli senza caricarli in un altro servizio.</p>
+        </div>
+        <div class="audience">
+          <div class="card"><b>Freelance &amp; consulenti</b><span>Segui lo stato di ogni cliente e progetto direttamente sui file di lavoro.</span></div>
+          <div class="card"><b>Ricercatori &amp; studio</b><span>Annota, tagga e collega PDF e materiali senza rinominare nulla.</span></div>
+          <div class="card"><b>Creativi &amp; archivi</b><span>Cataloga foto, asset e progetti con colonne e viste su misura.</span></div>
+          <div class="card"><b>Chi gestisce cartelle</b><span>Trasforma una cartella qualsiasi in una vista operativa con priorità e scadenze.</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- FUNZIONI -->
+    <section class="block" id="funzioni">
+      <div class="wrap">
+        <div class="section-heading">
+          <p class="eyebrow">Cosa ci guadagni</p>
+          <h2>Una base di lavoro sopra i file veri.</h2>
+          <p>Tabella nativa, colonne personalizzate e board Kanban — senza importare i tuoi documenti dentro un altro servizio.</p>
+        </div>
+        <div class="feature-grid">
+          <article>
+            <span class="k">01</span>
+            <h3>Ritrova tutto a colpo d'occhio</h3>
+            <p>Colonne per note, numeri, date, stati Kanban, Select colorati e link. Cerca, filtra e ordina come in un foglio, ma sui tuoi file reali.</p>
+          </article>
+          <article>
+            <span class="k">02</span>
+            <h3>Il contesto non si perde mai</h3>
+            <p>Rinomini o sposti un file? Note e metadata restano agganciati grazie a identità filesystem stabili, bookmark e percorsi noti.</p>
+          </article>
+          <article>
+            <span class="k">03</span>
+            <h3>Table, Board e Quick Look</h3>
+            <p>Passa dalla tabella alla vista Kanban quando serve, modifica in blocco, apri l'anteprima ed esporta in CSV in un clic.</p>
+          </article>
+          <article>
+            <span class="k">04</span>
+            <h3>Locale e non invasiva</h3>
+            <p>I metadata vivono in un database SQLite dentro <code>~/Library/Application Support/FolderBase</code>. Le cartelle osservate non ricevono file nascosti né sidecar.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- COME FUNZIONA -->
+    <section class="block" id="come-funziona">
+      <div class="wrap">
+        <div class="section-heading">
+          <p class="eyebrow">Uso quotidiano</p>
+          <h2>Apri una cartella, aggiungi colonne, lavora.</h2>
+        </div>
+        <div class="steps">
+          <div class="step">
+            <b>Scegli una cartella</b>
+            <p>La sidebar mostra recenti e albero directory: navighi come nel Finder e apri qualsiasi cartella del Mac.</p>
+          </div>
+          <div class="step">
+            <b>Crea il tuo schema</b>
+            <p>Aggiungi colonne per stato, priorità, scadenza, link o note — tutto ciò che serve al progetto.</p>
+          </div>
+          <div class="step">
+            <b>Resta sincronizzato</b>
+            <p>FolderBase osserva le modifiche esterne e riallinea la tabella e il database locale in automatico.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- INSTALLA -->
+    <section class="block" id="installa">
+      <div class="wrap split">
+        <div>
+          <p class="eyebrow">Installazione</p>
+          <h2>Pronta in un minuto.</h2>
+          <p>Scarica il pacchetto già compilato dalla release GitHub. Chi preferisce può compilare dai sorgenti: è un progetto SwiftUI per macOS 14.4+.</p>
+          <div class="notice">
+            <strong>Primo avvio (è normale per le app indie)</strong>
+            <p>La build è firmata ad-hoc ma non ancora notarizzata da Apple. La prima volta fai clic destro su <em>FolderBase.app</em> → <em>Apri</em>: ti serve una sola volta.</p>
+          </div>
+        </div>
+        <div class="panel">
+          <ol class="install-steps">
+            <li><b>1</b><span>Scarica e apri il file <em>.dmg</em>.</span></li>
+            <li><b>2</b><span>Trascina <em>FolderBase</em> nella cartella Applicazioni.</span></li>
+            <li><b>3</b><span>Primo avvio: clic destro sull'app → <em>Apri</em>.</span></li>
+          </ol>
+          <a class="button primary full" href="https://github.com/PaoloSturbini/FolderBase/raw/main/downloads/FolderBase.dmg">Scarica gratis per Mac (.dmg)</a>
+          <pre><code>git clone https://github.com/PaoloSturbini/FolderBase.git
+cd FolderBase
+swift run --build-path /tmp/folderbase-run FolderBase</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- PRIVACY -->
+    <section class="block" id="privacy">
+      <div class="wrap split">
+        <div>
+          <p class="eyebrow">Trasparenza</p>
+          <h2>Niente cloud obbligatorio. Niente sidecar nascosti.</h2>
+          <p>FolderBase non sposta, copia o riscrive i tuoi file originali. Salva solo i metadata, in locale. Il codice è pubblico con licenza MIT: verificabile riga per riga.</p>
+        </div>
+        <div class="panel">
+          <ul class="install-steps" style="gap:14px">
+            <li><b>✓</b><span>I file restano dove sono, intatti.</span></li>
+            <li><b>✓</b><span>Metadata in un SQLite locale, solo sul tuo Mac.</span></li>
+            <li><b>✓</b><span>Open source MIT, UI in italiano e inglese.</span></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- SOSTIENI -->
+    <section class="block" id="sostieni">
+      <div class="wrap split">
+        <div>
+          <p class="eyebrow">Pay what you want</p>
+          <h2>Usala gratis. Contribuisci se ti serve davvero.</h2>
+          <p>Scaricare e usare FolderBase non costa nulla e non richiede alcun acquisto. Se ti fa risparmiare tempo, puoi sostenere lo sviluppo con un contributo facoltativo su Ko-fi.</p>
+        </div>
+        <div class="support-card">
+          <div class="amounts" aria-label="Come funziona il contributo">
+            <span class="free">Download gratuito</span>
+            <span>Contributo facoltativo</span>
+            <span>Suggerito 9,99 €</span>
+            <span>Libero di aumentare</span>
+          </div>
+          <a class="button secondary full" href="https://ko-fi.com/paolosturbini">Contribuisci su Ko-fi</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- FAQ -->
+    <section class="block">
+      <div class="wrap">
+        <div class="section-heading">
+          <p class="eyebrow">FAQ</p>
+          <h2>Domande rapide.</h2>
+        </div>
+        <details>
+          <summary>FolderBase sostituisce il Finder?</summary>
+          <p>No. Lo affianca: aggiunge struttura, metadata e viste operative ai file che hai già, lasciando il Finder al suo posto.</p>
+        </details>
+        <details>
+          <summary>Dove finiscono i miei metadata?</summary>
+          <p>In un database SQLite locale dentro Application Support. Le cartelle gestite non ricevono file nascosti o sidecar.</p>
+        </details>
+        <details>
+          <summary>Cosa succede se rinomino o sposto un file?</summary>
+          <p>Le note e i metadata restano agganciati: FolderBase usa identità filesystem stabili e bookmark per ritrovare il file.</p>
+        </details>
+        <details>
+          <summary>Devo pagare per usarla?</summary>
+          <p>No. È gratuita e open source. Il contributo su Ko-fi è del tutto facoltativo.</p>
+        </details>
+        <details>
+          <summary>È open source?</summary>
+          <p>Sì, licenza MIT, codice pubblico su <a href="https://github.com/PaoloSturbini/FolderBase">GitHub</a>.</p>
+        </details>
+      </div>
+    </section>
+
+    <!-- FINAL CTA -->
+    <div class="wrap">
+      <div class="final-cta">
+        <h2>Dai un contesto ai tuoi file, oggi.</h2>
+        <p>Gratis, open source, tutto in locale. Provala su una cartella qualsiasi e vedi la differenza in due minuti.</p>
+        <div class="hero-actions" style="justify-content:center">
+          <a class="button primary big" href="https://github.com/PaoloSturbini/FolderBase/raw/main/downloads/FolderBase.dmg">Scarica gratis per Mac</a>
+          <a class="button secondary big" href="https://github.com/PaoloSturbini/FolderBase">Guarda il codice</a>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <span>© <span id="year"></span> FolderBase</span>
+      <span><a href="https://github.com/PaoloSturbini/FolderBase">GitHub</a> · <a href="https://github.com/PaoloSturbini/FolderBase/issues">Segnala un problema</a></span>
+    </div>
+  </footer>
+
+  <script>document.getElementById('year').textContent = new Date().getFullYear();</script>
+</body>
+</html>

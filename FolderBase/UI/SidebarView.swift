@@ -40,6 +40,8 @@ struct SidebarView: View {
     @Binding var sidebarFontSize: Double
     @Binding var contentFontSize: Double
     @Binding var appearanceMode: String
+    @Binding var showHiddenFiles: Bool
+    @Binding var showFileExtensions: Bool
     let selectFolder: (URL) -> Void
     let removeFolder: (URL) -> Void
     let chooseFolder: () -> Void
@@ -261,6 +263,8 @@ struct SidebarView: View {
                         foldersSettings
                     case .appearance:
                         appearanceSettings
+                    case .display:
+                        displaySettings
                     case .language:
                         languageSettings
                     case .templates:
@@ -577,6 +581,36 @@ struct SidebarView: View {
         }
     }
 
+    private var displaySettings: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            GroupBox {
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle(L("display.showHidden"), isOn: $showHiddenFiles)
+                        Text(L("display.showHiddenNote"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle(L("display.showExtensions"), isOn: $showFileExtensions)
+                        Text(L("display.showExtensionsNote"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+            } label: {
+                settingsCardLabel(L("display.card"), systemImage: "eye")
+            }
+        }
+    }
+
     private var languageSettings: some View {
         VStack(alignment: .leading, spacing: 18) {
             GroupBox {
@@ -822,6 +856,7 @@ private struct KofiWidgetView: NSViewRepresentable {
 private enum SettingsSection: String, CaseIterable, Identifiable {
     case folders
     case appearance
+    case display
     case language
     case templates
     case maintenance
@@ -836,6 +871,8 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             return L("settings.folders.title")
         case .appearance:
             return L("settings.appearance.title")
+        case .display:
+            return L("settings.display.title")
         case .language:
             return L("settings.language.title")
         case .templates:
@@ -855,6 +892,8 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             return "folder"
         case .appearance:
             return "paintbrush"
+        case .display:
+            return "eye"
         case .language:
             return "globe"
         case .templates:
@@ -874,6 +913,8 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             return L("settings.folders.subtitle")
         case .appearance:
             return L("settings.appearance.subtitle")
+        case .display:
+            return L("settings.display.subtitle")
         case .language:
             return L("settings.language.subtitle")
         case .templates:

@@ -20,6 +20,7 @@ struct FileTableView: View {
     let trashItems: ([FileItem]) -> Void
     let isLoading: Bool
     let contentFontSize: Double
+    let showFileExtensions: Bool
     let templates: [MetadataTemplate]
     let applyTemplate: (MetadataTemplate) -> Void
 
@@ -97,7 +98,7 @@ struct FileTableView: View {
             }
         }
         .sheet(item: $itemPendingRename) { item in
-            RenameItemView(item: item) { newName in
+            RenameItemView(item: item, showExtension: showFileExtensions) { newName in
                 renameItem(item, newName)
                 itemPendingRename = nil
             } cancel: {
@@ -831,7 +832,7 @@ struct FileTableView: View {
                         if !focused { commitRename(item) }
                     }
             } else {
-                Text(item.name)
+                Text(displayName(for: item))
                     .lineLimit(1)
             }
 
@@ -839,8 +840,28 @@ struct FileTableView: View {
         }
     }
 
+    /// Nome mostrato in tabella: se le estensioni sono nascoste (e l'elemento è un file
+    /// con estensione), rimuove il suffisso dell'estensione. Cartelle e file senza
+    /// estensione restano invariati.
+    private func displayName(for item: FileItem) -> String {
+        guard !showFileExtensions, !item.isFolder else { return item.name }
+        let ext = item.url.pathExtension
+        guard !ext.isEmpty else { return item.name }
+        return (item.name as NSString).deletingPathExtension
+    }
+
+    /// Ricostruisce il nome completo del file a partire dal nome mostrato: quando le
+    /// estensioni sono nascoste riaggancia l'estensione originale, così rinominando un
+    /// file l'estensione viene preservata. Quando sono visualizzate il nome è già completo.
+    private func fullName(fromDisplay display: String, for item: FileItem) -> String {
+        guard !showFileExtensions, !item.isFolder else { return display }
+        let ext = item.url.pathExtension
+        guard !ext.isEmpty else { return display }
+        return "\(display).\(ext)"
+    }
+
     private func beginRename(_ item: FileItem) {
-        editingName = item.name
+        editingName = displayName(for: item)
         editingItemID = item.id
         nameFieldFocused = true
     }
@@ -849,8 +870,10 @@ struct FileTableView: View {
         guard editingItemID == item.id else { return }
         editingItemID = nil
         let trimmed = editingName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty, trimmed != item.name {
-            renameItem(item, trimmed)
+        guard !trimmed.isEmpty else { return }
+        let newFullName = fullName(fromDisplay: trimmed, for: item)
+        if newFullName != item.name {
+            renameItem(item, newFullName)
         }
     }
 
@@ -1512,17 +1535,35 @@ private struct BulkEditView: View {
 
 private struct RenameItemView: View {
     let item: FileItem
+    /// Se `true` il campo mostra e modifica il nome completo (estensione inclusa);
+    /// se `false` mostra solo il nome base e l'estensione originale viene preservata.
+    let showExtension: Bool
     var rename: (String) -> Void
     var cancel: () -> Void
 
     @ObservedObject private var loc = LocalizationManager.shared
     @State private var name: String
 
-    init(item: FileItem, rename: @escaping (String) -> Void, cancel: @escaping () -> Void) {
+    init(item: FileItem, showExtension: Bool, rename: @escaping (String) -> Void, cancel: @escaping () -> Void) {
         self.item = item
+        self.showExtension = showExtension
         self.rename = rename
         self.cancel = cancel
-        _name = State(initialValue: item.name)
+        _name = State(initialValue: RenameItemView.displayName(for: item, showExtension: showExtension))
+    }
+
+    private static func displayName(for item: FileItem, showExtension: Bool) -> String {
+        guard !showExtension, !item.isFolder else { return item.name }
+        let ext = item.url.pathExtension
+        guard !ext.isEmpty else { return item.name }
+        return (item.name as NSString).deletingPathExtension
+    }
+
+    private func fullName(from display: String) -> String {
+        guard !showExtension, !item.isFolder else { return display }
+        let ext = item.url.pathExtension
+        guard !ext.isEmpty else { return display }
+        return "\(display).\(ext)"
     }
 
     var body: some View {
@@ -1538,10 +1579,10 @@ private struct RenameItemView: View {
                 Button(L("common.cancel"), action: cancel)
 
                 Button(L("ctx.rename")) {
-                    rename(name)
+                    rename(fullName(from: name))
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name == item.name)
+                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || fullName(from: name) == item.name)
             }
         }
         .padding(20)

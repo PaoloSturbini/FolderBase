@@ -8,11 +8,12 @@ final class FileBrowserService {
         .fileResourceIdentifierKey, .volumeIdentifierKey
     ]
 
-    func contentsOfDirectory(at url: URL) throws -> [FileItem] {
+    func contentsOfDirectory(at url: URL, showHiddenFiles: Bool = false) throws -> [FileItem] {
+        let options: FileManager.DirectoryEnumerationOptions = showHiddenFiles ? [] : [.skipsHiddenFiles]
         let urls = try FileManager.default.contentsOfDirectory(
             at: url,
             includingPropertiesForKeys: Array(Self.resourceKeys),
-            options: [.skipsHiddenFiles]
+            options: options
         )
 
         return try urls

@@ -87,6 +87,7 @@ enum LocalizedStrings {
         // MARK: Sezioni configurazione
         "settings.folders.title": ("Cartelle", "Folders"),
         "settings.appearance.title": ("Aspetto", "Appearance"),
+        "settings.display.title": ("Visualizzazione", "Display"),
         "settings.language.title": ("Lingua", "Language"),
         "settings.templates.title": ("Template", "Templates"),
         "settings.maintenance.title": ("Manutenzione", "Maintenance"),
@@ -95,6 +96,7 @@ enum LocalizedStrings {
 
         "settings.folders.subtitle": ("Cartelle monitorate, creazione elementi e recenti", "Tracked folders, item creation and recents"),
         "settings.appearance.subtitle": ("Tema e dimensione dei caratteri", "Theme and font size"),
+        "settings.display.subtitle": ("Opzioni di visualizzazione della tabella", "Table display options"),
         "settings.language.subtitle": ("Lingua dell'interfaccia", "Interface language"),
         "settings.templates.subtitle": ("Insiemi di colonne riutilizzabili", "Reusable sets of columns"),
         "settings.maintenance.subtitle": ("Sincronizzazione e pulizia dei metadata", "Metadata sync and cleanup"),
@@ -111,6 +113,13 @@ enum LocalizedStrings {
         "language.card": ("Lingua dell'interfaccia", "Interface language"),
         "language.label": ("Lingua", "Language"),
         "language.note": ("Scegli la lingua dei menù e dei pannelli. La modifica è immediata.", "Choose the language of menus and panels. The change is applied immediately."),
+
+        // MARK: Visualizzazione
+        "display.card": ("Opzioni tabella", "Table options"),
+        "display.showHidden": ("Visualizza file nascosti", "Show hidden files"),
+        "display.showHiddenNote": ("Mostra nella tabella i file e le cartelle nascosti (quelli che iniziano con un punto).", "Show hidden files and folders (those starting with a dot) in the table."),
+        "display.showExtensions": ("Visualizza estensione dei file", "Show file extensions"),
+        "display.showExtensionsNote": ("Mostra l'estensione nel nome dei file. Quando è attiva, rinominando un file puoi modificarne anche l'estensione.", "Show the extension in file names. When on, renaming a file also lets you change its extension."),
 
         // MARK: Cartelle (pannello)
         "folders.currentCard": ("Cartella corrente", "Current folder"),
