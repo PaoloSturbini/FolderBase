@@ -1366,11 +1366,12 @@ private struct DateMetadataCell: View {
         MetadataValueFormatter.date(from: text)
     }
 
-    /// La data è considerata futura se il suo giorno è successivo a oggi.
-    private var isFuture: Bool {
+    /// La data è considerata scaduta se il suo giorno è precedente a oggi (oggi NON è
+    /// scaduto). Le date scadute vengono mostrate in rosso.
+    private var isExpired: Bool {
         guard let date else { return false }
         let calendar = Calendar.current
-        return calendar.startOfDay(for: date) > calendar.startOfDay(for: Date())
+        return calendar.startOfDay(for: date) < calendar.startOfDay(for: Date())
     }
 
     private var dateBinding: Binding<Date> {
@@ -1394,7 +1395,7 @@ private struct DateMetadataCell: View {
                 // Mostra solo la data (niente frecce né pulsante di rimozione). Rossa se futura.
                 // Un clic apre un calendario in popover per modificarla.
                 Text(MetadataValueFormatter.displayDate(from: text))
-                    .foregroundStyle(isFuture ? Color.red : Color.primary)
+                    .foregroundStyle(isExpired ? Color.red : Color.primary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                     .onTapGesture { isEditing = true }
