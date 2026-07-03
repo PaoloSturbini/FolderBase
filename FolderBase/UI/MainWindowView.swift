@@ -61,6 +61,7 @@ struct MainWindowView: View {
                 goUp: goUp,
                 renameItem: renameItem,
                 moveItem: moveItem,
+                moveItems: moveItemsByPath,
                 trashItems: trashItems,
                 isLoading: isLoading,
                 contentFontSize: contentFontSize,

@@ -17,6 +17,9 @@ struct FileTableView: View {
     let goUp: () -> Void
     let renameItem: (FileItem, String) -> Void
     let moveItem: (FileItem) -> Void
+    /// Sposta i file (per path) dentro una cartella di destinazione. Usato dal drop di file
+    /// trascinati da fuori (Finder) nella tabella → vanno nella cartella corrente.
+    let moveItems: ([String], URL) -> Void
     let trashItems: ([FileItem]) -> Void
     let isLoading: Bool
     let contentFontSize: Double
@@ -584,6 +587,13 @@ struct FileTableView: View {
         .onDeleteCommand {
             requestTrash(selectedItems)
         }
+        // Drop di file trascinati da fuori (Finder, ecc.): vengono spostati nella cartella
+        // attualmente aperta. moveItems salta i file già presenti e ricarica la vista.
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let destination = selectedFolderURL, !urls.isEmpty else { return false }
+            moveItems(urls.map(\.path), destination)
+            return true
+        }
         .alert(L("delete.confirm.title"), isPresented: $showDeleteConfirmation) {
             Button(L("common.cancel"), role: .cancel) {
                 itemsPendingDeletion = []
@@ -799,21 +809,36 @@ struct FileTableView: View {
     }
 
     /// Icona del file/cartella. È l'unico punto trascinabile della riga: afferrando
-    /// l'icona si può trascinare il file fuori dall'app, senza rallentare il clic sul nome.
+    /// l'icona si può trascinare il file fuori dall'app senza rallentare il clic sul nome.
+    /// Usa un ponte AppKit (`FileDragIcon`) che avvia una sessione di trascinamento nativa
+    /// con TUTTI i file selezionati (come Finder), cosa non possibile col `.draggable` di
+    /// SwiftUI su una singola cella. Un clic semplice sull'icona seleziona solo quella riga.
     @ViewBuilder
     private func icon(for item: FileItem, side: CGFloat) -> some View {
-        let image = Image(nsImage: FileIconProvider.icon(for: item))
-            .resizable()
-            .aspectRatio(contentMode: .fit)
-            .frame(width: side, height: side)
-
         if editingItemID == item.id {
-            image
+            Image(nsImage: FileIconProvider.icon(for: item))
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: side, height: side)
         } else {
-            image
-                .draggable(item.url)
-                .help(L("name.dragHint"))
+            FileDragIcon(
+                image: FileIconProvider.icon(for: item),
+                dragURLs: { dragURLs(for: item) },
+                onClick: { selection = [item.id] }
+            )
+            .frame(width: side, height: side)
+            .help(L("name.dragHint"))
         }
+    }
+
+    /// URL da trascinare afferrando l'icona di `item`: se `item` fa parte di una selezione
+    /// multipla si trascinano tutti gli elementi selezionati (comportamento Finder),
+    /// altrimenti solo `item`.
+    private func dragURLs(for item: FileItem) -> [URL] {
+        if selection.contains(item.id) && selection.count > 1 {
+            return items.filter { selection.contains($0.id) }.map(\.url)
+        }
+        return [item.url]
     }
 
     /// Nome mostrato in tabella: se le estensioni sono nascoste (e l'elemento è un file
@@ -1355,6 +1380,87 @@ private struct EditableTextCell: View {
         guard isEditing else { return }
         isEditing = false
         if draft != text { text = draft }
+    }
+}
+
+/// Icona trascinabile con drag nativo AppKit: avvia una sessione di trascinamento con
+/// più file (tutti quelli selezionati), che SwiftUI `.draggable` non consente da una
+/// singola cella. Un clic semplice (senza trascinamento) inoltra `onClick` per selezionare.
+private struct FileDragIcon: NSViewRepresentable {
+    let image: NSImage
+    let dragURLs: () -> [URL]
+    let onClick: () -> Void
+
+    func makeNSView(context: Context) -> FileDragSourceView {
+        let view = FileDragSourceView()
+        view.image = image
+        view.dragURLsProvider = dragURLs
+        view.onClick = onClick
+        return view
+    }
+
+    func updateNSView(_ view: FileDragSourceView, context: Context) {
+        view.image = image
+        view.dragURLsProvider = dragURLs
+        view.onClick = onClick
+        view.needsDisplay = true
+    }
+}
+
+/// NSView che disegna l'icona e, al trascinamento, avvia una `NSDraggingSession` con un
+/// `NSDraggingItem` per ogni file (fileURL su pasteboard → il Finder li sposta/copia tutti).
+final class FileDragSourceView: NSView {
+    var image: NSImage?
+    var dragURLsProvider: () -> [URL] = { [] }
+    var onClick: () -> Void = {}
+
+    private var mouseDownLocation: NSPoint = .zero
+    private var didDrag = false
+
+    override var isFlipped: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        image?.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1.0)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        mouseDownLocation = event.locationInWindow
+        didDrag = false
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard !didDrag else { return }
+        let dx = event.locationInWindow.x - mouseDownLocation.x
+        let dy = event.locationInWindow.y - mouseDownLocation.y
+        // Soglia ~4px: sotto è un clic, sopra è un trascinamento.
+        guard (dx * dx + dy * dy) > 16 else { return }
+
+        let urls = dragURLsProvider()
+        guard !urls.isEmpty else { return }
+        didDrag = true
+
+        let draggingItems: [NSDraggingItem] = urls.enumerated().map { index, url in
+            let item = NSDraggingItem(pasteboardWriter: url as NSURL)
+            let dragImage = NSWorkspace.shared.icon(forFile: url.path)
+            // Impila leggermente le icone quando i file sono più d'uno.
+            let frame = NSRect(x: CGFloat(index) * 6, y: CGFloat(index) * 6,
+                               width: bounds.width, height: bounds.height)
+            item.setDraggingFrame(frame, contents: dragImage)
+            return item
+        }
+        beginDraggingSession(with: draggingItems, event: event, source: self)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if !didDrag { onClick() }
+    }
+}
+
+extension FileDragSourceView: NSDraggingSource {
+    func draggingSession(_ session: NSDraggingSession,
+                         sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        [.copy, .move, .link]
     }
 }
 
