@@ -31,7 +31,6 @@ struct FileTableView: View {
     @State private var editingName: String = ""
     @FocusState private var nameFieldFocused: Bool
     @State private var quickLookItem: FileItem?
-    @State private var isBulkEditing = false
     @State private var itemsPendingDeletion: [FileItem] = []
     @State private var showDeleteConfirmation = false
     @State private var tableSortOrder: [FileItemSortComparator] = []
@@ -107,16 +106,6 @@ struct FileTableView: View {
         }
         .sheet(item: $quickLookItem) { item in
             QuickLookSheet(url: item.url) { quickLookItem = nil }
-        }
-        .sheet(isPresented: $isBulkEditing) {
-            BulkEditView(fields: metadataFields) { field, value in
-                // Lo stato Kanban non si applica alle cartelle.
-                let targets = field.kind == .kanban ? selectedItems.filter { !$0.isFolder } : selectedItems
-                metadataStore.updateBulk(items: targets, field: field, value: value)
-                isBulkEditing = false
-            } cancel: {
-                isBulkEditing = false
-            }
         }
         .onAppear { refreshDisplayCache() }
         .onChange(of: items) { refreshDisplayCache() }
@@ -246,29 +235,6 @@ struct FileTableView: View {
     @ViewBuilder
     private var toolbarButtons: some View {
         HStack(spacing: 8) {
-            if !selection.isEmpty {
-                Text("\(selection.count) \(L("toolbar.selectedSuffix"))")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-
-                Button {
-                    isBulkEditing = true
-                } label: {
-                    Label(L("toolbar.edit"), systemImage: "square.and.pencil")
-                }
-                .disabled(metadataFields.isEmpty)
-                .help(L("toolbar.editHelp"))
-
-                Button(role: .destructive) {
-                    requestTrash(selectedItems)
-                } label: {
-                    Label(L("toolbar.trash"), systemImage: "trash")
-                }
-                .help(L("toolbar.trashHelp"))
-
-                Divider().frame(height: 20)
-            }
-
             if hasKanbanField {
                 Picker(L("toolbar.view"), selection: $viewMode) {
                     Image(systemName: "tablecells").tag(ViewMode.table)
@@ -589,6 +555,7 @@ struct FileTableView: View {
         .contextMenu(forSelectionType: FileItem.ID.self) { ids in
             rowContextMenu(for: ids)
         } primaryAction: { ids in
+            // Doppio clic: apre l'elemento.
             if let id = ids.first, let item = items.first(where: { $0.id == id }) {
                 openItem(item)
             }
@@ -602,6 +569,16 @@ struct FileTableView: View {
         }
         .onChange(of: hiddenByFolder) {
             persistHiddenColumns()
+        }
+        // Tasto Invio: rinomina l'elemento selezionato (come nel Finder). Nessun gesto sul
+        // nome, quindi la selezione col clic resta nativa e affidabile.
+        .onKeyPress(.return) {
+            guard editingItemID == nil,
+                  selection.count == 1,
+                  let id = selection.first,
+                  let item = items.first(where: { $0.id == id }) else { return .ignored }
+            beginRename(item)
+            return .handled
         }
         // Tasto Cancella (⌫): chiede conferma prima di cestinare la selezione.
         .onDeleteCommand {
@@ -665,15 +642,6 @@ struct FileTableView: View {
                 Label(L("ctx.move"), systemImage: "folder")
             }
 
-            if !metadataFields.isEmpty {
-                Button {
-                    selection = [single.id]
-                    isBulkEditing = true
-                } label: {
-                    Label(L("ctx.setMetadata"), systemImage: "square.and.pencil")
-                }
-            }
-
             Divider()
 
             Button(role: .destructive) {
@@ -693,14 +661,6 @@ struct FileTableView: View {
                 revealInFinder(targets)
             } label: {
                 Label(L("ctx.revealFinder"), systemImage: "magnifyingglass")
-            }
-
-            if !metadataFields.isEmpty {
-                Button {
-                    isBulkEditing = true
-                } label: {
-                    Label("\(L("ctx.setMetadataManyPrefix")) \(targets.count) \(L("ctx.setMetadataManySuffix"))", systemImage: "square.and.pencil")
-                }
             }
 
             Divider()
@@ -793,9 +753,10 @@ struct FileTableView: View {
     }
 
     /// Stessa cella (icona reale + nome) per file e cartelle, altezza riga uniforme.
-    /// Clic singolo sul nome → rinomina sul posto (TextField in linea); doppio clic →
-    /// apre l'elemento (cartella: entra nella sottocartella; file: app predefinita).
-    /// Durante la modifica niente tap/drag, così i clic vanno al campo di testo.
+    /// NIENTE gesti di tap qui: la selezione è gestita nativamente dalla tabella (clic
+    /// singolo) e resta così perfettamente affidabile. Apertura: doppio clic via
+    /// `primaryAction`. Rinomina: tasto Invio sulla riga selezionata (vedi `.onKeyPress`
+    /// nella tabella) o menu contestuale.
     @ViewBuilder
     private func nameCell(_ item: FileItem) -> some View {
         let label = nameLabel(item)
@@ -807,9 +768,6 @@ struct FileTableView: View {
         } else {
             label
                 .help(item.isFolder ? L("name.helpFolder") : L("name.helpFile"))
-                .draggable(item.url)
-                .onTapGesture(count: 2) { openItem(item) }
-                .onTapGesture(count: 1) { beginRename(item) }
         }
     }
 
@@ -817,10 +775,10 @@ struct FileTableView: View {
     private func nameLabel(_ item: FileItem) -> some View {
         let iconSide = max(contentFontSize + 3, 16)
         HStack(spacing: 8) {
-            Image(nsImage: FileIconProvider.icon(for: item))
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(width: iconSide, height: iconSide)
+            // Il trascinamento del file parte solo dall'icona: così il clic sul TESTO del
+            // nome resta istantaneo come le altre celle (il drag su tutta la cella
+            // introduceva un ritardo alla pressione per distinguere clic/trascinamento).
+            icon(for: item, side: iconSide)
 
             if editingItemID == item.id {
                 TextField(L("common.name"), text: $editingName)
@@ -837,6 +795,24 @@ struct FileTableView: View {
             }
 
             Spacer(minLength: 0)
+        }
+    }
+
+    /// Icona del file/cartella. È l'unico punto trascinabile della riga: afferrando
+    /// l'icona si può trascinare il file fuori dall'app, senza rallentare il clic sul nome.
+    @ViewBuilder
+    private func icon(for item: FileItem, side: CGFloat) -> some View {
+        let image = Image(nsImage: FileIconProvider.icon(for: item))
+            .resizable()
+            .aspectRatio(contentMode: .fit)
+            .frame(width: side, height: side)
+
+        if editingItemID == item.id {
+            image
+        } else {
+            image
+                .draggable(item.url)
+                .help(L("name.dragHint"))
         }
     }
 
@@ -1384,19 +1360,30 @@ private struct EditableTextCell: View {
 
 private struct DateMetadataCell: View {
     @Binding var text: String
+    @State private var isEditing = false
+
+    private var date: Date? {
+        MetadataValueFormatter.date(from: text)
+    }
+
+    /// La data è considerata futura se il suo giorno è successivo a oggi.
+    private var isFuture: Bool {
+        guard let date else { return false }
+        let calendar = Calendar.current
+        return calendar.startOfDay(for: date) > calendar.startOfDay(for: Date())
+    }
 
     private var dateBinding: Binding<Date> {
         Binding(
-            get: { MetadataValueFormatter.date(from: text) ?? Date() },
+            get: { date ?? Date() },
             set: { text = MetadataValueFormatter.string(from: $0) }
         )
     }
 
     var body: some View {
-        HStack(spacing: 4) {
+        Group {
             if text.isEmpty {
-                // Cella vuota appena creata: non mostra nulla. Un clic imposta la data odierna
-                // e fa apparire il selettore.
+                // Cella vuota appena creata: non mostra nulla. Un clic imposta la data odierna.
                 Color.clear
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .contentShape(Rectangle())
@@ -1404,20 +1391,19 @@ private struct DateMetadataCell: View {
                         text = MetadataValueFormatter.string(from: Date())
                     }
             } else {
-                DatePicker("", selection: dateBinding, displayedComponents: .date)
-                    .labelsHidden()
-                    .datePickerStyle(.compact)
-
-                Button {
-                    text = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.borderless)
-                .help(L("date.remove"))
-
-                Spacer(minLength: 0)
+                // Mostra solo la data (niente frecce né pulsante di rimozione). Rossa se futura.
+                // Un clic apre un calendario in popover per modificarla.
+                Text(MetadataValueFormatter.displayDate(from: text))
+                    .foregroundStyle(isFuture ? Color.red : Color.primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture { isEditing = true }
+                    .popover(isPresented: $isEditing) {
+                        DatePicker("", selection: dateBinding, displayedComponents: .date)
+                            .datePickerStyle(.graphical)
+                            .labelsHidden()
+                            .padding()
+                    }
             }
         }
     }
@@ -1451,84 +1437,6 @@ extension MetadataTagColor {
             return .black
         default:
             return .white
-        }
-    }
-}
-
-private struct BulkEditView: View {
-    let fields: [MetadataField]
-    var apply: (MetadataField, String) -> Void
-    var cancel: () -> Void
-
-    @ObservedObject private var loc = LocalizationManager.shared
-    @State private var selectedFieldID: String = ""
-    @State private var textValue = ""
-    @State private var dateValue = Date()
-
-    private var selectedField: MetadataField? {
-        fields.first { $0.id == selectedFieldID } ?? fields.first
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(L("bulk.title"))
-                .font(.headline)
-
-            Picker(L("bulk.column"), selection: $selectedFieldID) {
-                ForEach(fields) { field in
-                    Text(field.name).tag(field.id)
-                }
-            }
-
-            if let field = selectedField {
-                valueEditor(for: field)
-            }
-
-            HStack {
-                Spacer()
-                Button(L("common.cancel"), action: cancel)
-                Button(L("common.apply")) {
-                    if let field = selectedField {
-                        apply(field, resolvedValue(for: field))
-                    }
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(selectedField == nil)
-            }
-        }
-        .padding(20)
-        .frame(width: 420)
-        .onAppear {
-            if selectedFieldID.isEmpty { selectedFieldID = fields.first?.id ?? "" }
-        }
-    }
-
-    @ViewBuilder
-    private func valueEditor(for field: MetadataField) -> some View {
-        switch field.kind {
-        case .kanban, .select:
-            Picker(L("common.value"), selection: $textValue) {
-                Text(L("common.empty")).tag("")
-                ForEach(field.options) { option in
-                    Text(option.label).tag(option.label)
-                }
-            }
-        case .date:
-            DatePicker(L("common.value"), selection: $dateValue, displayedComponents: .date)
-        case .number:
-            TextField(L("bulk.numberValue"), text: $textValue)
-                .multilineTextAlignment(.trailing)
-        case .text, .link:
-            TextField(L("common.value"), text: $textValue)
-        }
-    }
-
-    private func resolvedValue(for field: MetadataField) -> String {
-        switch field.kind {
-        case .date:
-            return MetadataValueFormatter.string(from: dateValue)
-        default:
-            return textValue
         }
     }
 }

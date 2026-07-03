@@ -235,8 +235,9 @@ enum LocalizedStrings {
         "ctx.trash": ("Sposta nel Cestino", "Move to Trash"),
 
         // MARK: Cella nome / link
-        "name.helpFolder": ("Doppio clic per aprire la cartella · clic singolo per rinominare", "Double-click to open the folder · single click to rename"),
-        "name.helpFile": ("Doppio clic per aprire con l'app predefinita · clic singolo per rinominare", "Double-click to open with the default app · single click to rename"),
+        "name.helpFolder": ("Doppio clic per aprire la cartella · Invio per rinominare", "Double-click to open the folder · Return to rename"),
+        "name.helpFile": ("Doppio clic per aprire con l'app predefinita · Invio per rinominare", "Double-click to open with the default app · Return to rename"),
+        "name.dragHint": ("Trascina l'icona per spostare il file", "Drag the icon to move the file"),
         "link.placeholder": ("Percorso o URL", "Path or URL"),
         "link.chooseFile": ("Scegli file o cartella", "Choose file or folder"),
         "link.wiki": ("Collega nota come wiki link", "Link note as wiki link"),
