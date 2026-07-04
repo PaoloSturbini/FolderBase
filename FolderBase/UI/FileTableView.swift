@@ -21,6 +21,9 @@ struct FileTableView: View {
     /// trascinati da fuori (Finder) nella tabella → vanno nella cartella corrente.
     let moveItems: ([String], URL) -> Void
     let trashItems: ([FileItem]) -> Void
+    /// Crea un file/cartella nella cartella corrente. Ritorna il nome creato o nil in caso
+    /// di errore. Parametri: nome, estensione (usata solo per i file), isDirectory.
+    let createItem: (String, String, Bool) -> String?
     let isLoading: Bool
     let contentFontSize: Double
     let showFileExtensions: Bool
@@ -28,6 +31,7 @@ struct FileTableView: View {
     let applyTemplate: (MetadataTemplate) -> Void
 
     @State private var isAddingField = false
+    @State private var newItemRequest: NewItemRequest?
     @State private var fieldPendingEdit: MetadataField?
     @State private var itemPendingRename: FileItem?
     @State private var editingItemID: FileItem.ID?
@@ -105,6 +109,11 @@ struct FileTableView: View {
                 itemPendingRename = nil
             } cancel: {
                 itemPendingRename = nil
+            }
+        }
+        .sheet(item: $newItemRequest) { request in
+            NewItemSheet(isDirectory: request.isDirectory, createItem: createItem) {
+                newItemRequest = nil
             }
         }
         .sheet(item: $quickLookItem) { item in
@@ -248,6 +257,27 @@ struct FileTableView: View {
                 .frame(width: 90)
                 .help(L("toolbar.viewHelp"))
             }
+
+            Button {
+                newItemRequest = NewItemRequest(isDirectory: false)
+            } label: {
+                Label(L("toolbar.newFile"), systemImage: "doc.badge.plus")
+            }
+            .labelStyle(.iconOnly)
+            .disabled(selectedFolderURL == nil)
+            .help(L("toolbar.newFileHelp"))
+
+            Button {
+                newItemRequest = NewItemRequest(isDirectory: true)
+            } label: {
+                Label(L("toolbar.newFolder"), systemImage: "folder.badge.plus")
+            }
+            .labelStyle(.iconOnly)
+            .disabled(selectedFolderURL == nil)
+            .help(L("toolbar.newFolderHelp"))
+
+            Divider()
+                .frame(height: 20)
 
             columnsMenu
 
@@ -1545,6 +1575,73 @@ extension MetadataTagColor {
         default:
             return .white
         }
+    }
+}
+
+/// Richiesta di creazione di un nuovo elemento nella cartella corrente (file o cartella).
+/// Identifiable per pilotare la sheet.
+private struct NewItemRequest: Identifiable {
+    let id = UUID()
+    let isDirectory: Bool
+}
+
+/// Piccola sheet per creare un file o una cartella nella cartella corrente. Per i file
+/// propone di default l'estensione ".md" (modificabile). Riusa la closure `createItem`
+/// di MainWindowView, che crea l'elemento su disco e ricarica la vista.
+private struct NewItemSheet: View {
+    let isDirectory: Bool
+    let createItem: (String, String, Bool) -> String?
+    let dismiss: () -> Void
+
+    @ObservedObject private var loc = LocalizationManager.shared
+    @State private var name = ""
+    @State private var fileExtension = "md"
+    @State private var didFail = false
+    @FocusState private var nameFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(isDirectory ? L("newItem.directoryTitle") : L("newItem.fileTitle"))
+                .font(.headline)
+
+            HStack(spacing: 8) {
+                TextField(L("common.name"), text: $name)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 240)
+                    .focused($nameFocused)
+
+                if !isDirectory {
+                    Text(".")
+                        .foregroundStyle(.secondary)
+                    TextField(L("folders.extension"), text: $fileExtension)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                }
+            }
+
+            if didFail {
+                Label(L("folders.createFailed"), systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+            }
+
+            HStack {
+                Spacer()
+                Button(L("common.cancel"), action: dismiss)
+                Button(isDirectory ? L("folders.createFolder") : L("folders.createFile")) {
+                    if createItem(name, fileExtension, isDirectory) != nil {
+                        dismiss()
+                    } else {
+                        didFail = true
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 380)
+        .onAppear { nameFocused = true }
     }
 }
 

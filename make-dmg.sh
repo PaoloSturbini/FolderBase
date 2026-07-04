@@ -12,7 +12,7 @@ CONFIG="release"
 BUILD_PATH="/tmp/folderbase-run"
 ICON_PNG="AppIcon.png"
 BUNDLE_ID="com.paolosturbini.folderbase"
-VERSION="1.2.2"
+VERSION="1.3"
 DIST_DIR="dist"
 
 echo ">> Compilo in ${CONFIG}..."

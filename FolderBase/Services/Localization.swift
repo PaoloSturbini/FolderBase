@@ -94,7 +94,7 @@ enum LocalizedStrings {
         "settings.help.title": ("Aiuto", "Help"),
         "settings.support.title": ("Info su FolderBase", "About FolderBase"),
 
-        "settings.folders.subtitle": ("Cartelle monitorate, creazione elementi e recenti", "Tracked folders, item creation and recents"),
+        "settings.folders.subtitle": ("Cartelle monitorate e recenti", "Tracked folders and recents"),
         "settings.appearance.subtitle": ("Tema e dimensione dei caratteri", "Theme and font size"),
         "settings.display.subtitle": ("Opzioni di visualizzazione della tabella", "Table display options"),
         "settings.language.subtitle": ("Lingua dell'interfaccia", "Interface language"),
@@ -134,6 +134,8 @@ enum LocalizedStrings {
         "folders.recentCard": ("Cartelle recenti", "Recent folders"),
         "newItem.file": ("File vuoto", "Empty file"),
         "newItem.directory": ("Cartella", "Folder"),
+        "newItem.fileTitle": ("Nuovo file", "New file"),
+        "newItem.directoryTitle": ("Nuova cartella", "New folder"),
 
         // MARK: Manutenzione
         "maint.intro": ("Riallinea i metadata al filesystem se hai spostato, rinominato o cancellato file da un'altra parte del Mac.", "Realign metadata with the filesystem if you moved, renamed or deleted files elsewhere on the Mac."),
@@ -176,6 +178,20 @@ enum LocalizedStrings {
         "about.supportText": ("Se FolderBase ti è utile, puoi offrirmi un caffè su Ko-fi. Grazie!", "If FolderBase is useful to you, you can buy me a coffee on Ko-fi. Thanks!"),
         "about.supportCard": ("Sostieni lo sviluppo", "Support development"),
 
+        // MARK: Aggiornamenti
+        "update.card": ("Aggiornamenti", "Updates"),
+        "update.check": ("Verifica aggiornamenti", "Check for updates"),
+        "update.upToDatePrefix": ("Hai già l'ultima versione:", "You already have the latest version:"),
+        "update.availablePrefix": ("Nuova versione disponibile:", "New version available:"),
+        "update.failedPrefix": ("Controllo non riuscito:", "Check failed:"),
+        "update.download": ("Scarica", "Download"),
+        "update.later": ("Più tardi", "Later"),
+        "update.autoToggle": ("Verifica automaticamente all'avvio", "Check automatically at launch"),
+        "update.autoNote": ("All'avvio, FolderBase controlla su GitHub se è disponibile una versione più recente da scaricare.", "At launch, FolderBase checks GitHub for a newer version available to download."),
+        "update.available.title": ("Aggiornamento disponibile", "Update available"),
+        "update.available.messagePrefix": ("È disponibile la versione", "Version"),
+        "update.available.messageSuffix": ("di FolderBase. Vuoi scaricarla?", "of FolderBase is available. Do you want to download it?"),
+
         // MARK: Tabella file — empty / navigazione
         "table.chooseFolder": ("Scegli una cartella", "Choose a folder"),
         "table.chooseFolderHint": ("Apri Configurazione nella sidebar e aggiungi una cartella.", "Open Settings in the sidebar and add a folder."),
@@ -208,6 +224,10 @@ enum LocalizedStrings {
         "toolbar.addColumnHelp": ("Aggiungi colonna metadata", "Add metadata column"),
         "toolbar.exportCSV": ("Esporta CSV", "Export CSV"),
         "toolbar.exportCSVHelp": ("Esporta la tabella in CSV", "Export the table to CSV"),
+        "toolbar.newFile": ("Nuovo file", "New file"),
+        "toolbar.newFileHelp": ("Crea un nuovo file nella cartella corrente", "Create a new file in the current folder"),
+        "toolbar.newFolder": ("Nuova cartella", "New folder"),
+        "toolbar.newFolderHelp": ("Crea una nuova cartella nella cartella corrente", "Create a new folder in the current folder"),
 
         // MARK: Menù colonne
         "column.nameAlwaysVisible": ("Nome (sempre visibile)", "Name (always visible)"),

@@ -46,7 +46,6 @@ struct SidebarView: View {
     let removeFolder: (URL) -> Void
     let chooseFolder: () -> Void
     let navigateTo: (URL) -> Void
-    let createItem: (String, String, Bool) -> String?
     let moveItems: ([String], URL) -> Void
     @ObservedObject var templateStore: TemplateStore
     @ObservedObject var metadataStore: MetadataStore
@@ -62,12 +61,9 @@ struct SidebarView: View {
     @State private var maintenanceOrphanIdentities: [String] = []
     @State private var isReconciling = false
     @AppStorage("autoPurgeOrphans") private var autoPurgeOrphans = false
-    @State private var newItemName = ""
-    @State private var newFileExtension = "txt"
-    @State private var newItemKind: NewItemKind = .file
+    @AppStorage("autoCheckUpdates") private var autoCheckUpdates = false
     @State private var settingsSection: SettingsSection = .folders
-    @State private var creationMessage: String?
-    @State private var creationFailed = false
+    @State private var updateState: UpdateUIState = .idle
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -316,58 +312,6 @@ struct SidebarView: View {
                 .padding(6)
             } label: {
                 settingsCardLabel(L("folders.currentCard"), systemImage: "folder")
-            }
-
-            GroupBox {
-                VStack(alignment: .leading, spacing: 14) {
-                    Picker(L("common.type"), selection: $newItemKind) {
-                        ForEach(NewItemKind.allCases) { kind in
-                            Text(kind.title).tag(kind)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .frame(maxWidth: 300)
-
-                    HStack(spacing: 10) {
-                        TextField(L("common.name"), text: $newItemName)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(maxWidth: 280)
-
-                        if newItemKind == .file {
-                            TextField(L("folders.extension"), text: $newFileExtension)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 110)
-                        }
-                    }
-
-                    HStack(spacing: 12) {
-                        Button {
-                            if let createdName = createItem(newItemName, newFileExtension, newItemKind == .directory) {
-                                creationFailed = false
-                                creationMessage = "\(L("folders.createdPrefix")) \(createdName)"
-                                newItemName = ""
-                            } else {
-                                creationFailed = true
-                                creationMessage = L("folders.createFailed")
-                            }
-                        } label: {
-                            Label(newItemKind == .directory ? L("folders.createFolder") : L("folders.createFile"), systemImage: newItemKind == .directory ? "folder.badge.plus" : "doc.badge.plus")
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(selectedFolderURL == nil || newItemName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-                        if let creationMessage {
-                            Label(creationMessage, systemImage: creationFailed ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                                .font(.callout)
-                                .foregroundStyle(creationFailed ? .red : .green)
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(6)
-            } label: {
-                settingsCardLabel(L("folders.createCard"), systemImage: "plus.rectangle.on.folder")
             }
 
             GroupBox {
@@ -768,6 +712,42 @@ struct SidebarView: View {
             }
 
             GroupBox {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 12) {
+                        Button {
+                            checkForUpdates()
+                        } label: {
+                            Label(L("update.check"), systemImage: "arrow.down.circle")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .disabled(isCheckingUpdate)
+
+                        if isCheckingUpdate {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                    }
+
+                    updateStatusView
+
+                    Divider()
+
+                    Toggle(L("update.autoToggle"), isOn: $autoCheckUpdates)
+                        .toggleStyle(.checkbox)
+
+                    Text(L("update.autoNote"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+            } label: {
+                settingsCardLabel(L("update.card"), systemImage: "arrow.down.circle")
+            }
+
+            GroupBox {
                 VStack(alignment: .leading, spacing: 14) {
                     Text(L("about.supportText"))
                         .foregroundStyle(.secondary)
@@ -781,6 +761,54 @@ struct SidebarView: View {
             } label: {
                 settingsCardLabel(L("about.supportCard"), systemImage: "cup.and.saucer")
             }
+        }
+    }
+
+    private var isCheckingUpdate: Bool {
+        if case .checking = updateState { return true }
+        return false
+    }
+
+    private func checkForUpdates() {
+        updateState = .checking
+        UpdateService.checkForUpdate { result in
+            switch result {
+            case let .upToDate(current):
+                updateState = .upToDate(current)
+            case let .updateAvailable(latest, _, releaseURL, downloadURL):
+                updateState = .available(latest: latest, releaseURL: releaseURL, downloadURL: downloadURL)
+            case let .failed(message):
+                updateState = .failed(message)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var updateStatusView: some View {
+        switch updateState {
+        case .idle, .checking:
+            EmptyView()
+        case let .upToDate(current):
+            Label("\(L("update.upToDatePrefix")) \(current)", systemImage: "checkmark.circle.fill")
+                .font(.callout)
+                .foregroundStyle(.green)
+        case let .available(latest, releaseURL, downloadURL):
+            VStack(alignment: .leading, spacing: 8) {
+                Label("\(L("update.availablePrefix")) \(latest)", systemImage: "sparkles")
+                    .font(.callout)
+                    .foregroundStyle(Color.accentColor)
+
+                Button {
+                    NSWorkspace.shared.open(downloadURL ?? releaseURL)
+                } label: {
+                    Label(L("update.download"), systemImage: "arrow.down.circle.fill")
+                }
+                .buttonStyle(.bordered)
+            }
+        case let .failed(message):
+            Label("\(L("update.failedPrefix")) \(message)", systemImage: "exclamationmark.triangle.fill")
+                .font(.callout)
+                .foregroundStyle(.red)
         }
     }
 }
@@ -929,18 +957,11 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     }
 }
 
-private enum NewItemKind: String, CaseIterable, Identifiable {
-    case file
-    case directory
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .file:
-            return L("newItem.file")
-        case .directory:
-            return L("newItem.directory")
-        }
-    }
+/// Stato del controllo aggiornamenti mostrato nella sezione "Info su FolderBase".
+private enum UpdateUIState {
+    case idle
+    case checking
+    case upToDate(String)
+    case available(latest: String, releaseURL: URL, downloadURL: URL?)
+    case failed(String)
 }

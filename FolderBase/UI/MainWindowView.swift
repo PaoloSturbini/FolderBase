@@ -19,9 +19,13 @@ struct MainWindowView: View {
     @AppStorage("autoPurgeOrphans") private var autoPurgeOrphans = false
     @AppStorage("showHiddenFiles") private var showHiddenFiles = false
     @AppStorage("showFileExtensions") private var showFileExtensions = false
+    @AppStorage("autoCheckUpdates") private var autoCheckUpdates = false
     @State private var managedWatcher: FSEventsWatcher?
     @State private var treeRefreshID = UUID()
     @State private var isLoading = false
+    /// Popolato all'avvio (se il controllo automatico è attivo) quando GitHub segnala una
+    /// versione più recente: pilota l'alert che propone di scaricarla.
+    @State private var availableUpdate: AvailableUpdate?
 
     var body: some View {
         // HSplitView nativo invece di NavigationSplitView: niente animazioni di colonna
@@ -41,7 +45,6 @@ struct MainWindowView: View {
                 removeFolder: removeRecentFolder,
                 chooseFolder: chooseFolder,
                 navigateTo: navigate,
-                createItem: createItemInCurrentFolder,
                 moveItems: moveItemsByPath,
                 templateStore: templateStore,
                 metadataStore: metadataStore
@@ -63,6 +66,7 @@ struct MainWindowView: View {
                 moveItem: moveItem,
                 moveItems: moveItemsByPath,
                 trashItems: trashItems,
+                createItem: createItemInCurrentFolder,
                 isLoading: isLoading,
                 contentFontSize: contentFontSize,
                 showFileExtensions: showFileExtensions,
@@ -76,9 +80,39 @@ struct MainWindowView: View {
         .onAppear {
             loadInitialFolderIfNeeded()
             performInitialSync()
+            checkForUpdatesIfEnabled()
         }
         .onChange(of: showHiddenFiles) { _, _ in
             reloadCurrentFolder()
+        }
+        .alert(
+            L("update.available.title"),
+            isPresented: Binding(
+                get: { availableUpdate != nil },
+                set: { if !$0 { availableUpdate = nil } }
+            ),
+            presenting: availableUpdate
+        ) { update in
+            Button(L("update.download")) {
+                NSWorkspace.shared.open(update.url)
+                availableUpdate = nil
+            }
+            Button(L("update.later"), role: .cancel) {
+                availableUpdate = nil
+            }
+        } message: { update in
+            Text("\(L("update.available.messagePrefix")) \(update.tag) \(L("update.available.messageSuffix"))")
+        }
+    }
+
+    /// All'avvio, se l'utente ha attivato il controllo automatico, chiede a GitHub se c'è
+    /// una versione più recente e in caso affermativo mostra l'alert con il download.
+    private func checkForUpdatesIfEnabled() {
+        guard autoCheckUpdates else { return }
+        UpdateService.checkForUpdate { result in
+            if case let .updateAvailable(latest, _, releaseURL, downloadURL) = result {
+                availableUpdate = AvailableUpdate(tag: latest, url: downloadURL ?? releaseURL)
+            }
         }
     }
 
@@ -433,4 +467,11 @@ struct MainWindowView: View {
             errorMessage = error.localizedDescription
         }
     }
+}
+
+/// Versione più recente rilevata su GitHub, con l'URL da aprire per scaricarla.
+private struct AvailableUpdate: Identifiable {
+    let id = UUID()
+    let tag: String
+    let url: URL
 }
