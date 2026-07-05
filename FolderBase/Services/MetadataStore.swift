@@ -863,6 +863,41 @@ final class MetadataStore: ObservableObject {
         // per cartella farebbero altrimenti una scansione completa della tabella.
         try execute("CREATE INDEX IF NOT EXISTS idx_metadata_values_field ON metadata_values(field_id)")
         try execute("CREATE INDEX IF NOT EXISTS idx_metadata_fields_folder ON metadata_fields(folder_identity)")
+
+        try migrateContentSchema()
+    }
+
+    /// Schema per l'indicizzazione del CONTENUTO dei file (Fase 0: estrazione testo/OCR +
+    /// full-text search). Additivo: nessuna modifica alle tabelle esistenti.
+    /// - `file_content`: una riga per file indicizzato, con testo estratto, stato e hash
+    ///   di change-detection (evita di ri-estrarre file immutati).
+    /// - `content_fts`: indice FTS5 (unicode61, diacritici rimossi) per la ricerca testuale;
+    ///   `file_identity` non è indicizzato, serve solo a ricondurre i match al file.
+    private func migrateContentSchema() throws {
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS file_content (
+                file_identity TEXT PRIMARY KEY,
+                extracted_text TEXT,
+                ocr_used INTEGER NOT NULL DEFAULT 0,
+                content_hash TEXT,
+                extracted_at REAL,
+                index_state TEXT NOT NULL DEFAULT 'pending',
+                FOREIGN KEY(file_identity) REFERENCES files(identity) ON DELETE CASCADE
+            )
+            """
+        )
+
+        try execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS content_fts USING fts5(
+                file_identity UNINDEXED,
+                name,
+                body,
+                tokenize = 'unicode61 remove_diacritics 2'
+            )
+            """
+        )
     }
 
     private func migrateLegacyJSONIfNeeded() throws {
@@ -1005,6 +1040,101 @@ final class MetadataStore: ObservableObject {
             volumeIdentifier: stableDescription(resourceValues.volumeIdentifier),
             path: fileURL.path
         )
+    }
+
+    // MARK: - Indicizzazione contenuti (Fase 0: estrazione + full-text search)
+
+    /// Hash di change-detection già salvato per un file (nil se mai indicizzato).
+    /// Usato dall'`IndexingService` per saltare i file immutati.
+    func contentHash(for identity: String) -> String? {
+        var statement: OpaquePointer?
+        guard (try? prepare("SELECT content_hash FROM file_content WHERE file_identity = ?", statement: &statement)) != nil else { return nil }
+        defer { sqlite3_finalize(statement) }
+        try? bind([.text(identity)], to: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        let value = columnText(statement, 0)
+        return value.isEmpty ? nil : value
+    }
+
+    /// Numero di file con contenuto effettivamente indicizzato (stato "indexed").
+    func indexedContentCount() -> Int {
+        (try? intValue("SELECT COUNT(*) FROM file_content WHERE index_state = 'indexed'")) ?? 0
+    }
+
+    /// Salva il testo estratto da un file e aggiorna l'indice full-text. Registra prima il
+    /// file nella tabella `files` (necessario per la foreign key) senza toccare il percorso
+    /// caldo di navigazione.
+    func storeExtractedText(for item: FileItem, text: String, ocrUsed: Bool, hash: String) {
+        _ = try? registerFile(at: item.url)
+        try? execute(
+            """
+            INSERT INTO file_content (file_identity, extracted_text, ocr_used, content_hash, extracted_at, index_state)
+            VALUES (?, ?, ?, ?, ?, 'indexed')
+            ON CONFLICT(file_identity) DO UPDATE SET
+                extracted_text = excluded.extracted_text,
+                ocr_used = excluded.ocr_used,
+                content_hash = excluded.content_hash,
+                extracted_at = excluded.extracted_at,
+                index_state = 'indexed'
+            """,
+            bindings: [
+                .text(item.identity),
+                .text(text),
+                .int(ocrUsed ? 1 : 0),
+                .text(hash),
+                .real(Date().timeIntervalSince1970)
+            ]
+        )
+        try? execute("DELETE FROM content_fts WHERE file_identity = ?", bindings: [.text(item.identity)])
+        try? execute(
+            "INSERT INTO content_fts (file_identity, name, body) VALUES (?, ?, ?)",
+            bindings: [.text(item.identity), .text(item.name), .text(text)]
+        )
+    }
+
+    /// Marca un file come non supportato (nessun testo estraibile) salvando comunque l'hash,
+    /// così l'indicizzazione non lo riprova finché il file non cambia.
+    func markContentUnsupported(for item: FileItem, hash: String) {
+        _ = try? registerFile(at: item.url)
+        try? execute(
+            """
+            INSERT INTO file_content (file_identity, extracted_text, ocr_used, content_hash, extracted_at, index_state)
+            VALUES (?, NULL, 0, ?, ?, 'unsupported')
+            ON CONFLICT(file_identity) DO UPDATE SET
+                extracted_text = NULL,
+                content_hash = excluded.content_hash,
+                extracted_at = excluded.extracted_at,
+                index_state = 'unsupported'
+            """,
+            bindings: [.text(item.identity), .text(hash), .real(Date().timeIntervalSince1970)]
+        )
+        try? execute("DELETE FROM content_fts WHERE file_identity = ?", bindings: [.text(item.identity)])
+    }
+
+    /// Ricerca full-text: ritorna le identità dei file il cui nome o contenuto corrisponde
+    /// alla query. Ogni termine diventa un match di prefisso (`termine*`), combinati in AND.
+    func searchFileContent(_ rawQuery: String) -> Set<String> {
+        guard let matchQuery = Self.ftsMatchQuery(from: rawQuery) else { return [] }
+        var statement: OpaquePointer?
+        guard (try? prepare("SELECT file_identity FROM content_fts WHERE content_fts MATCH ?", statement: &statement)) != nil else { return [] }
+        defer { sqlite3_finalize(statement) }
+        try? bind([.text(matchQuery)], to: statement)
+
+        var result: Set<String> = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result.insert(columnText(statement, 0))
+        }
+        return result
+    }
+
+    /// Costruisce una query MATCH FTS5 sicura: estrae solo token alfanumerici (così eventuali
+    /// caratteri speciali non rompono la sintassi) e li trasforma in prefissi in AND.
+    static func ftsMatchQuery(from raw: String) -> String? {
+        let terms = raw.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+        guard !terms.isEmpty else { return nil }
+        return terms.map { "\($0)*" }.joined(separator: " ")
     }
 }
 

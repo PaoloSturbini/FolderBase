@@ -29,6 +29,7 @@ struct FileTableView: View {
     let showFileExtensions: Bool
     let templates: [MetadataTemplate]
     let applyTemplate: (MetadataTemplate) -> Void
+    @ObservedObject var indexingService: IndexingService
 
     @State private var isAddingField = false
     @State private var newItemRequest: NewItemRequest?
@@ -43,6 +44,7 @@ struct FileTableView: View {
     @State private var tableSortOrder: [FileItemSortComparator] = []
     @State private var selection: Set<FileItem.ID> = []
     @State private var searchText = ""
+    @State private var searchScope: SearchScope = .name
     @State private var optionFilters: [String: Set<String>] = [:]
     @State private var viewMode: ViewMode = .table
     @State private var boardFieldID: String?
@@ -60,6 +62,13 @@ struct FileTableView: View {
     private enum ViewMode: String, CaseIterable, Identifiable {
         case table
         case board
+        var id: String { rawValue }
+    }
+
+    /// Ambito della ricerca: per nome (comportamento storico) o per contenuto indicizzato (FTS).
+    private enum SearchScope: String, CaseIterable, Identifiable {
+        case name
+        case content
         var id: String { rawValue }
     }
 
@@ -122,6 +131,8 @@ struct FileTableView: View {
         .onAppear { refreshDisplayCache() }
         .onChange(of: items) { refreshDisplayCache() }
         .onChange(of: searchText) { refreshDisplayCache() }
+        .onChange(of: searchScope) { refreshDisplayCache() }
+        .onChange(of: indexingService.isIndexing) { refreshDisplayCache() }
         .onChange(of: optionFilters) { refreshDisplayCache() }
         .onChange(of: tableSortOrder) { refreshDisplayCache() }
         .onChange(of: metadataFields) { refreshDisplayCache() }
@@ -222,31 +233,78 @@ struct FileTableView: View {
         .border(Color(nsColor: .separatorColor), width: 0.5)
     }
 
-    private var searchField: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary)
-            TextField(L("table.search"), text: $searchText)
-                .textFieldStyle(.plain)
-                .frame(width: 160)
-            if !searchText.isEmpty {
-                Button {
-                    searchText = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
+    /// Controllo di indicizzazione contenuti: avvia l'estrazione testo/OCR della cartella
+    /// corrente; durante l'esecuzione mostra il progresso e permette di interrompere.
+    @ViewBuilder
+    private var indexControl: some View {
+        if indexingService.isIndexing {
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.small)
+                if let progress = indexingService.progress {
+                    Text("\(progress.processed)/\(progress.total)")
+                        .font(.caption)
+                        .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
+                Button {
+                    indexingService.cancel()
+                } label: {
+                    Image(systemName: "stop.circle")
+                }
                 .buttonStyle(.borderless)
+                .hoverDescription(L("index.stop"))
             }
+        } else {
+            Button {
+                indexingService.index(items: items, store: metadataStore)
+            } label: {
+                Label(L("toolbar.index"), systemImage: "text.magnifyingglass")
+            }
+            .labelStyle(.iconOnly)
+            .disabled(selectedFolderURL == nil || items.allSatisfy { $0.isFolder })
+            .hoverDescription(L("toolbar.indexHelp"))
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Color(nsColor: .controlBackgroundColor), in: Capsule())
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            Picker(L("search.scope.help"), selection: $searchScope) {
+                Text(L("search.scope.name")).tag(SearchScope.name)
+                Text(L("search.scope.content")).tag(SearchScope.content)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 150)
+            .hoverDescription(L("search.scope.help"))
+
+            HStack(spacing: 4) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField(L("table.search"), text: $searchText)
+                    .textFieldStyle(.plain)
+                    .frame(width: 160)
+                if !searchText.isEmpty {
+                    Button {
+                        searchText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Color(nsColor: .controlBackgroundColor), in: Capsule())
+        }
     }
 
     @ViewBuilder
     private var toolbarButtons: some View {
         HStack(spacing: 8) {
+            indexControl
+
             if hasKanbanField {
                 Picker(L("toolbar.view"), selection: $viewMode) {
                     Image(systemName: "tablecells").tag(ViewMode.table)
@@ -487,6 +545,12 @@ struct FileTableView: View {
         let needle = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         var result: [FileItem]
 
+        // In modalità "contenuto" la corrispondenza arriva dall'indice full-text (FTS): il set
+        // di identità che matchano viene calcolato una volta sola qui (query SQLite, pochi ms).
+        let contentMatches: Set<String>? = (searchScope == .content && !needle.isEmpty)
+            ? metadataStore.searchFileContent(needle)
+            : nil
+
         if optionFilters.isEmpty, needle.isEmpty {
             result = items
         } else {
@@ -498,6 +562,12 @@ struct FileTableView: View {
                 }
 
                 guard !needle.isEmpty else { return true }
+
+                if let contentMatches {
+                    return contentMatches.contains(item.id)
+                }
+
+                // Modalità "nome": nome file o valori metadata.
                 if item.name.lowercased().contains(needle) { return true }
                 for (_, perItem) in index {
                     if let value = perItem[item.id], value.lowercased().contains(needle) { return true }

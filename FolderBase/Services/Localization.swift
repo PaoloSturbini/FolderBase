@@ -233,6 +233,15 @@ enum LocalizedStrings {
         "nav.forward": ("Avanti", "Forward"),
         "nav.up": ("Cartella superiore", "Parent folder"),
         "table.search": ("Cerca", "Search"),
+        "search.scope.name": ("Nome", "Name"),
+        "search.scope.content": ("Contenuto", "Content"),
+        "search.scope.help": ("Cerca nel nome o nel contenuto indicizzato dei file", "Search by file name or indexed content"),
+
+        // MARK: Indicizzazione contenuti (AI / ricerca)
+        "toolbar.index": ("Indicizza contenuti", "Index contents"),
+        "toolbar.indexHelp": ("Estrae il testo dei file di questa cartella (con OCR per PDF scansionati e immagini) per poterli cercare per contenuto", "Extracts the text of this folder's files (with OCR for scanned PDFs and images) so you can search them by content"),
+        "index.running": ("Indicizzazione…", "Indexing…"),
+        "index.stop": ("Interrompi", "Stop"),
 
         // MARK: Toolbar tabella
         "toolbar.selectedSuffix": ("selez.", "selected"),
