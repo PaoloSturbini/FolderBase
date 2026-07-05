@@ -10,18 +10,20 @@ struct EmbeddingResult: Sendable {
     let vector: [Float]
 }
 
-/// Astrae il calcolo degli embedding, così in futuro si possono affiancare provider locali
-/// (Ollama) o cloud (BYOK) senza toccare il resto della pipeline. Vedi docs/AI-Indexing-Study.md.
-protocol TextEmbedder {
-    /// Embedding di un testo; nil se non calcolabile (lingua non supportata, testo vuoto…).
-    func embed(_ text: String) -> EmbeddingResult?
+/// Astrae il calcolo degli embedding: on-device (Apple), locale (Ollama) o cloud (BYOK OpenAI),
+/// intercambiabili senza toccare il resto della pipeline. Vedi docs/AI-Indexing-Study.md.
+/// È `async` perché i provider di rete fanno richieste HTTP; `Sendable` per poter attraversare
+/// i confini di attore (es. `Task.detached` durante l'indicizzazione).
+protocol TextEmbedder: Sendable {
+    /// Embedding di un testo; nil se non calcolabile (lingua non supportata, rete assente…).
+    func embed(_ text: String) async -> EmbeddingResult?
 }
 
 /// Embedder **on-device** basato su `NLEmbedding.sentenceEmbedding` (framework NaturalLanguage,
 /// nessuna rete, nessun costo). Rileva la lingua del testo e usa il modello corrispondente;
 /// il `providerID` è `apple-nl-<lingua>`. Thread-safe: la cache dei modelli è protetta da lock
 /// (indicizzazione e ricerca possono chiamarlo da thread diversi).
-final class AppleNLEmbedder: TextEmbedder {
+final class AppleNLEmbedder: TextEmbedder, @unchecked Sendable {
     static let shared = AppleNLEmbedder()
 
     private var cache: [String: NLEmbedding] = [:]
@@ -30,7 +32,7 @@ final class AppleNLEmbedder: TextEmbedder {
     /// Lingue con sentence embedding disponibile su cui ripiegare se il rilevamento fallisce.
     private let fallbackLanguages: [NLLanguage] = [.italian, .english]
 
-    func embed(_ text: String) -> EmbeddingResult? {
+    func embed(_ text: String) async -> EmbeddingResult? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 

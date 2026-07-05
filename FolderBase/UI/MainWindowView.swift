@@ -75,8 +75,7 @@ struct MainWindowView: View {
                 contentFontSize: contentFontSize,
                 showFileExtensions: showFileExtensions,
                 templates: templateStore.templates,
-                applyTemplate: applyTemplate,
-                indexingService: indexingService
+                applyTemplate: applyTemplate
             )
             .frame(minWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
         }

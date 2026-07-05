@@ -74,6 +74,14 @@ struct SidebarView: View {
     @State private var indexStatus: FolderIndexStatus = .unknown
     @State private var isCheckingIndexStatus = false
     @State private var indexStatusCheckedAt: Date?
+    @AppStorage(AIProviderSettings.Keys.provider) private var aiProviderRaw = AIEmbeddingProvider.apple.rawValue
+    @AppStorage(AIProviderSettings.Keys.ollamaBaseURL) private var aiOllamaBaseURL = AIProviderSettings.defaultOllamaBaseURL
+    @AppStorage(AIProviderSettings.Keys.ollamaModel) private var aiOllamaModel = AIProviderSettings.defaultOllamaModel
+    @AppStorage(AIProviderSettings.Keys.openAIModel) private var aiOpenAIModel = AIProviderSettings.defaultOpenAIModel
+    @State private var openAIKeyInput = ""
+    @State private var hasOpenAIKey = false
+    @State private var aiTesting = false
+    @State private var aiTestMessage: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -438,14 +446,117 @@ struct SidebarView: View {
             } label: {
                 settingsCardLabel(L("indexing.card"), systemImage: "text.magnifyingglass")
             }
+
+            GroupBox {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(L("ai.engine.intro"))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Picker(L("ai.provider.label"), selection: $aiProviderRaw) {
+                        Text(L("ai.provider.apple")).tag(AIEmbeddingProvider.apple.rawValue)
+                        Text(L("ai.provider.ollama")).tag(AIEmbeddingProvider.ollama.rawValue)
+                        Text(L("ai.provider.openai")).tag(AIEmbeddingProvider.openai.rawValue)
+                    }
+                    .pickerStyle(.radioGroup)
+
+                    if aiProviderRaw == AIEmbeddingProvider.ollama.rawValue {
+                        TextField(L("ai.ollama.url"), text: $aiOllamaBaseURL)
+                            .textFieldStyle(.roundedBorder)
+                        TextField(L("ai.ollama.model"), text: $aiOllamaModel)
+                            .textFieldStyle(.roundedBorder)
+                    } else if aiProviderRaw == AIEmbeddingProvider.openai.rawValue {
+                        TextField(L("ai.openai.model"), text: $aiOpenAIModel)
+                            .textFieldStyle(.roundedBorder)
+                        HStack(spacing: 8) {
+                            SecureField(L("ai.openai.key"), text: $openAIKeyInput)
+                                .textFieldStyle(.roundedBorder)
+                            Button(L("ai.openai.saveKey")) { saveOpenAIKey() }
+                                .disabled(openAIKeyInput.isEmpty)
+                        }
+                        if hasOpenAIKey {
+                            HStack(spacing: 8) {
+                                Label(L("ai.openai.keySet"), systemImage: "checkmark.seal.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(.green)
+                                Button(L("ai.openai.removeKey")) {
+                                    KeychainStore.delete(account: AIProviderSettings.openAIKeyAccount)
+                                    hasOpenAIKey = false
+                                }
+                                .buttonStyle(.borderless)
+                                .font(.caption)
+                            }
+                        }
+                        Text(L("ai.cloudWarning"))
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    HStack(spacing: 12) {
+                        Button {
+                            testEngine()
+                        } label: {
+                            Label(L("ai.test"), systemImage: "bolt.fill")
+                        }
+                        .disabled(aiTesting)
+
+                        if aiTesting {
+                            ProgressView().controlSize(.small)
+                        }
+                        if let aiTestMessage {
+                            Text(aiTestMessage)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Text(L("ai.reindexNote"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+            } label: {
+                settingsCardLabel(L("ai.engine.card"), systemImage: "cpu")
+            }
         }
         .task(id: selectedFolderURL?.path ?? "") {
             loadCachedStatus()
+        }
+        .onAppear {
+            hasOpenAIKey = KeychainStore.exists(account: AIProviderSettings.openAIKeyAccount)
+        }
+        .onChange(of: aiProviderRaw) { _, _ in
+            aiTestMessage = nil
         }
         .onChange(of: indexingService.isIndexing) { _, running in
             // A fine indicizzazione ricalcola e memorizza lo stato (così diventa verde da solo).
             if !running {
                 Task { await recomputeStatus() }
+            }
+        }
+    }
+
+    private func saveOpenAIKey() {
+        KeychainStore.save(openAIKeyInput, account: AIProviderSettings.openAIKeyAccount)
+        hasOpenAIKey = !openAIKeyInput.isEmpty
+        openAIKeyInput = ""
+    }
+
+    private func testEngine() {
+        aiTesting = true
+        aiTestMessage = nil
+        Task {
+            let embedder = EmbeddingEngine.active()
+            let result = await embedder.embed("prova di connessione al motore di embedding")
+            aiTesting = false
+            if let result {
+                aiTestMessage = "\(L("ai.test.ok")) \(result.vector.count)"
+            } else {
+                aiTestMessage = L("ai.test.fail")
             }
         }
     }

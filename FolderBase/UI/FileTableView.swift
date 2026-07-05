@@ -29,7 +29,6 @@ struct FileTableView: View {
     let showFileExtensions: Bool
     let templates: [MetadataTemplate]
     let applyTemplate: (MetadataTemplate) -> Void
-    @ObservedObject var indexingService: IndexingService
 
     @State private var isAddingField = false
     @State private var newItemRequest: NewItemRequest?
@@ -45,6 +44,10 @@ struct FileTableView: View {
     @State private var selection: Set<FileItem.ID> = []
     @State private var searchText = ""
     @State private var searchScope: SearchScope = .name
+    /// Ranking della ricerca semantica (identità→posizione), calcolato in modo asincrono.
+    @State private var semanticRank: [String: Int]?
+    /// Token anti-race: scarta i risultati di una ricerca semantica superata da una più recente.
+    @State private var semanticToken = UUID()
     @State private var optionFilters: [String: Set<String>] = [:]
     @State private var viewMode: ViewMode = .table
     @State private var boardFieldID: String?
@@ -130,15 +133,43 @@ struct FileTableView: View {
         .sheet(item: $quickLookItem) { item in
             QuickLookSheet(url: item.url) { quickLookItem = nil }
         }
-        .onAppear { refreshDisplayCache() }
-        .onChange(of: items) { refreshDisplayCache() }
-        .onChange(of: searchText) { refreshDisplayCache() }
-        .onChange(of: searchScope) { refreshDisplayCache() }
-        .onChange(of: indexingService.isIndexing) { refreshDisplayCache() }
+        .onAppear { onSearchChanged() }
+        .onChange(of: items) { onSearchChanged() }
+        .onChange(of: searchText) { onSearchChanged() }
+        .onChange(of: searchScope) { onSearchChanged() }
         .onChange(of: optionFilters) { refreshDisplayCache() }
         .onChange(of: tableSortOrder) { refreshDisplayCache() }
         .onChange(of: metadataFields) { refreshDisplayCache() }
         .onChange(of: metadataStore.metadataByFileIdentity) { refreshDisplayCache() }
+    }
+
+    /// Gestisce i cambi di ricerca. In modalità "Significato" l'embedding della query è
+    /// asincrono (può essere una chiamata di rete con Ollama/OpenAI): si calcola il ranking in
+    /// un Task e poi si aggiorna la cache; per Nome/Contenuto si aggiorna subito.
+    private func onSearchChanged() {
+        let rawNeedle = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard searchScope == .semantic, !rawNeedle.isEmpty else {
+            semanticRank = nil
+            refreshDisplayCache()
+            return
+        }
+
+        let token = UUID()
+        semanticToken = token
+        let candidates = Set(items.map { $0.id })
+        Task {
+            let embedder = EmbeddingEngine.active()
+            let embedding = await embedder.embed(rawNeedle)
+            guard semanticToken == token else { return }   // superata da una ricerca più recente
+
+            if let embedding {
+                let ranked = metadataStore.semanticSearch(queryVector: embedding.vector, providerID: embedding.providerID, candidates: candidates, limit: 300)
+                semanticRank = Dictionary(uniqueKeysWithValues: ranked.enumerated().map { ($0.element.identity, $0.offset) })
+            } else {
+                semanticRank = [:]
+            }
+            refreshDisplayCache()
+        }
     }
 
     private var emptyState: some View {
@@ -235,79 +266,75 @@ struct FileTableView: View {
         .border(Color(nsColor: .separatorColor), width: 0.5)
     }
 
-    /// Controllo di indicizzazione contenuti: avvia l'estrazione testo/OCR della cartella
-    /// corrente; durante l'esecuzione mostra il progresso e permette di interrompere.
-    @ViewBuilder
-    private var indexControl: some View {
-        if indexingService.isIndexing {
-            HStack(spacing: 6) {
-                ProgressView()
-                    .controlSize(.small)
-                if let progress = indexingService.progress {
-                    Text("\(progress.processed)/\(progress.total)")
-                        .font(.caption)
-                        .monospacedDigit()
+    /// Box di ricerca unico: campo testo + menu per scegliere il tipo di ricerca
+    /// (Nome / Contenuto / Significato), tutto in un'unica capsula.
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+
+            TextField(searchPlaceholder, text: $searchText)
+                .textFieldStyle(.plain)
+                .frame(width: 180)
+
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(.secondary)
                 }
-                Button {
-                    indexingService.cancel()
-                } label: {
-                    Image(systemName: "stop.circle")
-                }
                 .buttonStyle(.borderless)
-                .hoverDescription(L("index.stop"))
             }
-        } else {
-            Button {
-                indexingService.index(items: items, store: metadataStore)
+
+            Divider().frame(height: 14)
+
+            Menu {
+                Picker(L("search.scope.help"), selection: $searchScope) {
+                    Text(L("search.scope.name")).tag(SearchScope.name)
+                    Text(L("search.scope.content")).tag(SearchScope.content)
+                    Text(L("search.scope.semantic")).tag(SearchScope.semantic)
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
             } label: {
-                Label(L("toolbar.index"), systemImage: "text.magnifyingglass")
+                HStack(spacing: 3) {
+                    Text(searchScopeLabel)
+                        .font(.caption)
+                    Image(systemName: "chevron.down")
+                        .font(.caption2)
+                }
+                .foregroundStyle(.secondary)
             }
-            .labelStyle(.iconOnly)
-            .disabled(selectedFolderURL == nil || items.allSatisfy { $0.isFolder })
-            .hoverDescription(L("toolbar.indexHelp"))
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .hoverDescription(L("search.scope.help"))
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Color(nsColor: .controlBackgroundColor), in: Capsule())
+    }
+
+    private var searchScopeLabel: String {
+        switch searchScope {
+        case .name: return L("search.scope.name")
+        case .content: return L("search.scope.content")
+        case .semantic: return L("search.scope.semantic")
         }
     }
 
-    private var searchField: some View {
-        HStack(spacing: 6) {
-            Picker(L("search.scope.help"), selection: $searchScope) {
-                Text(L("search.scope.name")).tag(SearchScope.name)
-                Text(L("search.scope.content")).tag(SearchScope.content)
-                Text(L("search.scope.semantic")).tag(SearchScope.semantic)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 220)
-            .hoverDescription(L("search.scope.help"))
-
-            HStack(spacing: 4) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField(L("table.search"), text: $searchText)
-                    .textFieldStyle(.plain)
-                    .frame(width: 160)
-                if !searchText.isEmpty {
-                    Button {
-                        searchText = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.borderless)
-                }
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Color(nsColor: .controlBackgroundColor), in: Capsule())
+    private var searchPlaceholder: String {
+        switch searchScope {
+        case .name: return "\(L("table.search")) · \(L("search.scope.name"))"
+        case .content: return "\(L("table.search")) · \(L("search.scope.content"))"
+        case .semantic: return "\(L("table.search")) · \(L("search.scope.semantic"))"
         }
     }
 
     @ViewBuilder
     private var toolbarButtons: some View {
         HStack(spacing: 8) {
-            indexControl
-
             if hasKanbanField {
                 Picker(L("toolbar.view"), selection: $viewMode) {
                     Image(systemName: "tablecells").tag(ViewMode.table)
@@ -549,18 +576,9 @@ struct FileTableView: View {
         let needle = rawNeedle.lowercased()
         var result: [FileItem]
 
-        // Ricerca semantica: si calcola l'embedding della query e si ottiene un ranking per
-        // similarità (che poi SOSTITUISCE l'ordinamento normale). semanticRank == [:] = nessun match.
-        var semanticRank: [String: Int]?
-        if searchScope == .semantic, !rawNeedle.isEmpty {
-            if let embedding = AppleNLEmbedder.shared.embed(rawNeedle) {
-                let candidates = Set(items.map { $0.id })
-                let ranked = metadataStore.semanticSearch(queryVector: embedding.vector, providerID: embedding.providerID, candidates: candidates, limit: 300)
-                semanticRank = Dictionary(uniqueKeysWithValues: ranked.enumerated().map { ($0.element.identity, $0.offset) })
-            } else {
-                semanticRank = [:]
-            }
-        }
+        // Ricerca semantica: il ranking è calcolato in modo asincrono in `onSearchChanged` e
+        // conservato in `semanticRank` (qui viene solo usato). Sostituisce l'ordinamento normale.
+        let activeSemanticRank: [String: Int]? = (searchScope == .semantic && !rawNeedle.isEmpty) ? semanticRank : nil
 
         // In modalità "contenuto" la corrispondenza arriva dall'indice full-text (FTS): il set
         // di identità che matchano viene calcolato una volta sola qui (query SQLite, pochi ms).
@@ -580,8 +598,8 @@ struct FileTableView: View {
 
                 guard !needle.isEmpty else { return true }
 
-                if let semanticRank {
-                    return semanticRank[item.id] != nil
+                if let activeSemanticRank {
+                    return activeSemanticRank[item.id] != nil
                 }
                 if let contentMatches {
                     return contentMatches.contains(item.id)
@@ -596,9 +614,9 @@ struct FileTableView: View {
             }
         }
 
-        if let semanticRank {
+        if let activeSemanticRank {
             // Ordina per rilevanza semantica (i più simili in alto).
-            result.sort { (semanticRank[$0.id] ?? .max) < (semanticRank[$1.id] ?? .max) }
+            result.sort { (activeSemanticRank[$0.id] ?? .max) < (activeSemanticRank[$1.id] ?? .max) }
         } else if let comparator = tableSortOrder.first {
             result.sort { comparator.compare($0, $1) == .orderedAscending }
         }

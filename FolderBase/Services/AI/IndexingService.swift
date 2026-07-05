@@ -48,8 +48,9 @@ final class IndexingService: ObservableObject {
 
         isIndexing = true
         progress = Progress(processed: 0, total: files.count)
+        let embedder = EmbeddingEngine.active()
         task = Task { [weak self] in
-            await self?.runLoop(files: files, store: store)
+            await self?.runLoop(files: files, store: store, embedder: embedder)
             self?.finish()
         }
     }
@@ -60,12 +61,13 @@ final class IndexingService: ObservableObject {
         isIndexing = true
         progress = Progress(processed: 0, total: 0)   // total 0 → "analisi in corso"
         let limit = maxRecursiveFiles
+        let embedder = EmbeddingEngine.active()
         task = Task { [weak self] in
             let files = await Task.detached(priority: .utility) {
                 Self.fileItems(under: root, limit: limit)
             }.value
             guard let self, !Task.isCancelled else { self?.finish(); return }
-            await self.runLoop(files: files, store: store)
+            await self.runLoop(files: files, store: store, embedder: embedder)
             self.finish()
         }
     }
@@ -134,7 +136,7 @@ final class IndexingService: ObservableObject {
         task = nil
     }
 
-    private func runLoop(files: [FileItem], store: MetadataStore) async {
+    private func runLoop(files: [FileItem], store: MetadataStore, embedder: TextEmbedder) async {
         let total = files.count
         progress = Progress(processed: 0, total: total)
         var processed = 0
@@ -156,7 +158,7 @@ final class IndexingService: ObservableObject {
             if upToDate, let existingText = store.extractedText(for: item.identity) {
                 // Testo già estratto: rigenera solo gli embedding, senza ri-estrarre né ri-OCR.
                 let chunks = await Task.detached(priority: .utility) {
-                    Self.buildChunkVectors(from: existingText)
+                    await Self.buildChunkVectors(from: existingText, embedder: embedder)
                 }.value
                 store.replaceChunks(for: item.identity, chunks: chunks)
             } else {
@@ -167,7 +169,7 @@ final class IndexingService: ObservableObject {
                     let result = await Task.detached(priority: .utility) { () -> (ExtractedText, [ChunkVector])? in
                         guard let extracted = TextExtractor.extractText(from: url),
                               !extracted.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-                        return (extracted, Self.buildChunkVectors(from: extracted.text))
+                        return (extracted, await Self.buildChunkVectors(from: extracted.text, embedder: embedder))
                     }.value
 
                     if let (extracted, chunks) = result {
@@ -184,13 +186,13 @@ final class IndexingService: ObservableObject {
         }
     }
 
-    /// Chunk del testo + embedding di ciascun chunk (on-device). Eseguita su thread di background
-    /// (`nonisolated`: non tocca lo stato del main actor).
-    nonisolated static func buildChunkVectors(from text: String) -> [ChunkVector] {
+    /// Chunk del testo + embedding di ciascun chunk con l'embedder attivo. Eseguita su thread di
+    /// background (`nonisolated`).
+    nonisolated static func buildChunkVectors(from text: String, embedder: TextEmbedder) async -> [ChunkVector] {
         let chunks = TextChunker.chunks(from: text)
         var result: [ChunkVector] = []
         for (index, chunk) in chunks.enumerated() {
-            guard let embedding = AppleNLEmbedder.shared.embed(chunk) else { continue }
+            guard let embedding = await embedder.embed(chunk) else { continue }
             result.append((ordinal: index, text: chunk, providerID: embedding.providerID, vector: embedding.vector))
         }
         return result
