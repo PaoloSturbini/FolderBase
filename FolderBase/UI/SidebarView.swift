@@ -85,6 +85,8 @@ struct SidebarView: View {
     @AppStorage(AIProviderSettings.Keys.chatProvider) private var aiChatProviderRaw = AIChatProvider.none.rawValue
     @AppStorage(AIProviderSettings.Keys.ollamaChatModel) private var aiOllamaChatModel = AIProviderSettings.defaultOllamaChatModel
     @AppStorage(AIProviderSettings.Keys.openAIChatModel) private var aiOpenAIChatModel = AIProviderSettings.defaultOpenAIChatModel
+    @State private var chatTesting = false
+    @State private var chatTestMessage: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -554,6 +556,27 @@ struct SidebarView: View {
                             .foregroundStyle(.orange)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+
+                    if aiChatProviderRaw != AIChatProvider.none.rawValue {
+                        HStack(spacing: 12) {
+                            Button {
+                                testChat()
+                            } label: {
+                                Label(L("ai.chat.test"), systemImage: "bolt.fill")
+                            }
+                            .disabled(chatTesting)
+
+                            if chatTesting {
+                                ProgressView().controlSize(.small)
+                            }
+                            if let chatTestMessage {
+                                Text(chatTestMessage)
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(6)
@@ -571,6 +594,9 @@ struct SidebarView: View {
             aiTestMessage = nil
             // Lo stato dipende dal motore: al cambio provider lo si ricalcola.
             Task { await recomputeStatus() }
+        }
+        .onChange(of: aiChatProviderRaw) { _, _ in
+            chatTestMessage = nil
         }
         .onChange(of: indexingService.isIndexing) { _, running in
             // A fine indicizzazione ricalcola e memorizza lo stato (così diventa verde da solo).
@@ -598,6 +624,34 @@ struct SidebarView: View {
             } else {
                 aiTestMessage = L("ai.test.fail")
             }
+        }
+    }
+
+    private func testChat() {
+        chatTesting = true
+        chatTestMessage = nil
+        Task {
+            guard let chat = ChatEngine.active() else {
+                chatTesting = false
+                chatTestMessage = L("chat.needProvider")
+                return
+            }
+            var reply = ""
+            do {
+                for try await token in chat.stream(system: "Rispondi con una sola parola.", user: "Scrivi: OK") {
+                    reply += token
+                    if reply.count > 40 { break }
+                }
+            } catch {
+                chatTesting = false
+                chatTestMessage = L("ai.chat.testFail")
+                return
+            }
+            chatTesting = false
+            let trimmed = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+            chatTestMessage = trimmed.isEmpty
+                ? L("ai.chat.testFail")
+                : "\(L("ai.chat.testOk")) \"\(String(trimmed.prefix(40)))\""
         }
     }
 
