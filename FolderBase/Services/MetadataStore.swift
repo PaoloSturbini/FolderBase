@@ -1288,13 +1288,24 @@ final class MetadataStore: ObservableObject {
         return text.isEmpty ? nil : text
     }
 
-    /// Vero se il file ha già almeno un embedding calcolato.
+    /// Vero se il file ha già almeno un embedding calcolato (qualsiasi motore).
     func hasVectors(for identity: String) -> Bool {
         var statement: OpaquePointer?
         let sql = "SELECT 1 FROM content_chunks c JOIN chunk_vectors v ON v.chunk_id = c.id WHERE c.file_identity = ? LIMIT 1"
         guard (try? prepare(sql, statement: &statement)) != nil else { return false }
         defer { sqlite3_finalize(statement) }
         try? bind([.text(identity)], to: statement)
+        return sqlite3_step(statement) == SQLITE_ROW
+    }
+
+    /// Vero se il file ha già embedding del MOTORE indicato (provider_id che inizia per prefisso).
+    /// Serve a evitare di saltare file che hanno vettori di un altro motore quando si cambia provider.
+    func hasVectors(for identity: String, providerPrefix: String) -> Bool {
+        var statement: OpaquePointer?
+        let sql = "SELECT 1 FROM content_chunks c JOIN chunk_vectors v ON v.chunk_id = c.id WHERE c.file_identity = ? AND v.provider_id LIKE ? LIMIT 1"
+        guard (try? prepare(sql, statement: &statement)) != nil else { return false }
+        defer { sqlite3_finalize(statement) }
+        try? bind([.text(identity), .text(providerPrefix + "%")], to: statement)
         return sqlite3_step(statement) == SQLITE_ROW
     }
 

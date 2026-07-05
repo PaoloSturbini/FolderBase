@@ -156,6 +156,9 @@ final class IndexingService: ObservableObject {
         let total = files.count
         progress = Progress(processed: 0, total: total)
         var processed = 0
+        // Prefisso del motore attivo: un file è "a posto" solo se ha i vettori di QUESTO motore
+        // (altrimenti va reindicizzato — es. dopo un cambio provider).
+        let providerPrefix = Self.activeProviderPrefix()
 
         for item in files {
             if Task.isCancelled { break }
@@ -165,7 +168,7 @@ final class IndexingService: ObservableObject {
             let effectiveHash = hash ?? UUID().uuidString
             let upToDate = (hash != nil && store.contentHash(for: item.identity) == hash)
 
-            if upToDate, store.hasVectors(for: item.identity) {
+            if upToDate, store.hasVectors(for: item.identity, providerPrefix: providerPrefix) {
                 processed += 1
                 progress = Progress(processed: processed, total: total)
                 continue
