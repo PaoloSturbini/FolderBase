@@ -18,9 +18,10 @@ struct ExtractedText: Sendable {
 /// - **PDF**: layer testo via PDFKit, con fallback OCR pagina-per-pagina se il PDF è scansionato;
 /// - **immagini** (png/jpg/heic/tiff…): OCR via Vision;
 /// - **Word e affini** (doc/docx/rtf/odt/html): via `textutil` (integrato in macOS);
-/// - **PowerPoint** (pptx) e **Excel** (xlsx): unzip del pacchetto OOXML + estrazione testo dagli XML.
+/// - **PowerPoint** (pptx) e **Excel** (xlsx): unzip del pacchetto OOXML + estrazione testo dagli XML;
+/// - **Office legacy** (.xls/.ppt) e **iWork** (.pages/.numbers/.key): best-effort via anteprima QuickLook.
 ///
-/// Formati non gestiti (es. .ppt/.xls binari legacy, iWork): ritornano `nil`.
+/// Nota: per .xls legacy l'anteprima QuickLook espone poco testo (spesso solo i nomi dei fogli).
 ///
 /// Tutte le funzioni sono pensate per l'esecuzione su un thread di background (incluse le
 /// chiamate a `textutil`/`unzip` via `Process`; l'app non è sandboxed).
@@ -70,17 +71,36 @@ enum TextExtractor {
                 guard let text = readPlainText(from: url) else { return nil }
                 return ExtractedText(text: capped(text), ocrUsed: false)
             }
-            return nil
         }
 
-        // Tipo sconosciuto: ultimo tentativo come testo semplice.
-        guard let text = readPlainText(from: url) else { return nil }
-        return ExtractedText(text: capped(text), ocrUsed: false)
+        // Formati "ricchi" binari o a pacchetto senza estrattore diretto: Office legacy
+        // (.xls/.ppt) e iWork (.pages/.numbers/.key Keynote). Si usa l'anteprima generata da
+        // QuickLook come sorgente di testo (on-device). NB: .key Keynote qui viene gestito,
+        // mentre un .key testuale (es. chiave SSH/PEM) fallisce l'anteprima e ricade sotto.
+        if Self.quickLookExtensions.contains(ext) {
+            if let result = extractViaQuickLook(url) { return result }
+        }
+
+        // Tipo sconosciuto: ultimo tentativo come testo semplice (es. PEM, file senza tipo noto).
+        // Per i tipi noti ma non gestiti si evita di proposito la lettura grezza (darebbe binario).
+        if type == nil {
+            guard let text = readPlainText(from: url),
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return ExtractedText(text: capped(text), ocrUsed: false)
+        }
+
+        return nil
     }
 
     /// Estensioni gestite da `textutil` (Word e altri formati rich text/documento).
     private static let textutilExtensions: Set<String> = [
         "doc", "docx", "rtf", "rtfd", "odt", "html", "htm", "webarchive", "wordml"
+    ]
+
+    /// Estensioni gestite come best-effort tramite l'anteprima QuickLook: binari legacy Office
+    /// e pacchetti iWork (non hanno un estrattore testuale nativo diretto).
+    private static let quickLookExtensions: Set<String> = [
+        "xls", "ppt", "pps", "pages", "numbers", "key", "odp", "ods"
     ]
 
     // MARK: - Tipo file
@@ -212,9 +232,42 @@ enum TextExtractor {
         return text.isEmpty ? nil : text
     }
 
+    /// Anteprima QuickLook come sorgente di testo per i formati senza estrattore diretto.
+    /// Genera l'anteprima in una cartella temporanea (`qlmanage -p`), poi ne estrae il testo:
+    /// preferisce `Preview.html`/`.rtf` (via textutil), altrimenti un `Preview.pdf` (via PDFKit,
+    /// con OCR). Pulisce sempre la cartella temporanea.
+    private static func extractViaQuickLook(_ url: URL) -> ExtractedText? {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("folderbase-ql-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        _ = runProcess("/usr/bin/qlmanage", ["-p", "-o", tempDir.path, url.path], timeout: 25)
+
+        guard let bundle = (try? FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil))?
+                .first(where: { $0.pathExtension == "qlpreview" }) else { return nil }
+        let entries = (try? FileManager.default.contentsOfDirectory(at: bundle, includingPropertiesForKeys: nil)) ?? []
+
+        // 1) Sorgente testuale dell'anteprima (contiene il testo vero, non le immagini allegate).
+        if let textSource = entries.first(where: {
+            let name = $0.lastPathComponent.lowercased()
+            return name.hasPrefix("preview") && ["html", "htm", "rtf", "txt"].contains($0.pathExtension.lowercased())
+        }), let text = extractWithTextutil(textSource) {
+            return ExtractedText(text: capped(text), ocrUsed: false)
+        }
+
+        // 2) Anteprima PDF (solo "Preview.pdf": gli Attachment*.pdf sono immagini incorporate).
+        if let previewPDF = entries.first(where: { $0.lastPathComponent.lowercased() == "preview.pdf" }) {
+            return extractPDF(from: previewPDF)
+        }
+
+        return nil
+    }
+
     /// Esegue un processo e ne cattura lo standard output. Legge il pipe PRIMA di
     /// `waitUntilExit` per evitare deadlock quando l'output supera il buffer del pipe.
-    private static func runProcess(_ launchPath: String, _ arguments: [String]) -> Data? {
+    /// Un watchdog termina il processo se supera `timeout` (protegge da anteprime bloccate).
+    private static func runProcess(_ launchPath: String, _ arguments: [String], timeout: TimeInterval = 20) -> Data? {
         guard FileManager.default.isExecutableFile(atPath: launchPath) else { return nil }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: launchPath)
@@ -227,8 +280,15 @@ enum TextExtractor {
         } catch {
             return nil
         }
+
+        let watchdog = DispatchWorkItem {
+            if process.isRunning { process.terminate() }
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: watchdog)
+
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+        watchdog.cancel()
         return data
     }
 
