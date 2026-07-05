@@ -2,6 +2,8 @@
 
 _Studio tecnico, luglio 2026. Ancorato all'architettura attuale (SQLite, identità file stabile per inode, app non-sandboxed, macOS 14.4)._
 
+> **Stato di implementazione (aggiornato luglio 2026).** Le Fasi **0, 1, 2 e 3 sono implementate** sul branch `feature/ai-indexing` (non ancora mergiato su `main`). In sintesi ciò che è realizzato: estrazione testo + OCR per testo/PDF/immagini/Office (docx,pptx,xlsx via textutil/unzip) e best-effort per Office legacy/iWork (via anteprima QuickLook); full-text search FTS5; embedding e **ricerca semantica** on-device (Apple `NLEmbedding`), con motori **intercambiabili** Apple / Ollama (locale) / OpenAI (BYOK, chiave in Portachiavi); **indicizzazione ricorsiva** cartella+sottocartelle dalla Configurazione con **indicatore di stato** (verde/arancione/grigio) memorizzato e legato al motore attivo; **chat RAG** con streaming e citazioni (motore chat Ollama o OpenAI). Deviazioni rispetto al piano originale sono annotate in corsivo nelle sezioni pertinenti e nella §9. Dettaglio fine-grained: vedi cronologia git del branch.
+
 ## 1. Obiettivo
 
 Aggiungere a FolderBase la capacità di **capire il contenuto** dei file (non solo i metadata manuali) e di **cercarli per significato**, mantenendo la filosofia "metadata-first" e locale. Tre capacità distinte ma incatenate:
@@ -219,11 +221,12 @@ protocol ChatProvider {
 
 Ogni fase è spedibile da sola e verificabile con `make-app.sh -c release`.
 
-- **Fase 0 — Estrazione + full-text search (senza AI).** `TextExtractor` + tabella `file_content` + FTS5 di SQLite. Dà subito "cerca dentro i file" con OCR, zero provider esterni, zero vettori. Valore immediato, rischio minimo.
-- **Fase 1 — Embedding on-device + ricerca semantica (opzione B).** `AppleNLProvider` + `VectorStore` BLOB/vDSP + chunking + UI toggle. Tutto locale, nessuna dipendenza nuova.
-- **Fase 2 — Provider intercambiabili.** `OllamaProvider` (locale potente) e `OpenAIProvider` (BYOK) + Keychain + pannello impostazioni + gestione reindex al cambio dimensione.
-- **Fase 3 — Chat con i file (RAG).** `ChatProvider` + `ChatService` (retrieval → prompt → generazione in streaming con citazioni) + `ChatView`. Riusa l'indice della Fase 1/2; ambito per cartella/selezione; provider chat indipendente da quello embedding.
-- **Fase 4 — Scala e qualità.** Passaggio a `sqlite-vec` per grandi volumi; query ibride (vettore + filtri metadata + FTS, RRF); "Trova simili"; ranking migliorato; memoria conversazione multi-turn.
+- ✅ **Fase 0 — Estrazione + full-text search (senza AI). FATTA.** `TextExtractor` + tabella `file_content` + FTS5 (`content_fts`). Copre testo/codice, PDF (PDFKit con fallback OCR Vision), immagini (OCR). _Aggiunto oltre al piano:_ Office moderno (docx/pptx/xlsx via `textutil`/`unzip` OOXML) e best-effort per Office legacy (.xls/.ppt) e iWork (.pages/.numbers/.key) via anteprima **QuickLook** (`qlmanage`).
+- ✅ **Fase 1 — Embedding on-device + ricerca semantica. FATTA.** `AppleNLEmbedder` (`NLEmbedding.sentenceEmbedding`, _non `NLContextualEmbedding`_) + `VectorStore` come BLOB Float32 con coseno via **Accelerate/vDSP** (opzione B) + `TextChunker` + terzo scope di ricerca "Significato". _Nota:_ dimensione dipendente dalla lingua (IT 640, EN 512) → vettori taggati per `provider_id` e confrontati solo tra pari.
+- ✅ **Fase 2 — Provider intercambiabili. FATTA.** `TextEmbedder` async/Sendable; `OllamaEmbedder` (locale) e `OpenAIEmbedder` (BYOK) + `KeychainStore` per la chiave + `EmbeddingEngine.active()` + pannello **Motore AI** in Configurazione con **Prova motore**. `NSAllowsLocalNetworking` per Ollama su localhost. Gestione reindex al cambio motore (vettori per-`provider_id`).
+- ✅ **Fase 3 — Chat con i file (RAG). FATTA.** `ChatProvider` (Ollama `/api/chat` NDJSON, OpenAI `/v1/chat/completions` SSE, **streaming**) + `ChatService` (retrieval `semanticChunks` → prompt con fonti → generazione streaming con **citazioni** cliccabili) + `ChatView` + pulsante **Chat** in toolbar + card impostazioni con **Prova chat**. Ambito attuale: **tutto l'indice**. _Nota:_ nessun LLM di chat on-device su macOS 14 (Foundation Models sarebbe macOS 26+); la chat richiede Ollama o OpenAI.
+- ➕ **Extra implementato (non nel piano originale): indicizzazione ricorsiva + stato cartella.** `IndexingService.indexRecursively` (cartella+sottocartelle, opt-in dalla Configurazione) e **indicatore di stato** verde/arancione/grigio per **copertura reale**, memorizzato in `folder_index_status` e **legato al motore attivo** (arancione se i vettori sono di un altro motore); ricalcolo su richiesta.
+- ⏳ **Fase 4 — Scala e qualità. DA FARE.** Passaggio a `sqlite-vec` per grandi volumi; query ibride (vettore + filtri metadata + FTS, RRF); "Trova simili"; memoria conversazione multi-turn; chat on-device via Foundation Models (richiederebbe target macOS 26).
 
 ## 10. Rischi e caveat
 
