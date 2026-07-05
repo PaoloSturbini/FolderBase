@@ -51,6 +51,7 @@ struct SidebarView: View {
     @ObservedObject var templateStore: TemplateStore
     @ObservedObject var metadataStore: MetadataStore
     @ObservedObject var backupService: BackupService
+    @ObservedObject var indexingService: IndexingService
     @ObservedObject private var loc = LocalizationManager.shared
 
     @State private var isShowingSettings = false
@@ -70,6 +71,8 @@ struct SidebarView: View {
     @State private var backupFailed = false
     @State private var isConfirmingRestore = false
     @State private var pendingRestoreURL: URL?
+    @State private var indexStatus: FolderIndexStatus = .unknown
+    @State private var isCheckingIndexStatus = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -271,6 +274,8 @@ struct SidebarView: View {
                         languageSettings
                     case .templates:
                         templatesSettings
+                    case .indexing:
+                        indexingSettings
                     case .maintenance:
                         maintenanceSettings
                     case .backup:
@@ -359,6 +364,119 @@ struct SidebarView: View {
                 settingsCardLabel(L("folders.recentCard"), systemImage: "clock")
             }
         }
+    }
+
+    private var indexingSettings: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            GroupBox {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text(L("indexing.intro"))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if let selectedFolderURL {
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(indexStatusColor)
+                                .frame(width: 10, height: 10)
+                            Text(indexStatusLabel)
+                                .font(.callout)
+                            if isCheckingIndexStatus {
+                                ProgressView().controlSize(.mini)
+                            }
+                        }
+
+                        HStack(spacing: 12) {
+                            Button {
+                                indexingService.indexRecursively(root: selectedFolderURL, store: metadataStore)
+                            } label: {
+                                Label(indexButtonTitle, systemImage: "sparkles")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.large)
+                            .disabled(indexingService.isIndexing)
+
+                            if indexingService.isIndexing {
+                                ProgressView().controlSize(.small)
+                                Text(indexingProgressText)
+                                    .font(.callout)
+                                    .monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                                Button {
+                                    indexingService.cancel()
+                                } label: {
+                                    Label(L("index.stop"), systemImage: "stop.circle")
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                        }
+                    } else {
+                        Text(L("indexing.noFolder"))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+            } label: {
+                settingsCardLabel(L("indexing.card"), systemImage: "text.magnifyingglass")
+            }
+        }
+        .task(id: selectedFolderURL?.path ?? "") {
+            await refreshIndexStatus()
+        }
+        .onChange(of: indexingService.isIndexing) { _, running in
+            if !running {
+                Task { await refreshIndexStatus() }
+            }
+        }
+    }
+
+    private func refreshIndexStatus() async {
+        guard let selectedFolderURL else {
+            indexStatus = .notIndexed
+            return
+        }
+        isCheckingIndexStatus = true
+        indexStatus = await indexingService.status(root: selectedFolderURL, store: metadataStore)
+        isCheckingIndexStatus = false
+    }
+
+    private var indexStatusColor: Color {
+        switch indexStatus {
+        case .upToDate:
+            return .green
+        case .stale:
+            return .orange
+        case .notIndexed, .unknown:
+            return .gray
+        }
+    }
+
+    private var indexStatusLabel: String {
+        if isCheckingIndexStatus { return L("indexing.status.checking") }
+        switch indexStatus {
+        case .unknown:
+            return L("indexing.status.checking")
+        case .notIndexed:
+            return L("indexing.status.notIndexed")
+        case let .upToDate(files):
+            return "\(L("indexing.status.upToDate")) · \(files) file"
+        case let .stale(indexed, total):
+            return "\(L("indexing.status.stale")) · \(indexed)/\(total)"
+        }
+    }
+
+    private var indexButtonTitle: String {
+        if case .notIndexed = indexStatus { return L("indexing.button") }
+        if case .unknown = indexStatus { return L("indexing.button") }
+        return L("indexing.reindex")
+    }
+
+    private var indexingProgressText: String {
+        guard let progress = indexingService.progress else { return "" }
+        if progress.total == 0 { return L("indexing.scanning") }
+        return "\(progress.processed)/\(progress.total)"
     }
 
     private var maintenanceSettings: some View {
@@ -1081,6 +1199,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     case display
     case language
     case templates
+    case indexing
     case maintenance
     case backup
     case help
@@ -1100,6 +1219,8 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             return L("settings.language.title")
         case .templates:
             return L("settings.templates.title")
+        case .indexing:
+            return L("settings.indexing.title")
         case .maintenance:
             return L("settings.maintenance.title")
         case .backup:
@@ -1123,6 +1244,8 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             return "globe"
         case .templates:
             return "rectangle.stack"
+        case .indexing:
+            return "text.magnifyingglass"
         case .maintenance:
             return "wrench.and.screwdriver"
         case .backup:
@@ -1146,6 +1269,8 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             return L("settings.language.subtitle")
         case .templates:
             return L("settings.templates.subtitle")
+        case .indexing:
+            return L("settings.indexing.subtitle")
         case .maintenance:
             return L("settings.maintenance.subtitle")
         case .backup:

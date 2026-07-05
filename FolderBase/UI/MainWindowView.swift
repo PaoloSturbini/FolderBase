@@ -50,7 +50,8 @@ struct MainWindowView: View {
                 moveItems: moveItemsByPath,
                 templateStore: templateStore,
                 metadataStore: metadataStore,
-                backupService: backupService
+                backupService: backupService,
+                indexingService: indexingService
             )
             .frame(minWidth: 220, idealWidth: 260, maxWidth: 380, maxHeight: .infinity)
 
