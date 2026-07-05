@@ -928,6 +928,20 @@ final class MetadataStore: ObservableObject {
             """
         )
         try execute("CREATE INDEX IF NOT EXISTS idx_chunk_vectors_provider ON chunk_vectors(provider_id)")
+
+        // Esito memorizzato dell'ultimo calcolo di stato di indicizzazione per cartella
+        // (evita di ri-enumerare il sottoalbero a ogni apertura della Configurazione).
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS folder_index_status (
+                folder_path TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                indexed_count INTEGER NOT NULL,
+                total_count INTEGER NOT NULL,
+                checked_at REAL NOT NULL
+            )
+            """
+        )
     }
 
     private func migrateLegacyJSONIfNeeded() throws {
@@ -1091,6 +1105,36 @@ final class MetadataStore: ObservableObject {
     /// Numero di file con contenuto effettivamente indicizzato (stato "indexed").
     func indexedContentCount() -> Int {
         (try? intValue("SELECT COUNT(*) FROM file_content WHERE index_state = 'indexed'")) ?? 0
+    }
+
+    /// Salva l'esito del calcolo di stato di una cartella (memorizzato, ricalcolato su richiesta).
+    func saveFolderIndexStatus(path: String, state: String, indexed: Int, total: Int) {
+        try? execute(
+            """
+            INSERT INTO folder_index_status (folder_path, state, indexed_count, total_count, checked_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(folder_path) DO UPDATE SET
+                state = excluded.state,
+                indexed_count = excluded.indexed_count,
+                total_count = excluded.total_count,
+                checked_at = excluded.checked_at
+            """,
+            bindings: [.text(path), .text(state), .int(indexed), .int(total), .real(Date().timeIntervalSince1970)]
+        )
+    }
+
+    /// Esito memorizzato dell'ultimo calcolo di stato per una cartella (nil se mai calcolato).
+    func folderIndexStatus(path: String) -> (state: String, indexed: Int, total: Int, checkedAt: Date)? {
+        var statement: OpaquePointer?
+        guard (try? prepare("SELECT state, indexed_count, total_count, checked_at FROM folder_index_status WHERE folder_path = ?", statement: &statement)) != nil else { return nil }
+        defer { sqlite3_finalize(statement) }
+        try? bind([.text(path)], to: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        let state = columnText(statement, 0)
+        let indexed = Int(sqlite3_column_int(statement, 1))
+        let total = Int(sqlite3_column_int(statement, 2))
+        let checkedAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 3))
+        return (state, indexed, total, checkedAt)
     }
 
     /// Mappa identità→hash di TUTTI i file indicizzati con successo. Usata per calcolare la

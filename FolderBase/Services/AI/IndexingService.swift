@@ -70,6 +70,39 @@ final class IndexingService: ObservableObject {
         }
     }
 
+    /// Carica lo stato MEMORIZZATO dell'ultima verifica (istantaneo, nessuna enumerazione).
+    /// Ritorna `.unknown` se non è mai stato calcolato per questa cartella.
+    func loadStatus(root: URL, store: MetadataStore) -> (status: FolderIndexStatus, checkedAt: Date)? {
+        guard let record = store.folderIndexStatus(path: root.path) else { return nil }
+        let status: FolderIndexStatus
+        switch record.state {
+        case "upToDate": status = .upToDate(files: record.total)
+        case "stale": status = .stale(indexed: record.indexed, total: record.total)
+        default: status = .notIndexed
+        }
+        return (status, record.checkedAt)
+    }
+
+    /// Ricalcola lo stato (enumera il sottoalbero) e lo MEMORIZZA. Da chiamare su richiesta o a
+    /// fine indicizzazione, non a ogni apertura della Configurazione.
+    @discardableResult
+    func recomputeStatus(root: URL, store: MetadataStore) async -> FolderIndexStatus {
+        let result = await status(root: root, store: store)
+        let state: String
+        let indexed: Int
+        let total: Int
+        switch result {
+        case let .upToDate(files):
+            (state, indexed, total) = ("upToDate", files, files)
+        case let .stale(indexedCount, totalCount):
+            (state, indexed, total) = ("stale", indexedCount, totalCount)
+        case .notIndexed, .unknown:
+            (state, indexed, total) = ("notIndexed", 0, 0)
+        }
+        store.saveFolderIndexStatus(path: root.path, state: state, indexed: indexed, total: total)
+        return result
+    }
+
     /// Calcola lo stato di indicizzazione di una cartella confrontando i file del suo sottoalbero
     /// con quelli già indicizzati e aggiornati nel DB.
     func status(root: URL, store: MetadataStore) async -> FolderIndexStatus {

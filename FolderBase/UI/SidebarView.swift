@@ -73,6 +73,7 @@ struct SidebarView: View {
     @State private var pendingRestoreURL: URL?
     @State private var indexStatus: FolderIndexStatus = .unknown
     @State private var isCheckingIndexStatus = false
+    @State private var indexStatusCheckedAt: Date?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -384,7 +385,23 @@ struct SidebarView: View {
                                 .font(.callout)
                             if isCheckingIndexStatus {
                                 ProgressView().controlSize(.mini)
+                            } else {
+                                Button {
+                                    Task { await recomputeStatus() }
+                                } label: {
+                                    Image(systemName: "arrow.clockwise")
+                                }
+                                .buttonStyle(.borderless)
+                                .foregroundStyle(.secondary)
+                                .disabled(indexingService.isIndexing)
+                                .help(L("indexing.recheck"))
                             }
+                        }
+
+                        if let checkedAt = indexStatusCheckedAt {
+                            Text("\(L("indexing.checkedAt")) \(Self.statusDateFormatter.string(from: checkedAt))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
 
                         HStack(spacing: 12) {
@@ -423,24 +440,47 @@ struct SidebarView: View {
             }
         }
         .task(id: selectedFolderURL?.path ?? "") {
-            await refreshIndexStatus()
+            loadCachedStatus()
         }
         .onChange(of: indexingService.isIndexing) { _, running in
+            // A fine indicizzazione ricalcola e memorizza lo stato (così diventa verde da solo).
             if !running {
-                Task { await refreshIndexStatus() }
+                Task { await recomputeStatus() }
             }
         }
     }
 
-    private func refreshIndexStatus() async {
+    /// Legge lo stato MEMORIZZATO (istantaneo, nessuna enumerazione): usato all'apertura.
+    private func loadCachedStatus() {
         guard let selectedFolderURL else {
             indexStatus = .notIndexed
+            indexStatusCheckedAt = nil
             return
         }
+        if let cached = indexingService.loadStatus(root: selectedFolderURL, store: metadataStore) {
+            indexStatus = cached.status
+            indexStatusCheckedAt = cached.checkedAt
+        } else {
+            indexStatus = .unknown
+            indexStatusCheckedAt = nil
+        }
+    }
+
+    /// Ricalcola lo stato enumerando il sottoalbero e lo memorizza (su richiesta / a fine indicizzazione).
+    private func recomputeStatus() async {
+        guard let selectedFolderURL else { return }
         isCheckingIndexStatus = true
-        indexStatus = await indexingService.status(root: selectedFolderURL, store: metadataStore)
+        indexStatus = await indexingService.recomputeStatus(root: selectedFolderURL, store: metadataStore)
+        indexStatusCheckedAt = Date()
         isCheckingIndexStatus = false
     }
+
+    private static let statusDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter
+    }()
 
     private var indexStatusColor: Color {
         switch indexStatus {
@@ -457,7 +497,7 @@ struct SidebarView: View {
         if isCheckingIndexStatus { return L("indexing.status.checking") }
         switch indexStatus {
         case .unknown:
-            return L("indexing.status.checking")
+            return L("indexing.status.unknown")
         case .notIndexed:
             return L("indexing.status.notIndexed")
         case let .upToDate(files):
