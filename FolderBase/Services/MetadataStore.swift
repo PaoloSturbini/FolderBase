@@ -1044,11 +1044,13 @@ final class MetadataStore: ObservableObject {
 
     // MARK: - Indicizzazione contenuti (Fase 0: estrazione + full-text search)
 
-    /// Hash di change-detection già salvato per un file (nil se mai indicizzato).
-    /// Usato dall'`IndexingService` per saltare i file immutati.
+    /// Hash di change-detection dei soli file già **indicizzati** con successo (nil altrimenti).
+    /// Usato dall'`IndexingService` per saltare i file immutati; i file marcati "unsupported"
+    /// ritornano nil di proposito, così vengono riprovati (utile quando l'estrattore impara
+    /// nuovi formati) senza doverli modificare.
     func contentHash(for identity: String) -> String? {
         var statement: OpaquePointer?
-        guard (try? prepare("SELECT content_hash FROM file_content WHERE file_identity = ?", statement: &statement)) != nil else { return nil }
+        guard (try? prepare("SELECT content_hash FROM file_content WHERE file_identity = ? AND index_state = 'indexed'", statement: &statement)) != nil else { return nil }
         defer { sqlite3_finalize(statement) }
         try? bind([.text(identity)], to: statement)
         guard sqlite3_step(statement) == SQLITE_ROW else { return nil }

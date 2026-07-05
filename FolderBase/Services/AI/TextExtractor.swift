@@ -13,15 +13,17 @@ struct ExtractedText: Sendable {
 
 /// Estrazione del testo dai file, interamente on-device e senza dipendenze esterne.
 ///
-/// Fase 0 (indicizzazione contenuti):
-/// - **testo semplice** (txt/md/csv/json/xml/codice…): lettura diretta con rilevamento encoding;
+/// Formati gestiti (indicizzazione contenuti):
+/// - **testo semplice** (txt/md/csv/tsv/json/xml/codice…): lettura diretta con rilevamento encoding;
 /// - **PDF**: layer testo via PDFKit, con fallback OCR pagina-per-pagina se il PDF è scansionato;
-/// - **immagini** (png/jpg/heic/tiff…): OCR via Vision.
+/// - **immagini** (png/jpg/heic/tiff…): OCR via Vision;
+/// - **Word e affini** (doc/docx/rtf/odt/html): via `textutil` (integrato in macOS);
+/// - **PowerPoint** (pptx) e **Excel** (xlsx): unzip del pacchetto OOXML + estrazione testo dagli XML.
 ///
-/// Formati non gestiti in questa fase (rtf, docx, pptx, xlsx, html): ritornano `nil`
-/// → il file viene marcato "unsupported" e non riprovato finché non cambia.
+/// Formati non gestiti (es. .ppt/.xls binari legacy, iWork): ritornano `nil`.
 ///
-/// Tutte le funzioni sono pensate per l'esecuzione su un thread di background.
+/// Tutte le funzioni sono pensate per l'esecuzione su un thread di background (incluse le
+/// chiamate a `textutil`/`unzip` via `Process`; l'app non è sandboxed).
 enum TextExtractor {
     /// Caratteri massimi conservati per file (evita di gonfiare il DB con file enormi).
     static let maxCharacters = 200_000
@@ -35,6 +37,25 @@ enum TextExtractor {
     static let recognitionLanguages = ["it-IT", "en-US"]
 
     static func extractText(from url: URL) -> ExtractedText? {
+        let ext = url.pathExtension.lowercased()
+
+        // Documenti Office / rich text gestiti per estensione con strumenti nativi macOS
+        // (nessuna dipendenza esterna). Tutto eseguibile su thread di background.
+        if Self.textutilExtensions.contains(ext) {
+            guard let text = extractWithTextutil(url) else { return nil }
+            return ExtractedText(text: capped(text), ocrUsed: false)
+        }
+        if ext == "pptx" {
+            guard let text = extractZipXML(url, patterns: ["ppt/slides/slide*.xml", "ppt/notesSlides/notesSlide*.xml"]) else { return nil }
+            return ExtractedText(text: capped(text), ocrUsed: false)
+        }
+        if ext == "xlsx" {
+            let text = extractZipXML(url, patterns: ["xl/sharedStrings.xml"])
+                ?? extractZipXML(url, patterns: ["xl/worksheets/sheet*.xml"])
+            guard let text else { return nil }
+            return ExtractedText(text: capped(text), ocrUsed: false)
+        }
+
         let type = fileType(for: url)
 
         if let type {
@@ -56,6 +77,11 @@ enum TextExtractor {
         guard let text = readPlainText(from: url) else { return nil }
         return ExtractedText(text: capped(text), ocrUsed: false)
     }
+
+    /// Estensioni gestite da `textutil` (Word e altri formati rich text/documento).
+    private static let textutilExtensions: Set<String> = [
+        "doc", "docx", "rtf", "rtfd", "odt", "html", "htm", "webarchive", "wordml"
+    ]
 
     // MARK: - Tipo file
 
@@ -163,6 +189,62 @@ enum TextExtractor {
         let observations = request.results ?? []
         let lines = observations.compactMap { $0.topCandidates(1).first?.string }
         return lines.isEmpty ? nil : lines.joined(separator: "\n")
+    }
+
+    // MARK: - Office / rich text (strumenti nativi macOS)
+
+    /// Word/RTF/ODT/HTML via `/usr/bin/textutil` (integrato in macOS): conversione a testo
+    /// semplice con spaziatura corretta. Nessuna dipendenza esterna.
+    private static func extractWithTextutil(_ url: URL) -> String? {
+        guard let data = runProcess("/usr/bin/textutil", ["-convert", "txt", "-stdout", url.path]) else { return nil }
+        let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
+        let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// PPTX/XLSX (pacchetti ZIP OOXML): estrae le voci XML indicate con `/usr/bin/unzip -p`
+    /// e ne rimuove i tag. L'ordine del testo non è garantito, ma per la ricerca conta solo
+    /// che tutte le parole siano presenti.
+    private static func extractZipXML(_ url: URL, patterns: [String]) -> String? {
+        guard let data = runProcess("/usr/bin/unzip", ["-p", url.path] + patterns),
+              let xml = String(data: data, encoding: .utf8), !xml.isEmpty else { return nil }
+        let text = stripXML(xml)
+        return text.isEmpty ? nil : text
+    }
+
+    /// Esegue un processo e ne cattura lo standard output. Legge il pipe PRIMA di
+    /// `waitUntilExit` per evitare deadlock quando l'output supera il buffer del pipe.
+    private static func runProcess(_ launchPath: String, _ arguments: [String]) -> Data? {
+        guard FileManager.default.isExecutableFile(atPath: launchPath) else { return nil }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: launchPath)
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return data
+    }
+
+    /// Rimuove i tag XML (sostituiti da spazio), decodifica le entità comuni e compatta gli
+    /// spazi. Sufficiente per estrarre il testo cercabile da OOXML.
+    private static func stripXML(_ xml: String) -> String {
+        var text = xml.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+        text = text
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&apos;", with: "'")
+            .replacingOccurrences(of: "&#39;", with: "'")
+        text = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Utility
