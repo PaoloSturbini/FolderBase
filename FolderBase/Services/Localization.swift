@@ -235,7 +235,8 @@ enum LocalizedStrings {
         "table.search": ("Cerca", "Search"),
         "search.scope.name": ("Nome", "Name"),
         "search.scope.content": ("Contenuto", "Content"),
-        "search.scope.help": ("Cerca nel nome o nel contenuto indicizzato dei file", "Search by file name or indexed content"),
+        "search.scope.semantic": ("Significato", "Meaning"),
+        "search.scope.help": ("Cerca per nome, per contenuto indicizzato (parole esatte) o per significato (ricerca semantica)", "Search by file name, indexed content (exact words) or meaning (semantic search)"),
 
         // MARK: Indicizzazione contenuti (AI / ricerca)
         "toolbar.index": ("Indicizza contenuti", "Index contents"),

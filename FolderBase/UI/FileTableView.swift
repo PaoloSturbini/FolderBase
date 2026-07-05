@@ -65,10 +65,12 @@ struct FileTableView: View {
         var id: String { rawValue }
     }
 
-    /// Ambito della ricerca: per nome (comportamento storico) o per contenuto indicizzato (FTS).
+    /// Ambito della ricerca: per nome (storico), per contenuto indicizzato (FTS testuale),
+    /// o per significato (ricerca semantica sugli embedding).
     private enum SearchScope: String, CaseIterable, Identifiable {
         case name
         case content
+        case semantic
         var id: String { rawValue }
     }
 
@@ -272,10 +274,11 @@ struct FileTableView: View {
             Picker(L("search.scope.help"), selection: $searchScope) {
                 Text(L("search.scope.name")).tag(SearchScope.name)
                 Text(L("search.scope.content")).tag(SearchScope.content)
+                Text(L("search.scope.semantic")).tag(SearchScope.semantic)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 150)
+            .frame(width: 220)
             .hoverDescription(L("search.scope.help"))
 
             HStack(spacing: 4) {
@@ -542,8 +545,22 @@ struct FileTableView: View {
         }
         cachedIndex = index
 
-        let needle = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let rawNeedle = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let needle = rawNeedle.lowercased()
         var result: [FileItem]
+
+        // Ricerca semantica: si calcola l'embedding della query e si ottiene un ranking per
+        // similarità (che poi SOSTITUISCE l'ordinamento normale). semanticRank == [:] = nessun match.
+        var semanticRank: [String: Int]?
+        if searchScope == .semantic, !rawNeedle.isEmpty {
+            if let embedding = AppleNLEmbedder.shared.embed(rawNeedle) {
+                let candidates = Set(items.map { $0.id })
+                let ranked = metadataStore.semanticSearch(queryVector: embedding.vector, providerID: embedding.providerID, candidates: candidates, limit: 300)
+                semanticRank = Dictionary(uniqueKeysWithValues: ranked.enumerated().map { ($0.element.identity, $0.offset) })
+            } else {
+                semanticRank = [:]
+            }
+        }
 
         // In modalità "contenuto" la corrispondenza arriva dall'indice full-text (FTS): il set
         // di identità che matchano viene calcolato una volta sola qui (query SQLite, pochi ms).
@@ -563,6 +580,9 @@ struct FileTableView: View {
 
                 guard !needle.isEmpty else { return true }
 
+                if let semanticRank {
+                    return semanticRank[item.id] != nil
+                }
                 if let contentMatches {
                     return contentMatches.contains(item.id)
                 }
@@ -576,7 +596,10 @@ struct FileTableView: View {
             }
         }
 
-        if let comparator = tableSortOrder.first {
+        if let semanticRank {
+            // Ordina per rilevanza semantica (i più simili in alto).
+            result.sort { (semanticRank[$0.id] ?? .max) < (semanticRank[$1.id] ?? .max) }
+        } else if let comparator = tableSortOrder.first {
             result.sort { comparator.compare($0, $1) == .orderedAscending }
         }
         cachedVisibleItems = result

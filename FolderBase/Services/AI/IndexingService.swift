@@ -1,6 +1,9 @@
 import Foundation
 import Combine
 
+/// Un chunk di testo con il suo embedding, pronto per essere salvato in `chunk_vectors`.
+typealias ChunkVector = (ordinal: Int, text: String, providerID: String, vector: [Float])
+
 /// Orchestra l'indicizzazione del CONTENUTO dei file di una cartella (Fase 0: estrazione
 /// testo/OCR + full-text search). Rispetta gli invarianti di performance del progetto:
 /// l'estrazione pesante (OCR, lettura file) gira su thread di background via `Task.detached`,
@@ -39,6 +42,7 @@ final class IndexingService: ObservableObject {
         isIndexing = true
         progress = Progress(processed: 0, total: files.count)
 
+        let maxSize = maxFileSize
         task = Task { [weak self] in
             let total = files.count
             var processed = 0
@@ -48,30 +52,41 @@ final class IndexingService: ObservableObject {
 
                 let url = item.url
                 let hash = Self.changeHash(for: url)
+                let effectiveHash = hash ?? UUID().uuidString
+                let upToDate = (hash != nil && store.contentHash(for: item.identity) == hash)
 
-                // Skip: file già indicizzato e immutato.
-                if let hash, let existing = store.contentHash(for: item.identity), existing == hash {
+                if upToDate, store.hasVectors(for: item.identity) {
+                    // Già indicizzato per testo e per semantica: niente da fare.
                     processed += 1
                     self?.progress = Progress(processed: processed, total: total)
                     continue
                 }
 
-                let effectiveHash = hash ?? UUID().uuidString
-                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-
-                if size > (self?.maxFileSize ?? .max) {
-                    store.markContentUnsupported(for: item, hash: effectiveHash)
-                } else {
-                    // Estrazione pesante fuori dal main actor.
-                    let extracted = await Task.detached(priority: .utility) {
-                        TextExtractor.extractText(from: url)
+                if upToDate, let existingText = store.extractedText(for: item.identity) {
+                    // Testo già estratto (es. indicizzato in Fase 0 prima dei vettori): rigenera
+                    // SOLO gli embedding, senza ri-estrarre né ri-OCR.
+                    let chunks = await Task.detached(priority: .utility) {
+                        Self.buildChunkVectors(from: existingText)
                     }.value
-
-                    if let extracted,
-                       !extracted.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        store.storeExtractedText(for: item, text: extracted.text, ocrUsed: extracted.ocrUsed, hash: effectiveHash)
-                    } else {
+                    store.replaceChunks(for: item.identity, chunks: chunks)
+                } else {
+                    let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                    if size > maxSize {
                         store.markContentUnsupported(for: item, hash: effectiveHash)
+                    } else {
+                        // Estrazione + embedding, tutto fuori dal main actor.
+                        let result = await Task.detached(priority: .utility) { () -> (ExtractedText, [ChunkVector])? in
+                            guard let extracted = TextExtractor.extractText(from: url),
+                                  !extracted.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                            return (extracted, Self.buildChunkVectors(from: extracted.text))
+                        }.value
+
+                        if let (extracted, chunks) = result {
+                            store.storeExtractedText(for: item, text: extracted.text, ocrUsed: extracted.ocrUsed, hash: effectiveHash)
+                            store.replaceChunks(for: item.identity, chunks: chunks)
+                        } else {
+                            store.markContentUnsupported(for: item, hash: effectiveHash)
+                        }
                     }
                 }
 
@@ -83,6 +98,18 @@ final class IndexingService: ObservableObject {
             self?.progress = nil
             self?.task = nil
         }
+    }
+
+    /// Chunk del testo + embedding di ciascun chunk (on-device). Eseguita su thread di background
+    /// (`nonisolated`: non tocca lo stato del main actor).
+    nonisolated static func buildChunkVectors(from text: String) -> [ChunkVector] {
+        let chunks = TextChunker.chunks(from: text)
+        var result: [ChunkVector] = []
+        for (index, chunk) in chunks.enumerated() {
+            guard let embedding = AppleNLEmbedder.shared.embed(chunk) else { continue }
+            result.append((ordinal: index, text: chunk, providerID: embedding.providerID, vector: embedding.vector))
+        }
+        return result
     }
 
     /// Hash leggero di change-detection: dimensione + data di modifica. Non è crittografico,

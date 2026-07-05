@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import Accelerate
 
 struct FileMetadata: Codable, Equatable {
     var values: [String: String]
@@ -898,6 +899,35 @@ final class MetadataStore: ObservableObject {
             )
             """
         )
+
+        // Fase 1 — ricerca semantica: chunk di testo + relativi embedding.
+        // - `content_chunks`: porzioni di testo di un file (per snippet/RAG futuri).
+        // - `chunk_vectors`: embedding per chunk, taggato col provider (lingua/modello) e la
+        //   dimensione; vettore serializzato come BLOB di Float32.
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS content_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_identity TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                FOREIGN KEY(file_identity) REFERENCES files(identity) ON DELETE CASCADE
+            )
+            """
+        )
+        try execute("CREATE INDEX IF NOT EXISTS idx_chunks_file ON content_chunks(file_identity)")
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS chunk_vectors (
+                chunk_id INTEGER PRIMARY KEY,
+                provider_id TEXT NOT NULL,
+                dimension INTEGER NOT NULL,
+                vector BLOB NOT NULL,
+                FOREIGN KEY(chunk_id) REFERENCES content_chunks(id) ON DELETE CASCADE
+            )
+            """
+        )
+        try execute("CREATE INDEX IF NOT EXISTS idx_chunk_vectors_provider ON chunk_vectors(provider_id)")
     }
 
     private func migrateLegacyJSONIfNeeded() throws {
@@ -1137,6 +1167,116 @@ final class MetadataStore: ObservableObject {
             .filter { !$0.isEmpty }
         guard !terms.isEmpty else { return nil }
         return terms.map { "\($0)*" }.joined(separator: " ")
+    }
+
+    // MARK: - Ricerca semantica (Fase 1: embedding vettoriali)
+
+    /// Testo estratto già salvato per un file (usato per rigenerare i vettori senza ri-estrarre).
+    func extractedText(for identity: String) -> String? {
+        var statement: OpaquePointer?
+        guard (try? prepare("SELECT extracted_text FROM file_content WHERE file_identity = ?", statement: &statement)) != nil else { return nil }
+        defer { sqlite3_finalize(statement) }
+        try? bind([.text(identity)], to: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        let text = columnText(statement, 0)
+        return text.isEmpty ? nil : text
+    }
+
+    /// Vero se il file ha già almeno un embedding calcolato.
+    func hasVectors(for identity: String) -> Bool {
+        var statement: OpaquePointer?
+        let sql = "SELECT 1 FROM content_chunks c JOIN chunk_vectors v ON v.chunk_id = c.id WHERE c.file_identity = ? LIMIT 1"
+        guard (try? prepare(sql, statement: &statement)) != nil else { return false }
+        defer { sqlite3_finalize(statement) }
+        try? bind([.text(identity)], to: statement)
+        return sqlite3_step(statement) == SQLITE_ROW
+    }
+
+    /// Sostituisce i chunk e i vettori di un file (elimina i precedenti in cascata, poi inserisce).
+    func replaceChunks(for identity: String, chunks: [(ordinal: Int, text: String, providerID: String, vector: [Float])]) {
+        try? execute("DELETE FROM content_chunks WHERE file_identity = ?", bindings: [.text(identity)])
+        for chunk in chunks {
+            try? execute(
+                "INSERT INTO content_chunks (file_identity, ordinal, text) VALUES (?, ?, ?)",
+                bindings: [.text(identity), .int(chunk.ordinal), .text(chunk.text)]
+            )
+            let chunkID = sqlite3_last_insert_rowid(db)
+            try? execute(
+                "INSERT INTO chunk_vectors (chunk_id, provider_id, dimension, vector) VALUES (?, ?, ?, ?)",
+                bindings: [.int(Int(chunkID)), .text(chunk.providerID), .int(chunk.vector.count), .blob(Self.data(from: chunk.vector))]
+            )
+        }
+    }
+
+    /// Ricerca semantica: confronta il vettore della query (coseno) con i vettori dei chunk dello
+    /// stesso `providerID`, limitando ai file candidati. Ritorna un punteggio per file (il migliore
+    /// tra i suoi chunk), ordinato dal più simile, con `limit` risultati.
+    func semanticSearch(queryVector: [Float], providerID: String, candidates: Set<String>, limit: Int) -> [(identity: String, score: Float)] {
+        guard !queryVector.isEmpty, !candidates.isEmpty else { return [] }
+
+        var statement: OpaquePointer?
+        let sql = """
+            SELECT c.file_identity, v.vector
+            FROM chunk_vectors v
+            JOIN content_chunks c ON c.id = v.chunk_id
+            WHERE v.provider_id = ?
+            """
+        guard (try? prepare(sql, statement: &statement)) != nil else { return [] }
+        defer { sqlite3_finalize(statement) }
+        try? bind([.text(providerID)], to: statement)
+
+        let queryNorm = Self.norm(queryVector)
+        guard queryNorm > 0 else { return [] }
+
+        var bestByFile: [String: Float] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let identity = columnText(statement, 0)
+            guard candidates.contains(identity), let blob = columnBlob(statement, 1) else { continue }
+            let vector = Self.floats(from: blob)
+            guard vector.count == queryVector.count else { continue }
+            let score = Self.cosine(queryVector, vector, aNorm: queryNorm)
+            if let existing = bestByFile[identity] {
+                if score > existing { bestByFile[identity] = score }
+            } else {
+                bestByFile[identity] = score
+            }
+        }
+
+        return bestByFile
+            .sorted { $0.value > $1.value }
+            .prefix(limit)
+            .map { (identity: $0.key, score: $0.value) }
+    }
+
+    // MARK: - Utility vettori
+
+    /// Serializza [Float] in Data (Float32) e viceversa; coseno via Accelerate.
+    private static func data(from vector: [Float]) -> Data {
+        vector.withUnsafeBufferPointer { Data(buffer: $0) }
+    }
+
+    private static func floats(from data: Data) -> [Float] {
+        let count = data.count / MemoryLayout<Float>.stride
+        guard count > 0 else { return [] }
+        return data.withUnsafeBytes { raw in
+            Array(raw.bindMemory(to: Float.self).prefix(count))
+        }
+    }
+
+    private static func norm(_ v: [Float]) -> Float {
+        var sumSquares: Float = 0
+        vDSP_svesq(v, 1, &sumSquares, vDSP_Length(v.count))
+        return sqrt(sumSquares)
+    }
+
+    /// Coseno tra due vettori della stessa dimensione. `aNorm` (norma di `a`) può essere passata
+    /// precalcolata per non ricalcolarla a ogni confronto con la stessa query.
+    private static func cosine(_ a: [Float], _ b: [Float], aNorm: Float? = nil) -> Float {
+        guard a.count == b.count, !a.isEmpty else { return 0 }
+        var dot: Float = 0
+        vDSP_dotpr(a, 1, b, 1, &dot, vDSP_Length(a.count))
+        let denom = (aNorm ?? norm(a)) * norm(b)
+        return denom > 0 ? dot / denom : 0
     }
 }
 
