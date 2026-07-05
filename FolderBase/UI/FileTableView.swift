@@ -174,18 +174,18 @@ struct FileTableView: View {
                 Image(systemName: "chevron.left")
             }
             .disabled(!canGoBack)
-            .help(L("nav.back"))
+            .hoverDescription(L("nav.back"))
 
             Button(action: goForward) {
                 Image(systemName: "chevron.right")
             }
             .disabled(!canGoForward)
-            .help(L("nav.forward"))
+            .hoverDescription(L("nav.forward"))
 
             Button(action: goUp) {
                 Image(systemName: "arrow.up")
             }
-            .help(L("nav.up"))
+            .hoverDescription(L("nav.up"))
 
             if metadataFields.isEmpty {
                 templateMenu
@@ -255,7 +255,7 @@ struct FileTableView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .frame(width: 90)
-                .help(L("toolbar.viewHelp"))
+                .hoverDescription(L("toolbar.viewHelp"))
             }
 
             Button {
@@ -265,7 +265,7 @@ struct FileTableView: View {
             }
             .labelStyle(.iconOnly)
             .disabled(selectedFolderURL == nil)
-            .help(L("toolbar.newFileHelp"))
+            .hoverDescription(L("toolbar.newFileHelp"))
 
             Button {
                 newItemRequest = NewItemRequest(isDirectory: true)
@@ -274,7 +274,18 @@ struct FileTableView: View {
             }
             .labelStyle(.iconOnly)
             .disabled(selectedFolderURL == nil)
-            .help(L("toolbar.newFolderHelp"))
+            .hoverDescription(L("toolbar.newFolderHelp"))
+
+            // Icona descrittiva per aggiungere una colonna metadata, a destra di
+            // "Nuovo file" e "Nuova cartella" (sostituisce il vecchio pulsante "+ Colonna").
+            Button {
+                isAddingField = true
+            } label: {
+                Label(L("toolbar.addColumn"), systemImage: "rectangle.badge.plus")
+            }
+            .labelStyle(.iconOnly)
+            .disabled(selectedFolderURL == nil)
+            .hoverDescription(L("toolbar.addColumnHelp"))
 
             Divider()
                 .frame(height: 20)
@@ -288,21 +299,14 @@ struct FileTableView: View {
             }
             .labelStyle(.iconOnly)
             .disabled(tableSortOrder.isEmpty)
-            .help(L("toolbar.defaultOrderHelp"))
-
-            Button {
-                isAddingField = true
-            } label: {
-                Label(L("toolbar.column"), systemImage: "plus")
-            }
-            .help(L("toolbar.addColumnHelp"))
+            .hoverDescription(L("toolbar.defaultOrderHelp"))
 
             Button(action: exportCSV) {
                 Label(L("toolbar.exportCSV"), systemImage: "square.and.arrow.up")
             }
             .labelStyle(.iconOnly)
             .disabled(items.isEmpty)
-            .help(L("toolbar.exportCSVHelp"))
+            .hoverDescription(L("toolbar.exportCSVHelp"))
         }
     }
 
@@ -325,7 +329,7 @@ struct FileTableView: View {
             Label(L("toolbar.columns"), systemImage: "tablecells")
         }
         .labelStyle(.iconOnly)
-        .help(L("toolbar.columnsHelp"))
+        .hoverDescription(L("toolbar.columnsHelp"))
     }
 
     @ViewBuilder
@@ -438,7 +442,7 @@ struct FileTableView: View {
             Label(L("templateMenu.apply"), systemImage: "rectangle.stack.badge.plus")
         }
         .labelStyle(.iconOnly)
-        .help(L("templateMenu.help"))
+        .hoverDescription(L("templateMenu.help"))
     }
 
     // MARK: - Data shaping
@@ -1209,6 +1213,46 @@ struct FileTableView: View {
         }
 
         return nil
+    }
+}
+
+/// Mostra, al passaggio del mouse, una descrizione dell'elemento in un popover con lo
+/// STESSO stile dell'anteprima delle note (vedi `EditableTextCell`): testo semplice su
+/// sfondo popover. Sostituisce il tooltip nativo `.help()` sulle icone della barra in alto.
+/// Un breve ritardo evita che appaia per semplice sfioramento o che disturbi il clic.
+private struct HoverDescription: ViewModifier {
+    let text: String
+    @State private var isShowing = false
+    @State private var hoverTask: Task<Void, Never>?
+
+    func body(content: Content) -> some View {
+        content
+            .onHover { hovering in
+                hoverTask?.cancel()
+                if hovering && !text.isEmpty {
+                    hoverTask = Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 350_000_000)
+                        if !Task.isCancelled { isShowing = true }
+                    }
+                } else {
+                    isShowing = false
+                }
+            }
+            .popover(isPresented: $isShowing, arrowEdge: .bottom) {
+                Text(text)
+                    .font(.body)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: 320, alignment: .leading)
+                    .padding(12)
+            }
+    }
+}
+
+extension View {
+    /// Descrizione a comparsa (hover) in stile "campo note".
+    func hoverDescription(_ text: String) -> some View {
+        modifier(HoverDescription(text: text))
     }
 }
 

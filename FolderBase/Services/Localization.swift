@@ -221,6 +221,7 @@ enum LocalizedStrings {
         "toolbar.defaultOrder": ("Ordine predefinito", "Default order"),
         "toolbar.defaultOrderHelp": ("Ripristina ordine predefinito", "Reset to default order"),
         "toolbar.column": ("Colonna", "Column"),
+        "toolbar.addColumn": ("Aggiungi colonna", "Add column"),
         "toolbar.addColumnHelp": ("Aggiungi colonna metadata", "Add metadata column"),
         "toolbar.exportCSV": ("Esporta CSV", "Export CSV"),
         "toolbar.exportCSVHelp": ("Esporta la tabella in CSV", "Export the table to CSV"),
