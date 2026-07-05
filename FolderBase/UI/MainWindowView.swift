@@ -5,6 +5,7 @@ struct MainWindowView: View {
     @StateObject private var metadataStore = MetadataStore()
     @StateObject private var recentFoldersStore = RecentFoldersStore()
     @StateObject private var templateStore = TemplateStore()
+    @StateObject private var backupService = BackupService()
     @State private var selectedFolderURL: URL?
     /// Radice STABILE dell'albero nella sidebar. Resta la cartella "base" scelta:
     /// navigando nelle sottocartelle non cambia, così l'albero non viene ricostruito/riletto.
@@ -47,7 +48,8 @@ struct MainWindowView: View {
                 navigateTo: navigate,
                 moveItems: moveItemsByPath,
                 templateStore: templateStore,
-                metadataStore: metadataStore
+                metadataStore: metadataStore,
+                backupService: backupService
             )
             .frame(minWidth: 220, idealWidth: 260, maxWidth: 380, maxHeight: .infinity)
 
@@ -81,6 +83,7 @@ struct MainWindowView: View {
             loadInitialFolderIfNeeded()
             performInitialSync()
             checkForUpdatesIfEnabled()
+            backupService.configure(store: metadataStore)
         }
         .onChange(of: showHiddenFiles) { _, _ in
             reloadCurrentFolder()

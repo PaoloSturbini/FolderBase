@@ -689,6 +689,116 @@ final class MetadataStore: ObservableObject {
         return (url.lastPathComponent, size)
     }
 
+    // MARK: - Backup / Restore
+
+    /// Percorso del file SQLite gestito (usato dalla UI di backup e per la copia di sicurezza).
+    var databaseURL: URL { dbURL }
+
+    /// Copia coerente del database verso `destinationURL` usando l'Online Backup API di
+    /// SQLite: cattura anche il contenuto del WAL non ancora messo in checkpoint, quindi
+    /// produce un file autonomo e valido anche mentre l'app è in uso. Prima svuota le
+    /// scritture posticipate così il backup include l'ultimo stato in memoria.
+    func backup(to destinationURL: URL) throws {
+        flushPendingWrites()
+
+        // Un file preesistente verrebbe aperto e "unito": lo rimuoviamo per ripartire pulito
+        // (rimuovo anche eventuali sidecar WAL/SHM di un backup interrotto in passato).
+        let fm = FileManager.default
+        try? fm.removeItem(at: destinationURL)
+        try? fm.removeItem(at: URL(fileURLWithPath: destinationURL.path + "-wal"))
+        try? fm.removeItem(at: URL(fileURLWithPath: destinationURL.path + "-shm"))
+
+        var destDB: OpaquePointer?
+        guard sqlite3_open(destinationURL.path, &destDB) == SQLITE_OK else {
+            let message = destDB.map { String(cString: sqlite3_errmsg($0)) } ?? "Impossibile aprire il file di destinazione"
+            sqlite3_close(destDB)
+            throw StoreError.sqlite(message: message)
+        }
+        defer { sqlite3_close(destDB) }
+
+        guard let backup = sqlite3_backup_init(destDB, "main", db, "main") else {
+            throw StoreError.sqlite(message: String(cString: sqlite3_errmsg(destDB)))
+        }
+        let stepResult = sqlite3_backup_step(backup, -1)
+        sqlite3_backup_finish(backup)
+
+        guard stepResult == SQLITE_DONE else {
+            throw StoreError.sqlite(message: String(cString: sqlite3_errmsg(destDB)))
+        }
+    }
+
+    /// Sostituisce il database gestito con quello contenuto in `sourceURL`.
+    /// Il file di origine viene prima validato (integrità + presenza dello schema
+    /// FolderBase); solo se è valido il database corrente viene chiuso e rimpiazzato,
+    /// poi riaperto e lo stato pubblicato ricaricato. In caso di file non valido lancia
+    /// un errore SENZA toccare il database attuale.
+    func restore(from sourceURL: URL) throws {
+        try validateBackup(at: sourceURL)
+
+        // Le scritture posticipate riguardano il DB che stiamo per sostituire: annullale.
+        for (_, work) in pendingWrites { work.cancel() }
+        pendingWrites.removeAll()
+        pendingValues.removeAll()
+        pendingChangeNotification?.cancel()
+        pendingChangeNotification = nil
+
+        sqlite3_close(db)
+        db = nil
+
+        let fm = FileManager.default
+        let walURL = URL(fileURLWithPath: dbURL.path + "-wal")
+        let shmURL = URL(fileURLWithPath: dbURL.path + "-shm")
+        try? fm.removeItem(at: walURL)
+        try? fm.removeItem(at: shmURL)
+        if fm.fileExists(atPath: dbURL.path) {
+            try fm.removeItem(at: dbURL)
+        }
+        try fm.copyItem(at: sourceURL, to: dbURL)
+
+        try openDatabase()
+        try migrateSchema()
+        registeredIdentities = (try? loadRegisteredIdentities()) ?? []
+        identityCacheByPath.removeAll()
+        invalidateManagedDirectoriesCache()
+        refreshPublishedState()
+    }
+
+    /// Verifica che `url` sia un database SQLite integro e con lo schema di FolderBase.
+    private func validateBackup(at url: URL) throws {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw StoreError.sqlite(message: "File di backup non trovato")
+        }
+
+        var testDB: OpaquePointer?
+        guard sqlite3_open_v2(url.path, &testDB, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            sqlite3_close(testDB)
+            throw StoreError.sqlite(message: "Il file non è un database valido")
+        }
+        defer { sqlite3_close(testDB) }
+
+        var integrityStatement: OpaquePointer?
+        var integrityOK = false
+        if sqlite3_prepare_v2(testDB, "PRAGMA integrity_check", -1, &integrityStatement, nil) == SQLITE_OK,
+           sqlite3_step(integrityStatement) == SQLITE_ROW,
+           let result = sqlite3_column_text(integrityStatement, 0) {
+            integrityOK = String(cString: result) == "ok"
+        }
+        sqlite3_finalize(integrityStatement)
+        guard integrityOK else {
+            throw StoreError.sqlite(message: "Controllo di integrità non superato")
+        }
+
+        var schemaStatement: OpaquePointer?
+        var hasFilesTable = false
+        if sqlite3_prepare_v2(testDB, "SELECT name FROM sqlite_master WHERE type='table' AND name='files'", -1, &schemaStatement, nil) == SQLITE_OK {
+            hasFilesTable = sqlite3_step(schemaStatement) == SQLITE_ROW
+        }
+        sqlite3_finalize(schemaStatement)
+        guard hasFilesTable else {
+            throw StoreError.sqlite(message: "Il file non è un backup di FolderBase")
+        }
+    }
+
     private func openDatabase() throws {
         if sqlite3_open(dbURL.path, &db) != SQLITE_OK {
             throw StoreError.sqlite(message: lastErrorMessage)

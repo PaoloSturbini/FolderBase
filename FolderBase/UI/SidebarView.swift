@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 import WebKit
 
 enum AppearanceMode: String, CaseIterable, Identifiable {
@@ -49,6 +50,7 @@ struct SidebarView: View {
     let moveItems: ([String], URL) -> Void
     @ObservedObject var templateStore: TemplateStore
     @ObservedObject var metadataStore: MetadataStore
+    @ObservedObject var backupService: BackupService
     @ObservedObject private var loc = LocalizationManager.shared
 
     @State private var isShowingSettings = false
@@ -64,6 +66,10 @@ struct SidebarView: View {
     @AppStorage("autoCheckUpdates") private var autoCheckUpdates = false
     @State private var settingsSection: SettingsSection = .folders
     @State private var updateState: UpdateUIState = .idle
+    @State private var backupMessage: String?
+    @State private var backupFailed = false
+    @State private var isConfirmingRestore = false
+    @State private var pendingRestoreURL: URL?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -267,6 +273,8 @@ struct SidebarView: View {
                         templatesSettings
                     case .maintenance:
                         maintenanceSettings
+                    case .backup:
+                        backupSettings
                     case .help:
                         helpSettings
                     case .support:
@@ -423,6 +431,192 @@ struct SidebarView: View {
             } label: {
                 settingsCardLabel(L("maint.autoCard"), systemImage: "trash")
             }
+        }
+    }
+
+    private var backupSettings: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text(L("backup.intro"))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            // Backup su richiesta
+            GroupBox {
+                VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(L("backup.destinationLabel"))
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        if backupService.destinationPath.isEmpty {
+                            Label(L("backup.noDestination"), systemImage: "folder.badge.questionmark")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text(backupService.destinationPath)
+                                .font(.callout)
+                                .lineLimit(2)
+                                .textSelection(.enabled)
+                        }
+                    }
+
+                    HStack(spacing: 12) {
+                        Button {
+                            chooseBackupFolder()
+                        } label: {
+                            Label(L("backup.chooseFolder"), systemImage: "folder")
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button {
+                            runManualBackup()
+                        } label: {
+                            Label(L("backup.runNow"), systemImage: "externaldrive.badge.timemachine")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(backupService.destinationPath.isEmpty)
+                    }
+
+                    Text("\(L("backup.lastPrefix")) \(lastBackupText)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if let backupMessage {
+                        Text(backupMessage)
+                            .font(.callout)
+                            .foregroundStyle(backupFailed ? .red : .green)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+            } label: {
+                settingsCardLabel(L("backup.manualCard"), systemImage: "externaldrive")
+            }
+
+            // Backup automatico
+            GroupBox {
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle(L("backup.autoToggle"), isOn: $backupService.autoEnabled)
+                        .toggleStyle(.checkbox)
+
+                    HStack(spacing: 6) {
+                        Text(L("backup.intervalLabel"))
+                        Stepper(value: $backupService.intervalHours, in: 1...168) {
+                            Text("\(backupService.intervalHours) \(L("backup.hoursSuffix"))")
+                                .monospacedDigit()
+                        }
+                        .fixedSize()
+                    }
+                    .disabled(!backupService.autoEnabled)
+
+                    HStack(spacing: 6) {
+                        Text(L("backup.keepLabel"))
+                        Stepper(value: $backupService.keepCount, in: 1...100) {
+                            Text("\(backupService.keepCount)")
+                                .monospacedDigit()
+                        }
+                        .fixedSize()
+                    }
+                    .disabled(!backupService.autoEnabled)
+
+                    Text(L("backup.autoNote"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+            } label: {
+                settingsCardLabel(L("backup.autoCard"), systemImage: "clock.arrow.circlepath")
+            }
+
+            // Ripristino
+            GroupBox {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(L("backup.restoreIntro"))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Button(role: .destructive) {
+                        chooseRestoreFile()
+                    } label: {
+                        Label(L("backup.restoreButton"), systemImage: "arrow.uturn.backward.circle")
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+            } label: {
+                settingsCardLabel(L("backup.restoreCard"), systemImage: "arrow.uturn.backward")
+            }
+        }
+        .alert(L("backup.restore.confirmTitle"), isPresented: $isConfirmingRestore, presenting: pendingRestoreURL) { _ in
+            Button(L("backup.restore.confirmButton"), role: .destructive) {
+                if let url = pendingRestoreURL { performRestore(from: url) }
+                pendingRestoreURL = nil
+            }
+            Button(L("common.cancel"), role: .cancel) {
+                pendingRestoreURL = nil
+            }
+        } message: { _ in
+            Text(L("backup.restore.confirmMessage"))
+        }
+    }
+
+    private var lastBackupText: String {
+        guard let date = backupService.lastBackupDate else { return L("backup.never") }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+
+    private func chooseBackupFolder() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = L("backup.panel.chooseFolderPrompt")
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        backupService.destinationPath = url.path
+        backupMessage = nil
+    }
+
+    private func runManualBackup() {
+        do {
+            let url = try backupService.runBackup(auto: false)
+            backupFailed = false
+            backupMessage = "\(L("backup.donePrefix")) \(url.lastPathComponent)"
+        } catch {
+            backupFailed = true
+            backupMessage = "\(L("backup.errorPrefix")) \(error.localizedDescription)"
+        }
+    }
+
+    private func chooseRestoreFile() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.init(filenameExtension: "sqlite") ?? .data]
+        panel.prompt = L("backup.panel.restorePrompt")
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        pendingRestoreURL = url
+        isConfirmingRestore = true
+    }
+
+    private func performRestore(from url: URL) {
+        do {
+            try backupService.restore(from: url)
+            backupFailed = false
+            backupMessage = L("backup.restore.done")
+        } catch {
+            backupFailed = true
+            backupMessage = "\(L("backup.errorPrefix")) \(error.localizedDescription)"
         }
     }
 
@@ -888,6 +1082,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     case language
     case templates
     case maintenance
+    case backup
     case help
     case support
 
@@ -907,6 +1102,8 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             return L("settings.templates.title")
         case .maintenance:
             return L("settings.maintenance.title")
+        case .backup:
+            return L("settings.backup.title")
         case .help:
             return L("settings.help.title")
         case .support:
@@ -928,6 +1125,8 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             return "rectangle.stack"
         case .maintenance:
             return "wrench.and.screwdriver"
+        case .backup:
+            return "externaldrive"
         case .help:
             return "questionmark.circle"
         case .support:
@@ -949,6 +1148,8 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             return L("settings.templates.subtitle")
         case .maintenance:
             return L("settings.maintenance.subtitle")
+        case .backup:
+            return L("settings.backup.subtitle")
         case .help:
             return L("settings.help.subtitle")
         case .support:
