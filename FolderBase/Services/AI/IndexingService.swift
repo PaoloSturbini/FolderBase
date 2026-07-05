@@ -115,17 +115,33 @@ final class IndexingService: ObservableObject {
         guard !fingerprints.isEmpty else { return .notIndexed }
 
         let indexed = store.indexedHashes()
+        // Un file è "aggiornato" solo se il testo è indicizzato (hash combacia) E ha embedding per
+        // il MOTORE ATTUALE: cambiando provider i vettori non sono compatibili → il pallino diventa
+        // arancione finché non si reindicizza.
+        let vectorized = store.identitiesWithVectors(providerPrefix: Self.activeProviderPrefix())
+        var textIndexed = 0
         var upToDate = 0
         for fingerprint in fingerprints where indexed[fingerprint.identity] == fingerprint.hash {
-            upToDate += 1
+            textIndexed += 1
+            if vectorized.contains(fingerprint.identity) { upToDate += 1 }
         }
 
-        if upToDate == 0 { return .notIndexed }
+        if textIndexed == 0 { return .notIndexed }
         let total = fingerprints.count
         let changed = total - upToDate
-        // Verde se aggiornata (tolleranza ~5%, min 3 file); arancione se molti file nuovi/cambiati.
+        // Verde se aggiornata (tolleranza ~5%, min 3 file); arancione se molti file nuovi/cambiati
+        // o con vettori di un altro motore.
         let threshold = max(3, total / 20)
         return changed <= threshold ? .upToDate(files: total) : .stale(indexed: upToDate, total: total)
+    }
+
+    /// Prefisso dei providerID compatibili con il motore attualmente selezionato.
+    nonisolated static func activeProviderPrefix() -> String {
+        switch AIProviderSettings.provider {
+        case .apple: return "apple-nl-"
+        case .ollama: return "ollama-\(AIProviderSettings.ollamaModel)"
+        case .openai: return "openai-\(AIProviderSettings.openAIModel)"
+        }
     }
 
     // MARK: - Loop di indicizzazione

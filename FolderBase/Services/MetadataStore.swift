@@ -1137,6 +1137,54 @@ final class MetadataStore: ObservableObject {
         return (state, indexed, total, checkedAt)
     }
 
+    /// Identità dei file che hanno almeno un embedding con provider che inizia per `providerPrefix`
+    /// (es. "apple-nl-", "ollama-<model>", "openai-<model>"). Serve a legare lo stato al motore AI.
+    func identitiesWithVectors(providerPrefix: String) -> Set<String> {
+        var result: Set<String> = []
+        var statement: OpaquePointer?
+        let sql = "SELECT DISTINCT c.file_identity FROM chunk_vectors v JOIN content_chunks c ON c.id = v.chunk_id WHERE v.provider_id LIKE ?"
+        guard (try? prepare(sql, statement: &statement)) != nil else { return [] }
+        defer { sqlite3_finalize(statement) }
+        try? bind([.text(providerPrefix + "%")], to: statement)
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result.insert(columnText(statement, 0))
+        }
+        return result
+    }
+
+    /// Recupero dei chunk più simili per la CHAT (RAG): oltre a identità e punteggio ritorna il
+    /// testo del chunk e nome/percorso del file per costruire il prompt e citare le fonti.
+    /// Se `candidates` è vuoto, cerca su tutto l'indice.
+    func semanticChunks(queryVector: [Float], providerID: String, candidates: Set<String>, limit: Int) -> [(identity: String, path: String, name: String, text: String, score: Float)] {
+        guard !queryVector.isEmpty else { return [] }
+        var statement: OpaquePointer?
+        let sql = """
+            SELECT c.file_identity, f.last_known_path, f.name, c.text, v.vector
+            FROM chunk_vectors v
+            JOIN content_chunks c ON c.id = v.chunk_id
+            JOIN files f ON f.identity = c.file_identity
+            WHERE v.provider_id = ?
+            """
+        guard (try? prepare(sql, statement: &statement)) != nil else { return [] }
+        defer { sqlite3_finalize(statement) }
+        try? bind([.text(providerID)], to: statement)
+
+        let queryNorm = Self.norm(queryVector)
+        guard queryNorm > 0 else { return [] }
+
+        var scored: [(identity: String, path: String, name: String, text: String, score: Float)] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let identity = columnText(statement, 0)
+            if !candidates.isEmpty, !candidates.contains(identity) { continue }
+            guard let blob = columnBlob(statement, 4) else { continue }
+            let vector = Self.floats(from: blob)
+            guard vector.count == queryVector.count else { continue }
+            let score = Self.cosine(queryVector, vector, aNorm: queryNorm)
+            scored.append((identity, columnText(statement, 1), columnText(statement, 2), columnText(statement, 3), score))
+        }
+        return Array(scored.sorted { $0.score > $1.score }.prefix(limit))
+    }
+
     /// Mappa identità→hash di TUTTI i file indicizzati con successo. Usata per calcolare la
     /// copertura di indicizzazione di una cartella (stato verde/arancione).
     func indexedHashes() -> [String: String] {

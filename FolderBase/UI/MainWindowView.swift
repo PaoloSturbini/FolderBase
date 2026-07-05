@@ -7,6 +7,7 @@ struct MainWindowView: View {
     @StateObject private var templateStore = TemplateStore()
     @StateObject private var backupService = BackupService()
     @StateObject private var indexingService = IndexingService()
+    @StateObject private var chatService = ChatService()
     @State private var selectedFolderURL: URL?
     /// Radice STABILE dell'albero nella sidebar. Resta la cartella "base" scelta:
     /// navigando nelle sottocartelle non cambia, così l'albero non viene ricostruito/riletto.
@@ -75,7 +76,8 @@ struct MainWindowView: View {
                 contentFontSize: contentFontSize,
                 showFileExtensions: showFileExtensions,
                 templates: templateStore.templates,
-                applyTemplate: applyTemplate
+                applyTemplate: applyTemplate,
+                chatService: chatService
             )
             .frame(minWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
         }

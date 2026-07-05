@@ -29,8 +29,10 @@ struct FileTableView: View {
     let showFileExtensions: Bool
     let templates: [MetadataTemplate]
     let applyTemplate: (MetadataTemplate) -> Void
+    @ObservedObject var chatService: ChatService
 
     @State private var isAddingField = false
+    @State private var isShowingChat = false
     @State private var newItemRequest: NewItemRequest?
     @State private var fieldPendingEdit: MetadataField?
     @State private var itemPendingRename: FileItem?
@@ -132,6 +134,11 @@ struct FileTableView: View {
         }
         .sheet(item: $quickLookItem) { item in
             QuickLookSheet(url: item.url) { quickLookItem = nil }
+        }
+        .sheet(isPresented: $isShowingChat) {
+            ChatView(chatService: chatService, candidates: [], store: metadataStore) {
+                isShowingChat = false
+            }
         }
         .onAppear { onSearchChanged() }
         .onChange(of: items) { onSearchChanged() }
@@ -335,6 +342,14 @@ struct FileTableView: View {
     @ViewBuilder
     private var toolbarButtons: some View {
         HStack(spacing: 8) {
+            Button {
+                isShowingChat = true
+            } label: {
+                Label(L("toolbar.chat"), systemImage: "bubble.left.and.bubble.right")
+            }
+            .labelStyle(.iconOnly)
+            .hoverDescription(L("toolbar.chatHelp"))
+
             if hasKanbanField {
                 Picker(L("toolbar.view"), selection: $viewMode) {
                     Image(systemName: "tablecells").tag(ViewMode.table)

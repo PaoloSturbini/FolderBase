@@ -82,6 +82,9 @@ struct SidebarView: View {
     @State private var hasOpenAIKey = false
     @State private var aiTesting = false
     @State private var aiTestMessage: String?
+    @AppStorage(AIProviderSettings.Keys.chatProvider) private var aiChatProviderRaw = AIChatProvider.none.rawValue
+    @AppStorage(AIProviderSettings.Keys.ollamaChatModel) private var aiOllamaChatModel = AIProviderSettings.defaultOllamaChatModel
+    @AppStorage(AIProviderSettings.Keys.openAIChatModel) private var aiOpenAIChatModel = AIProviderSettings.defaultOpenAIChatModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -522,6 +525,41 @@ struct SidebarView: View {
             } label: {
                 settingsCardLabel(L("ai.engine.card"), systemImage: "cpu")
             }
+
+            GroupBox {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(L("ai.chat.intro"))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Picker(L("ai.chat.provider"), selection: $aiChatProviderRaw) {
+                        Text(L("ai.chat.none")).tag(AIChatProvider.none.rawValue)
+                        Text(L("ai.provider.ollama")).tag(AIChatProvider.ollama.rawValue)
+                        Text(L("ai.provider.openai")).tag(AIChatProvider.openai.rawValue)
+                    }
+                    .pickerStyle(.radioGroup)
+
+                    if aiChatProviderRaw == AIChatProvider.ollama.rawValue {
+                        TextField(L("ai.chat.model"), text: $aiOllamaChatModel)
+                            .textFieldStyle(.roundedBorder)
+                        Text(L("ai.chat.ollamaNote"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else if aiChatProviderRaw == AIChatProvider.openai.rawValue {
+                        TextField(L("ai.chat.model"), text: $aiOpenAIChatModel)
+                            .textFieldStyle(.roundedBorder)
+                        Text(L("ai.chat.openaiNote"))
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+            } label: {
+                settingsCardLabel(L("ai.chat.card"), systemImage: "bubble.left.and.bubble.right")
+            }
         }
         .task(id: selectedFolderURL?.path ?? "") {
             loadCachedStatus()
@@ -531,6 +569,8 @@ struct SidebarView: View {
         }
         .onChange(of: aiProviderRaw) { _, _ in
             aiTestMessage = nil
+            // Lo stato dipende dal motore: al cambio provider lo si ricalcola.
+            Task { await recomputeStatus() }
         }
         .onChange(of: indexingService.isIndexing) { _, running in
             // A fine indicizzazione ricalcola e memorizza lo stato (così diventa verde da solo).

@@ -17,6 +17,24 @@ enum AIEmbeddingProvider: String, CaseIterable, Identifiable {
     }
 }
 
+/// Provider per la chat (RAG). Nessun motore chat on-device su macOS 14, quindi serve un
+/// endpoint locale (Ollama) o cloud (OpenAI).
+enum AIChatProvider: String, CaseIterable, Identifiable {
+    case none
+    case ollama
+    case openai
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .none: return L("ai.chat.none")
+        case .ollama: return L("ai.provider.ollama")
+        case .openai: return L("ai.provider.openai")
+        }
+    }
+}
+
 /// Chiavi di persistenza (UserDefaults per le impostazioni non segrete, Portachiavi per la chiave).
 enum AIProviderSettings {
     enum Keys {
@@ -24,12 +42,17 @@ enum AIProviderSettings {
         static let ollamaBaseURL = "aiOllamaBaseURL"
         static let ollamaModel = "aiOllamaModel"
         static let openAIModel = "aiOpenAIModel"
+        static let chatProvider = "aiChatProvider"
+        static let ollamaChatModel = "aiOllamaChatModel"
+        static let openAIChatModel = "aiOpenAIChatModel"
     }
     static let openAIKeyAccount = "openai-api-key"
 
     static let defaultOllamaBaseURL = "http://localhost:11434"
     static let defaultOllamaModel = "nomic-embed-text"
     static let defaultOpenAIModel = "text-embedding-3-small"
+    static let defaultOllamaChatModel = "llama3.1"
+    static let defaultOpenAIChatModel = "gpt-4o-mini"
 
     static var provider: AIEmbeddingProvider {
         AIEmbeddingProvider(rawValue: UserDefaults.standard.string(forKey: Keys.provider) ?? "") ?? .apple
@@ -45,6 +68,17 @@ enum AIProviderSettings {
     static var openAIModel: String {
         let value = UserDefaults.standard.string(forKey: Keys.openAIModel) ?? ""
         return value.isEmpty ? defaultOpenAIModel : value
+    }
+    static var chatProvider: AIChatProvider {
+        AIChatProvider(rawValue: UserDefaults.standard.string(forKey: Keys.chatProvider) ?? "") ?? .none
+    }
+    static var ollamaChatModel: String {
+        let value = UserDefaults.standard.string(forKey: Keys.ollamaChatModel) ?? ""
+        return value.isEmpty ? defaultOllamaChatModel : value
+    }
+    static var openAIChatModel: String {
+        let value = UserDefaults.standard.string(forKey: Keys.openAIChatModel) ?? ""
+        return value.isEmpty ? defaultOpenAIChatModel : value
     }
 }
 
@@ -63,6 +97,21 @@ enum EmbeddingEngine {
                 return AppleNLEmbedder.shared
             }
             return OpenAIEmbedder(apiKey: key, model: AIProviderSettings.openAIModel)
+        }
+    }
+}
+
+/// Risolve il provider di chat attivo (nil se non configurato o senza chiave).
+enum ChatEngine {
+    static func active() -> ChatProvider? {
+        switch AIProviderSettings.chatProvider {
+        case .none:
+            return nil
+        case .ollama:
+            return OllamaChatProvider(baseURL: AIProviderSettings.ollamaBaseURL, model: AIProviderSettings.ollamaChatModel)
+        case .openai:
+            guard let key = KeychainStore.load(account: AIProviderSettings.openAIKeyAccount), !key.isEmpty else { return nil }
+            return OpenAIChatProvider(apiKey: key, model: AIProviderSettings.openAIChatModel)
         }
     }
 }
