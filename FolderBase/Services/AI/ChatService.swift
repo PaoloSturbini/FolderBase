@@ -105,7 +105,7 @@ final class ChatService: ObservableObject {
                 return
             }
 
-            let chunks = store.semanticChunks(queryVector: embedding.vector, providerID: embedding.providerID, candidates: candidates, limit: chunkCount)
+            let chunks = store.semanticChunks(query: query, queryVector: embedding.vector, providerID: embedding.providerID, candidates: candidates, limit: chunkCount)
             guard !chunks.isEmpty else {
                 self.fail(L("chat.noContext"), id: assistantID)
                 return

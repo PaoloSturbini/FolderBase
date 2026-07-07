@@ -1162,10 +1162,16 @@ final class MetadataStore: ObservableObject {
         return result
     }
 
-    /// Recupero dei chunk più simili per la CHAT (RAG): oltre a identità e punteggio ritorna il
+    /// Recupero dei chunk più pertinenti per la CHAT (RAG): oltre a identità e punteggio ritorna il
     /// testo del chunk e nome/percorso del file per costruire il prompt e citare le fonti.
     /// Se `candidates` è vuoto, cerca su tutto l'indice.
-    func semanticChunks(queryVector: [Float], providerID: String, candidates: Set<String>, limit: Int) -> [(identity: String, path: String, name: String, text: String, score: Float)] {
+    ///
+    /// Retrieval IBRIDO: fonde il ranking semantico (coseno) con un ranking lessicale (quante parole
+    /// chiave distinte della domanda compaiono nel chunk) via Reciprocal Rank Fusion. Così i chunk
+    /// che parlano davvero degli argomenti chiesti salgono sopra i semplici "vicini vettoriali",
+    /// rendendo le fonti citate più attinenti alla domanda. Con embedder debole/assente il segnale
+    /// lessicale sostiene comunque la pertinenza; senza parole chiave utili resta il solo semantico.
+    func semanticChunks(query: String, queryVector: [Float], providerID: String, candidates: Set<String>, limit: Int) -> [(identity: String, path: String, name: String, text: String, score: Float)] {
         guard !queryVector.isEmpty else { return [] }
         var statement: OpaquePointer?
         // Prefiltro per dimensione oltre che per provider: scarta a livello SQL i vettori di
@@ -1196,12 +1202,40 @@ final class MetadataStore: ObservableObject {
             let score = Self.cosine(queryVector, vector, aNorm: queryNorm, bNorm: vectorNorm)
             scored.append((identity, columnText(statement, 1), columnText(statement, 2), columnText(statement, 3), score))
         }
-        // Selezione con DIVERSITÀ: ordina per punteggio ma limita a `maxPerFile` chunk per file,
+        guard !scored.isEmpty else { return [] }
+
+        // Ranking semantico: indici dei chunk ordinati per coseno decrescente (tutti presenti).
+        let semanticOrder = scored.indices.sorted { scored[$0].score > scored[$1].score }
+
+        // Ranking lessicale: per ogni chunk conta quante PAROLE CHIAVE distinte della domanda vi
+        // compaiono (match di token esatto o per prefisso, come l'FTS). Solo i chunk con almeno un
+        // riscontro entrano nell'elenco, ordinati per numero di riscontri (poi per coseno a parità).
+        let terms = Self.meaningfulTerms(from: query)
+        var lexicalOrder: [Int] = []
+        if !terms.isEmpty {
+            var hitsByIndex: [Int: Int] = [:]
+            for (index, chunk) in scored.enumerated() {
+                let tokens = Set(chunk.text.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted))
+                var hits = 0
+                for term in terms where tokens.contains(where: { $0 == term || $0.hasPrefix(term) }) { hits += 1 }
+                if hits > 0 { hitsByIndex[index] = hits }
+            }
+            lexicalOrder = hitsByIndex.sorted { lhs, rhs in
+                lhs.value != rhs.value ? lhs.value > rhs.value : scored[lhs.key].score > scored[rhs.key].score
+            }.map { $0.key }
+        }
+
+        // Fusione dei due ranking: la pertinenza per parole chiave e la vicinanza semantica si
+        // rinforzano. Se manca uno dei due elenchi si usa l'altro (mai peggio del solo semantico).
+        let fused = Self.fuseRanks([semanticOrder, lexicalOrder].filter { !$0.isEmpty })
+
+        // Selezione con DIVERSITÀ: scorre il ranking fuso ma limita a `maxPerFile` chunk per file,
         // così le fonti citate coprono più documenti distinti invece di concentrarsi su uno solo.
         let maxPerFile = 2
         var perFile: [String: Int] = [:]
         var result: [(identity: String, path: String, name: String, text: String, score: Float)] = []
-        for chunk in scored.sorted(by: { $0.score > $1.score }) {
+        for index in fused {
+            let chunk = scored[index]
             let count = perFile[chunk.identity, default: 0]
             guard count < maxPerFile else { continue }
             perFile[chunk.identity] = count + 1
@@ -1332,6 +1366,59 @@ final class MetadataStore: ObservableObject {
             .filter { !$0.isEmpty }
         guard !terms.isEmpty else { return nil }
         return terms.map { "\($0)*" }.joined(separator: " ")
+    }
+
+    // MARK: - Comprensione della domanda (query understanding)
+
+    /// Parole "vuote" (articoli, preposizioni, congiunzioni, ausiliari e parole interrogative) in
+    /// italiano e inglese: vengono scartate dai termini significativi così la domanda in linguaggio
+    /// naturale non pesa il retrieval su parole senza contenuto ("quali sono i…", "what is the…").
+    private static let queryStopwords: Set<String> = [
+        // Italiano — articoli, preposizioni (semplici e articolate), congiunzioni
+        "il", "lo", "la", "gli", "le", "un", "uno", "una", "di", "del", "dello", "della", "dei",
+        "degli", "delle", "al", "allo", "alla", "ai", "agli", "alle", "da", "dal", "dallo", "dalla",
+        "dai", "dagli", "dalle", "in", "nel", "nello", "nella", "nei", "negli", "nelle", "con", "col",
+        "coi", "su", "sul", "sullo", "sulla", "sui", "sugli", "sulle", "per", "tra", "fra", "ed", "od",
+        "ma", "se", "che", "chi", "cui", "non", "come", "dove", "quando", "quanto", "quanti", "quante",
+        "quanta", "quale", "quali", "cosa", "cos", "perche", "perché", "sono", "sia", "siano", "essere",
+        "hai", "hanno", "abbiamo", "avere", "questo", "questa", "questi", "queste", "quello", "quella",
+        "quelli", "quelle", "più", "meno", "molto", "poco", "tutto", "tutti", "tutte", "tutta", "anche",
+        "ancora", "già", "solo", "mio", "mia", "miei", "mie", "tuo", "tua", "suo", "sua", "ci", "vi",
+        "ne", "mi", "ti", "si", "lei", "lui", "loro", "noi", "voi", "dammi", "dimmi", "elenca", "mostra",
+        // Inglese — articoli, preposizioni, ausiliari, parole interrogative
+        "the", "an", "of", "to", "on", "for", "and", "or", "but", "if", "is", "are", "was", "were",
+        "be", "been", "being", "what", "which", "who", "whom", "whose", "where", "when", "why", "how",
+        "that", "this", "these", "those", "with", "as", "by", "at", "from", "about", "into", "does",
+        "did", "can", "could", "would", "should", "you", "your", "his", "her", "its", "our", "their",
+        "all", "any", "some", "more", "most", "list", "show", "tell", "give", "there", "here", "will"
+    ]
+
+    /// Estrae i termini "significativi" da una domanda: token alfanumerici, minuscoli, distinti,
+    /// lunghi almeno 2 caratteri e non presenti tra le stopword. Serve a capire di cosa parla la
+    /// domanda per pesare la pertinenza lessicale del retrieval (non solo la vicinanza vettoriale).
+    static func meaningfulTerms(from raw: String) -> [String] {
+        var seen = Set<String>()
+        var terms: [String] = []
+        for token in raw.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted) {
+            guard token.count >= 2, !queryStopwords.contains(token), !seen.contains(token) else { continue }
+            seen.insert(token)
+            terms.append(token)
+        }
+        return terms
+    }
+
+    /// Reciprocal Rank Fusion tra più elenchi ordinati (per posizione): il punteggio di un elemento
+    /// è la somma di 1/(k + posizione) su tutti gli elenchi in cui compare. Ritorna gli elementi
+    /// riordinati (migliori prima). Con un solo elenco lo restituisce invariato.
+    private static func fuseRanks(_ lists: [[Int]], k: Double = 60) -> [Int] {
+        if lists.count <= 1 { return lists.first ?? [] }
+        var scores: [Int: Double] = [:]
+        for list in lists {
+            for (position, index) in list.enumerated() {
+                scores[index, default: 0] += 1.0 / (k + Double(position + 1))
+            }
+        }
+        return scores.sorted { $0.value > $1.value }.map { $0.key }
     }
 
     // MARK: - Ricerca semantica (Fase 1: embedding vettoriali)
