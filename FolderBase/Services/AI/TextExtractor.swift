@@ -275,6 +275,11 @@ enum TextExtractor {
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
+        // CRITICO: dare esplicitamente uno stdin valido (/dev/null). Senza questo il figlio eredita
+        // il fd 0 del processo GUI, che macOS "protegge" (guarded): NSTask tenta `dup(0)` e l'app
+        // crasha con EXC_GUARD (DUP su fd 0) al primo file che richiede QuickLook → l'indicizzazione
+        // si "staccava" dopo pochi file.
+        process.standardInput = FileHandle.nullDevice
         do {
             try process.run()
         } catch {

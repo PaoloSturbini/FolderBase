@@ -810,10 +810,10 @@ final class MetadataStore: ObservableObject {
         // Con WAL, NORMAL è lo standard consigliato: dimezza il costo dei commit
         // mantenendo la durabilità a livello di checkpoint.
         try execute("PRAGMA synchronous = NORMAL")
-        // Perf letture/ordinamenti: tabelle temporanee in RAM, memory-map del DB (256 MB) e
-        // cache pagine più ampia (~16 MB, valore negativo = KB). Innocui e reversibili.
+        // Perf letture/ordinamenti (sicuri, solo memoria). NB: `PRAGMA mmap_size` NON viene usato
+        // di proposito: la causa dei crash durante l'indicizzazione era il file descriptor stdin
+        // in TextExtractor.runProcess, non i pragma, ma il memory-map resta un rischio inutile qui.
         try? execute("PRAGMA temp_store = MEMORY")
-        try? execute("PRAGMA mmap_size = 268435456")
         try? execute("PRAGMA cache_size = -16000")
     }
 
