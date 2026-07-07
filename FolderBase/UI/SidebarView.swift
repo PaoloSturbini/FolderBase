@@ -649,7 +649,7 @@ struct SidebarView: View {
             }
             var reply = ""
             do {
-                for try await token in chat.stream(system: "Rispondi con una sola parola.", user: "Scrivi: OK") {
+                for try await token in chat.stream(system: "Rispondi con una sola parola.", turns: [ChatTurn(role: "user", content: "Scrivi: OK")]) {
                     reply += token
                     if reply.count > 40 { break }
                 }

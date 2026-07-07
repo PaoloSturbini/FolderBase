@@ -80,6 +80,11 @@ final class ChatService: ObservableObject {
         errorMessage = nil
         isBusy = true
         lastQuestion = query
+        // Storico (turni precedenti) per il multi-turn: catturato PRIMA di aggiungere il nuovo
+        // scambio, e limitato agli ultimi turni per non gonfiare il prompt.
+        let history = Array(messages.suffix(Self.historyTurns)).map {
+            ChatTurn(role: $0.role == .user ? "user" : "assistant", content: $0.text)
+        }
         messages.append(Message(role: .user, text: query, sources: []))
         let assistant = Message(role: .assistant, text: "", sources: [])
         messages.append(assistant)
@@ -120,8 +125,11 @@ final class ChatService: ObservableObject {
                 .joined(separator: "\n\n")
             let userPrompt = "\(L("chat.contextLabel")):\n\(context)\n\n\(L("chat.questionLabel")): \(query)"
 
+            // Turni: storico precedente + la domanda corrente arricchita col contesto recuperato.
+            let turns = history + [ChatTurn(role: "user", content: userPrompt)]
+
             do {
-                for try await token in chat.stream(system: Self.systemPrompt, user: userPrompt) {
+                for try await token in chat.stream(system: Self.systemPrompt, turns: turns) {
                     if Task.isCancelled { break }
                     self.append(token, id: assistantID)
                 }
@@ -137,6 +145,9 @@ final class ChatService: ObservableObject {
             }
         }
     }
+
+    /// Numero massimo di turni di storico (messaggi) inviati al modello per il multi-turn.
+    private static let historyTurns = 8
 
     static let systemPrompt = """
     Sei l'assistente di FolderBase. Rispondi ESCLUSIVAMENTE in base al contesto fornito (estratti di file dell'utente). \

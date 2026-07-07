@@ -369,6 +369,8 @@ enum LocalizedStrings {
         "ctx.revealFinder": ("Mostra nel Finder", "Reveal in Finder"),
         "ctx.chatFile": ("Chatta con questo file", "Chat with this file"),
         "ctx.chatFolder": ("Chatta con questa cartella", "Chat with this folder"),
+        "ctx.findSimilar": ("Trova simili a questo", "Find similar to this"),
+        "similar.chip": ("Simili a", "Similar to"),
         "ctx.copy": ("Copia", "Copy"),
         "ctx.rename": ("Rinomina", "Rename"),
         "ctx.move": ("Sposta…", "Move…"),

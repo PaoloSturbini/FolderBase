@@ -53,6 +53,10 @@ struct FileTableView: View {
     @State private var relevanceRank: [String: Int]?
     /// Token anti-race: scarta i risultati di una ricerca superata da una più recente.
     @State private var searchToken = UUID()
+    /// "Trova simili a questo": ranking di similarità (identità→posizione) rispetto a un file, e
+    /// nome del file di riferimento (per il chip). Quando attivo prevale su ricerca testo/scope.
+    @State private var similarRank: [String: Int]?
+    @State private var similarToName: String?
     @State private var optionFilters: [String: Set<String>] = [:]
     @State private var viewMode: ViewMode = .table
     @State private var boardFieldID: String?
@@ -99,7 +103,7 @@ struct FileTableView: View {
                 emptyState
             } else {
                 navigationBar
-                if !optionFilters.isEmpty || !searchText.isEmpty {
+                if !optionFilters.isEmpty || !searchText.isEmpty || similarRank != nil {
                     activeFiltersBar
                 }
                 content
@@ -148,7 +152,12 @@ struct FileTableView: View {
             }
         }
         .onAppear { onSearchChanged() }
-        .onChange(of: items) { onSearchChanged() }
+        .onChange(of: items) {
+            // Cambiando cartella il riferimento di "Trova simili" non è più valido.
+            similarRank = nil
+            similarToName = nil
+            onSearchChanged()
+        }
         .onChange(of: searchText) { onSearchChanged() }
         .onChange(of: searchScope) { onSearchChanged() }
         .onChange(of: optionFilters) { refreshDisplayCache() }
@@ -163,6 +172,11 @@ struct FileTableView: View {
     /// vengono fusi via RRF e infine si aggiorna la cache. Per "Nome" si aggiorna subito.
     private func onSearchChanged() {
         let rawNeedle = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Digitare una ricerca esce dalla modalità "Trova simili".
+        if !rawNeedle.isEmpty, similarRank != nil {
+            similarRank = nil
+            similarToName = nil
+        }
         guard searchScope == .content, !rawNeedle.isEmpty else {
             relevanceRank = nil
             refreshDisplayCache()
@@ -219,6 +233,25 @@ struct FileTableView: View {
     /// Identità dei file indicizzabili sotto una cartella (ricorsivo), da usare come ambito chat.
     private func folderChatCandidates(_ folder: FileItem) -> Set<String> {
         Set(IndexingService.fileItems(under: folder.url, limit: 20000).map { $0.identity })
+    }
+
+    /// "Trova simili a questo": ordina la cartella corrente per similarità semantica al file dato
+    /// (centroide dei suoi vettori). Esce da un'eventuale ricerca testuale e mostra un chip.
+    private func findSimilar(to file: FileItem) {
+        let prefix = IndexingService.activeProviderPrefix()
+        let pool = Set(items.map { $0.id })
+        let ranked = metadataStore.similarFiles(to: file.identity, providerPrefix: prefix, candidates: pool, limit: 300)
+        searchText = ""
+        similarRank = Dictionary(uniqueKeysWithValues: ranked.enumerated().map { ($0.element.identity, $0.offset) })
+        similarToName = file.name
+        refreshDisplayCache()
+    }
+
+    /// Azzera la modalità "Trova simili".
+    private func clearSimilar() {
+        similarRank = nil
+        similarToName = nil
+        refreshDisplayCache()
     }
 
     private var emptyState: some View {
@@ -516,6 +549,12 @@ struct FileTableView: View {
     private var activeFiltersBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
+                if let similarToName {
+                    filterChip(text: "\(L("similar.chip")): \(similarToName)", systemImage: "sparkles") {
+                        clearSimilar()
+                    }
+                }
+
                 if !searchText.isEmpty {
                     filterChip(text: "“\(searchText)”", systemImage: "magnifyingglass") {
                         searchText = ""
@@ -634,7 +673,7 @@ struct FileTableView: View {
         // `relevanceRank` è nil → si usa una mappa vuota (nessun match) invece di ricadere sul nome.
         let activeRank: [String: Int]? = (searchScope == .content && !rawNeedle.isEmpty) ? (relevanceRank ?? [:]) : nil
 
-        if optionFilters.isEmpty, needle.isEmpty {
+        if optionFilters.isEmpty, needle.isEmpty, similarRank == nil {
             result = items
         } else {
             result = items.filter { item in
@@ -642,6 +681,11 @@ struct FileTableView: View {
                 for (fieldID, labels) in optionFilters where !labels.isEmpty {
                     let value = index[fieldID]?[item.id] ?? ""
                     if !labels.contains(value) { return false }
+                }
+
+                // "Trova simili" prevale su ricerca testo/scope.
+                if let similarRank {
+                    return similarRank[item.id] != nil
                 }
 
                 guard !needle.isEmpty else { return true }
@@ -659,7 +703,10 @@ struct FileTableView: View {
             }
         }
 
-        if let activeRank {
+        if let similarRank {
+            // Ordina per similarità al file di riferimento (i più simili in alto).
+            result.sort { (similarRank[$0.id] ?? .max) < (similarRank[$1.id] ?? .max) }
+        } else if let activeRank {
             // Ordina per rilevanza ibrida (i più pertinenti in alto).
             result.sort { (activeRank[$0.id] ?? .max) < (activeRank[$1.id] ?? .max) }
         } else if let comparator = tableSortOrder.first {
@@ -836,6 +883,12 @@ struct FileTableView: View {
                               scopeLabel: "\(L("chat.scope.file")): \(single.name)")
                 } label: {
                     Label(L("ctx.chatFile"), systemImage: "bubble.left.and.bubble.right")
+                }
+
+                Button {
+                    findSimilar(to: single)
+                } label: {
+                    Label(L("ctx.findSimilar"), systemImage: "sparkles")
                 }
             }
 

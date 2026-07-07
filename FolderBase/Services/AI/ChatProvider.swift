@@ -1,10 +1,22 @@
 import Foundation
 
+/// Un turno di conversazione da inviare all'LLM (ruolo "user" o "assistant").
+struct ChatTurn: Sendable {
+    let role: String
+    let content: String
+}
+
 /// Astrae un LLM di chat in streaming (token-by-token). Implementazioni: Ollama (locale) e
 /// OpenAI (cloud BYOK). Vedi docs/AI-Indexing-Study.md (Fase 3, RAG).
 protocol ChatProvider: Sendable {
-    /// Genera la risposta in streaming a partire da un prompt di sistema e uno utente.
-    func stream(system: String, user: String) -> AsyncThrowingStream<String, Error>
+    /// Genera la risposta in streaming a partire da un prompt di sistema e dalla sequenza di
+    /// turni della conversazione (storico + domanda corrente), per supportare il multi-turn.
+    func stream(system: String, turns: [ChatTurn]) -> AsyncThrowingStream<String, Error>
+}
+
+extension ChatTurn {
+    /// Rappresentazione dizionario per i body JSON di Ollama/OpenAI.
+    var json: [String: String] { ["role": role, "content": content] }
 }
 
 enum ChatProviderError: Error {
@@ -17,7 +29,7 @@ struct OllamaChatProvider: ChatProvider {
     let baseURL: String
     let model: String
 
-    func stream(system: String, user: String) -> AsyncThrowingStream<String, Error> {
+    func stream(system: String, turns: [ChatTurn]) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -26,13 +38,11 @@ struct OllamaChatProvider: ChatProvider {
                     var request = URLRequest(url: url)
                     request.httpMethod = "POST"
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    let messages = [["role": "system", "content": system]] + turns.map(\.json)
                     let body: [String: Any] = [
                         "model": model,
                         "stream": true,
-                        "messages": [
-                            ["role": "system", "content": system],
-                            ["role": "user", "content": user]
-                        ]
+                        "messages": messages
                     ]
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
@@ -65,7 +75,7 @@ struct OpenAIChatProvider: ChatProvider {
     let apiKey: String
     let model: String
 
-    func stream(system: String, user: String) -> AsyncThrowingStream<String, Error> {
+    func stream(system: String, turns: [ChatTurn]) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -74,13 +84,11 @@ struct OpenAIChatProvider: ChatProvider {
                     request.httpMethod = "POST"
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                    let messages = [["role": "system", "content": system]] + turns.map(\.json)
                     let body: [String: Any] = [
                         "model": model,
                         "stream": true,
-                        "messages": [
-                            ["role": "system", "content": system],
-                            ["role": "user", "content": user]
-                        ]
+                        "messages": messages
                     ]
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
 

@@ -1158,16 +1158,18 @@ final class MetadataStore: ObservableObject {
     func semanticChunks(queryVector: [Float], providerID: String, candidates: Set<String>, limit: Int) -> [(identity: String, path: String, name: String, text: String, score: Float)] {
         guard !queryVector.isEmpty else { return [] }
         var statement: OpaquePointer?
+        // Prefiltro per dimensione oltre che per provider: scarta a livello SQL i vettori di
+        // dimensione incompatibile (evita di caricarne il BLOB e ricontrollarne la lunghezza).
         let sql = """
             SELECT c.file_identity, f.last_known_path, f.name, c.text, v.vector
             FROM chunk_vectors v
             JOIN content_chunks c ON c.id = v.chunk_id
             JOIN files f ON f.identity = c.file_identity
-            WHERE v.provider_id = ?
+            WHERE v.provider_id = ? AND v.dimension = ?
             """
         guard (try? prepare(sql, statement: &statement)) != nil else { return [] }
         defer { sqlite3_finalize(statement) }
-        try? bind([.text(providerID)], to: statement)
+        try? bind([.text(providerID), .int(queryVector.count)], to: statement)
 
         let queryNorm = Self.norm(queryVector)
         guard queryNorm > 0 else { return [] }
@@ -1355,11 +1357,11 @@ final class MetadataStore: ObservableObject {
             SELECT c.file_identity, v.vector
             FROM chunk_vectors v
             JOIN content_chunks c ON c.id = v.chunk_id
-            WHERE v.provider_id = ?
+            WHERE v.provider_id = ? AND v.dimension = ?
             """
         guard (try? prepare(sql, statement: &statement)) != nil else { return [] }
         defer { sqlite3_finalize(statement) }
-        try? bind([.text(providerID)], to: statement)
+        try? bind([.text(providerID), .int(queryVector.count)], to: statement)
 
         let queryNorm = Self.norm(queryVector)
         guard queryNorm > 0 else { return [] }
@@ -1382,6 +1384,48 @@ final class MetadataStore: ObservableObject {
             .sorted { $0.value > $1.value }
             .prefix(limit)
             .map { (identity: $0.key, score: $0.value) }
+    }
+
+    /// "Trova simili a questo": usa i vettori del file dato come query. Prende il centroide dei
+    /// chunk del provider DOMINANTE del file (coerente per dimensione), poi riusa `semanticSearch`
+    /// per trovare i file più simili tra i candidati, escluso il file stesso.
+    func similarFiles(to identity: String, providerPrefix: String, candidates: Set<String>, limit: Int) -> [(identity: String, score: Float)] {
+        guard !candidates.isEmpty else { return [] }
+
+        // Carica i vettori del file raggruppati per provider_id (solo quelli del motore attivo).
+        var byProvider: [String: [[Float]]] = [:]
+        var statement: OpaquePointer?
+        let sql = """
+            SELECT v.provider_id, v.vector
+            FROM chunk_vectors v
+            JOIN content_chunks c ON c.id = v.chunk_id
+            WHERE c.file_identity = ? AND v.provider_id LIKE ?
+            """
+        if (try? prepare(sql, statement: &statement)) != nil {
+            try? bind([.text(identity), .text(providerPrefix + "%")], to: statement)
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let blob = columnBlob(statement, 1) else { continue }
+                byProvider[columnText(statement, 0), default: []].append(Self.floats(from: blob))
+            }
+        }
+        sqlite3_finalize(statement)
+
+        // Provider dominante (più chunk) → tutti i suoi vettori hanno la stessa dimensione.
+        guard let (providerID, vectors) = byProvider.max(by: { $0.value.count < $1.value.count }),
+              let dimension = vectors.first?.count, dimension > 0 else { return [] }
+
+        // Centroide dei chunk del file.
+        var centroid = [Float](repeating: 0, count: dimension)
+        var used: Float = 0
+        for vector in vectors where vector.count == dimension {
+            for i in 0..<dimension { centroid[i] += vector[i] }
+            used += 1
+        }
+        guard used > 0 else { return [] }
+        for i in 0..<dimension { centroid[i] /= used }
+
+        return semanticSearch(queryVector: centroid, providerID: providerID,
+                              candidates: candidates.subtracting([identity]), limit: limit)
     }
 
     // MARK: - Utility vettori
