@@ -277,8 +277,7 @@ enum TextExtractor {
         process.standardError = FileHandle.nullDevice
         // CRITICO: dare esplicitamente uno stdin valido (/dev/null). Senza questo il figlio eredita
         // il fd 0 del processo GUI, che macOS "protegge" (guarded): NSTask tenta `dup(0)` e l'app
-        // crasha con EXC_GUARD (DUP su fd 0) al primo file che richiede QuickLook → l'indicizzazione
-        // si "staccava" dopo pochi file.
+        // crasha con EXC_GUARD (DUP su fd 0) al primo file che richiede QuickLook.
         process.standardInput = FileHandle.nullDevice
         do {
             try process.run()
@@ -286,15 +285,35 @@ enum TextExtractor {
             return nil
         }
 
-        let watchdog = DispatchWorkItem {
-            if process.isRunning { process.terminate() }
+        // La lettura dello stdout è BLOCCANTE: se il figlio (es. qlmanage) si appende senza
+        // chiudere lo stdout, `readDataToEndOfFile` non torna mai. Leggo quindi su un thread a
+        // parte e attendo con un timeout reale; allo scadere forzo la chiusura con SIGKILL
+        // (SIGTERM/`terminate()` da solo può essere ignorato) e sblocco il reader. Così nessun
+        // file può bloccare l'indicizzazione all'infinito.
+        let handle = pipe.fileHandleForReading
+        let box = DataBox()
+        let semaphore = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            box.data = handle.readDataToEndOfFile()
+            semaphore.signal()
         }
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: watchdog)
 
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        if semaphore.wait(timeout: .now() + timeout) == .timedOut {
+            kill(process.processIdentifier, SIGKILL)   // forza la terminazione
+            try? handle.close()                         // sblocca readDataToEndOfFile
+            process.waitUntilExit()
+            return nil
+        }
+
+        // La lettura è terminata prima del timeout: il valore in `box` è sincronizzato dal semaforo.
         process.waitUntilExit()
-        watchdog.cancel()
-        return data
+        return box.data
+    }
+
+    /// Contenitore per passare in sicurezza i dati letti dal thread di lettura (la sincronizzazione
+    /// avviene tramite il semaforo: si legge `data` solo dopo `wait` riuscita).
+    private final class DataBox: @unchecked Sendable {
+        var data: Data?
     }
 
     /// Rimuove i tag XML (sostituiti da spazio), decodifica le entità comuni e compatta gli
