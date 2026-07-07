@@ -2,7 +2,7 @@
 
 _Studio tecnico, luglio 2026. Ancorato all'architettura attuale (SQLite, identità file stabile per inode, app non-sandboxed, macOS 14.4)._
 
-> **Stato di implementazione (aggiornato luglio 2026).** Le Fasi **0, 1, 2 e 3 sono implementate** sul branch `feature/ai-indexing` (non ancora mergiato su `main`). In sintesi ciò che è realizzato: estrazione testo + OCR per testo/PDF/immagini/Office (docx,pptx,xlsx via textutil/unzip) e best-effort per Office legacy/iWork (via anteprima QuickLook); full-text search FTS5; embedding e **ricerca semantica** on-device (Apple `NLEmbedding`), con motori **intercambiabili** Apple / Ollama (locale) / OpenAI (BYOK, chiave in Portachiavi); **indicizzazione ricorsiva** cartella+sottocartelle dalla Configurazione con **indicatore di stato** (verde/arancione/grigio) memorizzato e legato al motore attivo; **chat RAG** con streaming e citazioni (motore chat Ollama o OpenAI). Deviazioni rispetto al piano originale sono annotate in corsivo nelle sezioni pertinenti e nella §9. Dettaglio fine-grained: vedi cronologia git del branch.
+> **Stato di implementazione (aggiornato luglio 2026).** Le Fasi **0, 1, 2 e 3 sono implementate** e la **Fase 4 è parziale** sul branch `feature/ai-indexing` (non ancora mergiato su `main`). In sintesi ciò che è realizzato: estrazione testo + OCR per testo/PDF/immagini/Office (docx,pptx,xlsx via textutil/unzip) e best-effort per Office legacy/iWork (via anteprima QuickLook); full-text search FTS5; embedding e **ricerca semantica** con motori **intercambiabili** Apple / Ollama (locale, ora **default**) / OpenAI (BYOK, chiave in Portachiavi); **ricerca ibrida** (FTS bm25 + semantica fuse con Reciprocal Rank Fusion) come modalità "Contenuto (AI)"; **indicizzazione ricorsiva** cartella+sottocartelle dalla Configurazione con **indicatore di stato** (verde/arancione/grigio) memorizzato e legato al motore attivo; **chat RAG** con streaming e citazioni, ambito configurabile (tutto l'indice / cartella / file), selettore motore chat in finestra, numero fonti regolabile e azioni per-messaggio. Della Fase 4 restano da fare: `sqlite-vec`, "Trova simili a questo", e memoria conversazione multi-turn (vedi §9). Deviazioni rispetto al piano originale sono annotate in corsivo nelle sezioni pertinenti e nella §9. Dettaglio fine-grained: vedi cronologia git del branch (ultimo: `c82f132`).
 
 ## 1. Obiettivo
 
@@ -150,9 +150,13 @@ Punto chiave: la ricerca vettoriale **coesiste** con i filtri esistenti. Poiché
 
 UI: aggiungere un toggle "Ricerca: nome / contenuto (AI)" accanto al campo di ricerca. Rispettare l'invariante n.1 di performance: ogni nuovo stato che influenza il filtro deve chiamare `refreshDisplayCache()`. La query di embedding è async → si aggiorna una `@State cachedSemanticResults` e si fa refresh al completamento (mai bloccare la digitazione).
 
+> **Implementato (Fase 4, `c82f132`).** Gli scope "Contenuto" e "Significato" sono stati **fusi in un'unica modalità ibrida "Contenuto (AI)"**: `FileTableView.onSearchChanged` calcola l'elenco FTS ordinato per bm25 (`MetadataStore.searchFileContentRanked`) e, in parallelo asincrono, l'elenco semantico (`semanticSearch`), poi li fonde con **Reciprocal Rank Fusion** (k=60) in `relevanceRank` usato per filtrare+ordinare. Se l'embedding non è disponibile (es. Ollama spento) la ricerca ripiega su solo-FTS → **non fa mai peggio del full-text**. La ricerca coesiste ancora con i filtri metadata (`optionFilters` in AND). Il selettore Nome/Contenuto è a sinistra dentro la capsula (stile barra macOS). _"Trova simili a questo" (doc→doc) resta da fare._
+
 ## 6. Chat con i propri file (RAG)
 
 Oltre a cercare, l'utente deve poter **conversare** con i propri documenti — "riassumi questo contratto", "in quali file si parla di rinnovo automatico?", "quali fatture scadono a luglio?". È il passo naturale sopra la ricerca semantica: si chiama **RAG** (Retrieval-Augmented Generation) e riusa **tutto** ciò che è già in piedi (estrazione, chunk, embedding, vector store). L'unica capacità nuova è la **generazione di testo** da parte di un LLM.
+
+> **Implementato (Fasi 3-4).** Oltre al RAG base (Fase 3), la finestra di chat ora ha: **ambito configurabile** — `ChatService.configure(candidates:scopeLabel:)` con voci di menu contestuale "Chatta con questo file" / "questa cartella" (l'ambito cartella enumera il sottoalbero via `IndexingService.fileItems`), toolbar = tutto l'indice, indicatore ambito in header; **selettore del motore di chat** (Ollama/OpenAI, Apple disabilitato) in finestra via `@AppStorage`; **numero di chunk di contesto regolabile** (`AIProviderSettings.chatContextChunks`, default 12, Stepper in Configurazione — spiega anche perché le fonti citate sono meno dei chunk: dedup per file); **azioni** rilancia/copia/esporta conversazione (Markdown) e **azioni per-messaggio** (copia, rilancia domanda / rigenera risposta). _Ancora da fare: memoria conversazione multi-turn (oggi ogni domanda è indipendente, il prompt non include i turni precedenti)._
 
 ### 6.1 Stesso strato provider, capacità aggiuntiva
 
@@ -226,7 +230,16 @@ Ogni fase è spedibile da sola e verificabile con `make-app.sh -c release`.
 - ✅ **Fase 2 — Provider intercambiabili. FATTA.** `TextEmbedder` async/Sendable; `OllamaEmbedder` (locale) e `OpenAIEmbedder` (BYOK) + `KeychainStore` per la chiave + `EmbeddingEngine.active()` + pannello **Motore AI** in Configurazione con **Prova motore**. `NSAllowsLocalNetworking` per Ollama su localhost. Gestione reindex al cambio motore (vettori per-`provider_id`).
 - ✅ **Fase 3 — Chat con i file (RAG). FATTA.** `ChatProvider` (Ollama `/api/chat` NDJSON, OpenAI `/v1/chat/completions` SSE, **streaming**) + `ChatService` (retrieval `semanticChunks` → prompt con fonti → generazione streaming con **citazioni** cliccabili) + `ChatView` + pulsante **Chat** in toolbar + card impostazioni con **Prova chat**. Ambito attuale: **tutto l'indice**. _Nota:_ nessun LLM di chat on-device su macOS 14 (Foundation Models sarebbe macOS 26+); la chat richiede Ollama o OpenAI.
 - ➕ **Extra implementato (non nel piano originale): indicizzazione ricorsiva + stato cartella.** `IndexingService.indexRecursively` (cartella+sottocartelle, opt-in dalla Configurazione) e **indicatore di stato** verde/arancione/grigio per **copertura reale**, memorizzato in `folder_index_status` e **legato al motore attivo** (arancione se i vettori sono di un altro motore); ricalcolo su richiesta.
-- ⏳ **Fase 4 — Scala e qualità. DA FARE.** Passaggio a `sqlite-vec` per grandi volumi; query ibride (vettore + filtri metadata + FTS, RRF); "Trova simili"; memoria conversazione multi-turn; chat on-device via Foundation Models (richiederebbe target macOS 26).
+- 🟡 **Fase 4 — Scala e qualità. PARZIALE** (`c82f132`). Fatto:
+  - ✅ **Query ibride (FTS + semantica, RRF)** — modalità "Contenuto (AI)", vedi §5; coesiste con i filtri metadata.
+  - ✅ **Default motore embedding → Ollama** (qualità semantica superiore all'on-device Apple).
+  - ✅ **Chat matura** (extra oltre il piano di Fase 4): ambito file/cartella/indice, selettore motore chat in finestra, numero fonti regolabile, azioni conversazione e per-messaggio, esporta in Markdown.
+
+  Da fare:
+  - ⏳ **`sqlite-vec`** per grandi volumi (oggi il coseno è uno scan O(n) su BLOB via vDSP: ok per migliaia di chunk, non per centinaia di migliaia).
+  - ⏳ **"Trova simili a questo"** (doc→doc dal menu contestuale, pura similarità vettoriale).
+  - ⏳ **Memoria conversazione multi-turn** (oggi ogni domanda è indipendente).
+  - ⏳ **Chat on-device via Foundation Models** (richiederebbe target macOS 26).
 
 ## 10. Rischi e caveat
 
