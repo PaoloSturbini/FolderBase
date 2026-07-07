@@ -57,6 +57,13 @@ struct FileTableView: View {
     /// nome del file di riferimento (per il chip). Quando attivo prevale su ricerca testo/scope.
     @State private var similarRank: [String: Int]?
     @State private var similarToName: String?
+    /// Ricerca estesa a tutto il sottoalbero (cartella corrente + sottocartelle) invece che alla
+    /// sola cartella corrente. Quando attivo e c'è una query, la base di ricerca è `subtreeItems`.
+    @State private var searchAllSubfolders = false
+    /// File del sottoalbero (ricorsivo), enumerati on-demand per la ricerca estesa; cachati per
+    /// il percorso corrente in `subtreeLoadedForPath`.
+    @State private var subtreeItems: [FileItem] = []
+    @State private var subtreeLoadedForPath: String?
     @State private var optionFilters: [String: Set<String>] = [:]
     @State private var viewMode: ViewMode = .table
     @State private var boardFieldID: String?
@@ -163,6 +170,11 @@ struct FileTableView: View {
         // Ricerca/filtri/ordinamento riusano l'indice esistente (nessuna ricostruzione).
         .onChange(of: searchText) { onSearchChanged() }
         .onChange(of: searchScope) { onSearchChanged() }
+        .onChange(of: searchAllSubfolders) {
+            // Cambiando ambito, ricostruisci indice+lista sulla nuova base.
+            rebuildMetadataIndex()
+            onSearchChanged()
+        }
         .onChange(of: optionFilters) { refreshDisplayCache() }
         .onChange(of: tableSortOrder) { refreshDisplayCache() }
         // Cambi di DATI → ricostruzione indice.
@@ -174,6 +186,23 @@ struct FileTableView: View {
     /// calcola in modo asincrono, perché l'embedding della query può essere una chiamata di rete
     /// (Ollama/OpenAI): l'FTS è sincrona (pochi ms), l'embedding gira in un Task, i due elenchi
     /// vengono fusi via RRF e infine si aggiorna la cache. Per "Nome" si aggiorna subito.
+    /// Base della ricerca: cartella corrente (`items`) oppure, con ricerca estesa attiva e una
+    /// query in corso, tutto il sottoalbero (`subtreeItems`).
+    private var searchSource: [FileItem] {
+        let needleEmpty = searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return (searchAllSubfolders && !needleEmpty) ? subtreeItems : items
+    }
+
+    /// Enumera (una volta, cachato per percorso) i file del sottoalbero per la ricerca estesa.
+    private func loadSubtree() async {
+        guard let root = selectedFolderURL else { subtreeItems = []; subtreeLoadedForPath = nil; return }
+        let loaded = await Task.detached(priority: .userInitiated) {
+            IndexingService.fileItems(under: root, limit: 20000)
+        }.value
+        subtreeItems = loaded
+        subtreeLoadedForPath = root.path
+    }
+
     private func onSearchChanged() {
         let rawNeedle = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         // Digitare una ricerca esce dalla modalità "Trova simili".
@@ -181,16 +210,34 @@ struct FileTableView: View {
             similarRank = nil
             similarToName = nil
         }
+
+        let token = UUID()
+        searchToken = token
+
+        // Ricerca estesa: assicura il sottoalbero caricato per il percorso corrente, poi cerca.
+        if searchAllSubfolders, !rawNeedle.isEmpty, subtreeLoadedForPath != (selectedFolderURL?.path ?? "") {
+            Task {
+                await loadSubtree()
+                guard searchToken == token else { return }
+                rebuildMetadataIndex()          // ricostruisce l'indice sulla nuova base
+                applySearch(rawNeedle: rawNeedle, token: token)
+            }
+            return
+        }
+        applySearch(rawNeedle: rawNeedle, token: token)
+    }
+
+    /// Applica la ricerca corrente sulla `searchSource`. Per "Contenuto" calcola l'ibrida RRF in
+    /// modo asincrono; per "Nome" aggiorna subito (il filtro per nome è in `refreshDisplayCache`).
+    private func applySearch(rawNeedle: String, token: UUID) {
         guard searchScope == .content, !rawNeedle.isEmpty else {
             relevanceRank = nil
             refreshDisplayCache()
             return
         }
 
-        let token = UUID()
-        searchToken = token
-        let candidates = Set(items.map { $0.id })
-        // Elenco full-text (sincrono), limitato ai file della vista corrente.
+        let candidates = Set(searchSource.map { $0.id })
+        // Elenco full-text (sincrono), limitato alla base di ricerca (cartella o sottoalbero).
         let ftsRanked = metadataStore.searchFileContentRanked(rawNeedle).filter { candidates.contains($0) }
 
         Task {
@@ -363,6 +410,12 @@ struct FileTableView: View {
                 }
                 .pickerStyle(.inline)
                 .labelsHidden()
+
+                Divider()
+
+                Toggle(isOn: $searchAllSubfolders) {
+                    Text(L("search.subfolders"))
+                }
             } label: {
                 HStack(spacing: 3) {
                     Image(systemName: "magnifyingglass")
@@ -659,10 +712,11 @@ struct FileTableView: View {
     /// Costoso (O(campi × item)), quindi va chiamata solo quando cambiano i DATI (items, campi,
     /// valori metadata) — NON a ogni tasto di ricerca o cambio ordinamento, che riusano l'indice.
     private func rebuildMetadataIndex() {
+        let source = searchSource
         var index: [String: [String: String]] = [:]
         for field in metadataFields {
             var perItem: [String: String] = [:]
-            for item in items {
+            for item in source {
                 let value = metadataStore.value(for: item, field: field)
                 if !value.isEmpty { perItem[item.id] = value }
             }
@@ -685,10 +739,13 @@ struct FileTableView: View {
         // `relevanceRank` è nil → si usa una mappa vuota (nessun match) invece di ricadere sul nome.
         let activeRank: [String: Int]? = (searchScope == .content && !rawNeedle.isEmpty) ? (relevanceRank ?? [:]) : nil
 
+        // Base: cartella corrente, o tutto il sottoalbero se la ricerca estesa è attiva.
+        let source = searchSource
+
         if optionFilters.isEmpty, needle.isEmpty, similarRank == nil {
-            result = items
+            result = source
         } else {
-            result = items.filter { item in
+            result = source.filter { item in
                 // Filtri per opzione (AND tra campi, OR tra valori dello stesso campo).
                 for (fieldID, labels) in optionFilters where !labels.isEmpty {
                     let value = index[fieldID]?[item.id] ?? ""
@@ -728,7 +785,7 @@ struct FileTableView: View {
     }
 
     private var selectedItems: [FileItem] {
-        items.filter { selection.contains($0.id) }
+        visibleItems.filter { selection.contains($0.id) }
     }
 
     /// Punto unico da cui passano tutte le cancellazioni: mostra il popup di conferma
@@ -808,7 +865,7 @@ struct FileTableView: View {
             rowContextMenu(for: ids)
         } primaryAction: { ids in
             // Doppio clic: apre l'elemento.
-            if let id = ids.first, let item = items.first(where: { $0.id == id }) {
+            if let id = ids.first, let item = visibleItems.first(where: { $0.id == id }) {
                 openItem(item)
             }
         }
@@ -828,7 +885,7 @@ struct FileTableView: View {
             guard editingItemID == nil,
                   selection.count == 1,
                   let id = selection.first,
-                  let item = items.first(where: { $0.id == id }) else { return .ignored }
+                  let item = visibleItems.first(where: { $0.id == id }) else { return .ignored }
             beginRename(item)
             return .handled
         }
@@ -859,7 +916,7 @@ struct FileTableView: View {
 
     @ViewBuilder
     private func rowContextMenu(for ids: Set<FileItem.ID>) -> some View {
-        let targets = items.filter { ids.contains($0.id) }
+        let targets = visibleItems.filter { ids.contains($0.id) }
 
         if let single = targets.first, targets.count == 1 {
             Button {
@@ -1109,7 +1166,7 @@ struct FileTableView: View {
     /// altrimenti solo `item`.
     private func dragURLs(for item: FileItem) -> [URL] {
         if selection.contains(item.id) && selection.count > 1 {
-            return items.filter { selection.contains($0.id) }.map(\.url)
+            return visibleItems.filter { selection.contains($0.id) }.map(\.url)
         }
         return [item.url]
     }

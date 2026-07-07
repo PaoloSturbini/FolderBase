@@ -315,6 +315,7 @@ enum LocalizedStrings {
         "search.scope.name": ("Nome", "Name"),
         "search.scope.content": ("Contenuto (AI)", "Content (AI)"),
         "search.scope.help": ("Cerca per nome file, oppure per contenuto: ricerca ibrida che unisce parole esatte e significato (AI)", "Search by file name, or by content: hybrid search combining exact words and meaning (AI)"),
+        "search.subfolders": ("Cerca anche nelle sottocartelle", "Search subfolders too"),
 
         // MARK: Indicizzazione contenuti (AI / ricerca)
         "toolbar.index": ("Indicizza contenuti", "Index contents"),

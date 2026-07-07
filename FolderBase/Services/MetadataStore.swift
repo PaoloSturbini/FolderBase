@@ -1196,7 +1196,19 @@ final class MetadataStore: ObservableObject {
             let score = Self.cosine(queryVector, vector, aNorm: queryNorm, bNorm: vectorNorm)
             scored.append((identity, columnText(statement, 1), columnText(statement, 2), columnText(statement, 3), score))
         }
-        return Array(scored.sorted { $0.score > $1.score }.prefix(limit))
+        // Selezione con DIVERSITÀ: ordina per punteggio ma limita a `maxPerFile` chunk per file,
+        // così le fonti citate coprono più documenti distinti invece di concentrarsi su uno solo.
+        let maxPerFile = 2
+        var perFile: [String: Int] = [:]
+        var result: [(identity: String, path: String, name: String, text: String, score: Float)] = []
+        for chunk in scored.sorted(by: { $0.score > $1.score }) {
+            let count = perFile[chunk.identity, default: 0]
+            guard count < maxPerFile else { continue }
+            perFile[chunk.identity] = count + 1
+            result.append(chunk)
+            if result.count >= limit { break }
+        }
+        return result
     }
 
     /// Mappa identità→hash di TUTTI i file indicizzati con successo. Usata per calcolare la
