@@ -810,6 +810,11 @@ final class MetadataStore: ObservableObject {
         // Con WAL, NORMAL è lo standard consigliato: dimezza il costo dei commit
         // mantenendo la durabilità a livello di checkpoint.
         try execute("PRAGMA synchronous = NORMAL")
+        // Perf letture/ordinamenti: tabelle temporanee in RAM, memory-map del DB (256 MB) e
+        // cache pagine più ampia (~16 MB, valore negativo = KB). Innocui e reversibili.
+        try? execute("PRAGMA temp_store = MEMORY")
+        try? execute("PRAGMA mmap_size = 268435456")
+        try? execute("PRAGMA cache_size = -16000")
     }
 
     private func migrateSchema() throws {
@@ -928,6 +933,11 @@ final class MetadataStore: ObservableObject {
             """
         )
         try execute("CREATE INDEX IF NOT EXISTS idx_chunk_vectors_provider ON chunk_vectors(provider_id)")
+        // Perf ricerca semantica (Fase 4): norma L2 precalcolata (evita di ricalcolarla a ogni
+        // query) e indice composito a supporto del prefiltro provider_id+dimension. L'ALTER è
+        // idempotente: fallisce silenziosamente se la colonna esiste già (DB aggiornati).
+        _ = try? execute("ALTER TABLE chunk_vectors ADD COLUMN norm REAL NOT NULL DEFAULT 0")
+        try execute("CREATE INDEX IF NOT EXISTS idx_chunk_vectors_provider_dim ON chunk_vectors(provider_id, dimension)")
 
         // Esito memorizzato dell'ultimo calcolo di stato di indicizzazione per cartella
         // (evita di ri-enumerare il sottoalbero a ogni apertura della Configurazione).
@@ -1161,7 +1171,7 @@ final class MetadataStore: ObservableObject {
         // Prefiltro per dimensione oltre che per provider: scarta a livello SQL i vettori di
         // dimensione incompatibile (evita di caricarne il BLOB e ricontrollarne la lunghezza).
         let sql = """
-            SELECT c.file_identity, f.last_known_path, f.name, c.text, v.vector
+            SELECT c.file_identity, f.last_known_path, f.name, c.text, v.vector, v.norm
             FROM chunk_vectors v
             JOIN content_chunks c ON c.id = v.chunk_id
             JOIN files f ON f.identity = c.file_identity
@@ -1181,7 +1191,9 @@ final class MetadataStore: ObservableObject {
             guard let blob = columnBlob(statement, 4) else { continue }
             let vector = Self.floats(from: blob)
             guard vector.count == queryVector.count else { continue }
-            let score = Self.cosine(queryVector, vector, aNorm: queryNorm)
+            let storedNorm = Float(sqlite3_column_double(statement, 5))
+            let vectorNorm = storedNorm > 0 ? storedNorm : Self.norm(vector)
+            let score = Self.cosine(queryVector, vector, aNorm: queryNorm, bNorm: vectorNorm)
             scored.append((identity, columnText(statement, 1), columnText(statement, 2), columnText(statement, 3), score))
         }
         return Array(scored.sorted { $0.score > $1.score }.prefix(limit))
@@ -1340,8 +1352,8 @@ final class MetadataStore: ObservableObject {
             )
             let chunkID = sqlite3_last_insert_rowid(db)
             try? execute(
-                "INSERT INTO chunk_vectors (chunk_id, provider_id, dimension, vector) VALUES (?, ?, ?, ?)",
-                bindings: [.int(Int(chunkID)), .text(chunk.providerID), .int(chunk.vector.count), .blob(Self.data(from: chunk.vector))]
+                "INSERT INTO chunk_vectors (chunk_id, provider_id, dimension, vector, norm) VALUES (?, ?, ?, ?, ?)",
+                bindings: [.int(Int(chunkID)), .text(chunk.providerID), .int(chunk.vector.count), .blob(Self.data(from: chunk.vector)), .real(Double(Self.norm(chunk.vector)))]
             )
         }
     }
@@ -1354,7 +1366,7 @@ final class MetadataStore: ObservableObject {
 
         var statement: OpaquePointer?
         let sql = """
-            SELECT c.file_identity, v.vector
+            SELECT c.file_identity, v.vector, v.norm
             FROM chunk_vectors v
             JOIN content_chunks c ON c.id = v.chunk_id
             WHERE v.provider_id = ? AND v.dimension = ?
@@ -1372,7 +1384,9 @@ final class MetadataStore: ObservableObject {
             guard candidates.contains(identity), let blob = columnBlob(statement, 1) else { continue }
             let vector = Self.floats(from: blob)
             guard vector.count == queryVector.count else { continue }
-            let score = Self.cosine(queryVector, vector, aNorm: queryNorm)
+            let storedNorm = Float(sqlite3_column_double(statement, 2))
+            let vectorNorm = storedNorm > 0 ? storedNorm : Self.norm(vector)
+            let score = Self.cosine(queryVector, vector, aNorm: queryNorm, bNorm: vectorNorm)
             if let existing = bestByFile[identity] {
                 if score > existing { bestByFile[identity] = score }
             } else {
@@ -1449,13 +1463,14 @@ final class MetadataStore: ObservableObject {
         return sqrt(sumSquares)
     }
 
-    /// Coseno tra due vettori della stessa dimensione. `aNorm` (norma di `a`) può essere passata
-    /// precalcolata per non ricalcolarla a ogni confronto con la stessa query.
-    private static func cosine(_ a: [Float], _ b: [Float], aNorm: Float? = nil) -> Float {
+    /// Coseno tra due vettori della stessa dimensione. Le norme di `a` e `b` possono essere passate
+    /// precalcolate (query e vettore memorizzato) per non ricalcolarle a ogni confronto: rimane
+    /// solo il prodotto scalare.
+    private static func cosine(_ a: [Float], _ b: [Float], aNorm: Float? = nil, bNorm: Float? = nil) -> Float {
         guard a.count == b.count, !a.isEmpty else { return 0 }
         var dot: Float = 0
         vDSP_dotpr(a, 1, b, 1, &dot, vDSP_Length(a.count))
-        let denom = (aNorm ?? norm(a)) * norm(b)
+        let denom = (aNorm ?? norm(a)) * (bNorm ?? norm(b))
         return denom > 0 ? dot / denom : 0
     }
 }

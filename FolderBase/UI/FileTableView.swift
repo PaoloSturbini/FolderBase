@@ -151,19 +151,23 @@ struct FileTableView: View {
                 chatRequest = nil
             }
         }
-        .onAppear { onSearchChanged() }
+        .onAppear { rebuildMetadataIndex() }
         .onChange(of: items) {
             // Cambiando cartella il riferimento di "Trova simili" non è più valido.
             similarRank = nil
             similarToName = nil
+            // Dati cambiati → ricostruisci l'indice, poi riapplica l'eventuale ricerca.
+            rebuildMetadataIndex()
             onSearchChanged()
         }
+        // Ricerca/filtri/ordinamento riusano l'indice esistente (nessuna ricostruzione).
         .onChange(of: searchText) { onSearchChanged() }
         .onChange(of: searchScope) { onSearchChanged() }
         .onChange(of: optionFilters) { refreshDisplayCache() }
         .onChange(of: tableSortOrder) { refreshDisplayCache() }
-        .onChange(of: metadataFields) { refreshDisplayCache() }
-        .onChange(of: metadataStore.metadataByFileIdentity) { refreshDisplayCache() }
+        // Cambi di DATI → ricostruzione indice.
+        .onChange(of: metadataFields) { rebuildMetadataIndex() }
+        .onChange(of: metadataStore.metadataByFileIdentity) { rebuildMetadataIndex() }
     }
 
     /// Gestisce i cambi di ricerca. In modalità "Contenuto" (ibrida) il ranking di rilevanza si
@@ -651,7 +655,10 @@ struct FileTableView: View {
     /// Chiamata dai vari `onChange` in `body`: filtro e ordinamento (costosi, soprattutto
     /// `localizedStandardCompare`) vengono così eseguiti una sola volta per cambiamento
     /// reale invece che a ogni invalidazione di SwiftUI.
-    private func refreshDisplayCache() {
+    /// Ricostruisce SOLO l'indice metadata [fieldID: [itemID: value]], poi aggiorna la vista.
+    /// Costoso (O(campi × item)), quindi va chiamata solo quando cambiano i DATI (items, campi,
+    /// valori metadata) — NON a ogni tasto di ricerca o cambio ordinamento, che riusano l'indice.
+    private func rebuildMetadataIndex() {
         var index: [String: [String: String]] = [:]
         for field in metadataFields {
             var perItem: [String: String] = [:]
@@ -662,7 +669,12 @@ struct FileTableView: View {
             index[field.id] = perItem
         }
         cachedIndex = index
+        refreshDisplayCache()
+    }
 
+    /// Ricalcola SOLO la lista filtrata+ordinata riusando `cachedIndex` (non lo ricostruisce).
+    private func refreshDisplayCache() {
+        let index = cachedIndex
         let rawNeedle = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         let needle = rawNeedle.lowercased()
         var result: [FileItem]
