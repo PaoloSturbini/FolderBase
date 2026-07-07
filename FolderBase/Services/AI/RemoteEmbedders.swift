@@ -55,4 +55,36 @@ struct OpenAIEmbedder: TextEmbedder {
 
         return EmbeddingResult(providerID: "openai-\(model)", vector: array.map { Float($0) })
     }
+
+    /// Batch: un'unica richiesta con `input` = array di testi. OpenAI ritorna gli embedding con un
+    /// campo `index` che ne indica la posizione: li riordino di conseguenza. Riduce drasticamente
+    /// il numero di richieste (una per file invece di una per chunk) e quindi il rischio di rate-limit.
+    func embedBatch(_ texts: [String]) async -> [EmbeddingResult?] {
+        guard !texts.isEmpty, !apiKey.isEmpty,
+              let url = URL(string: "https://api.openai.com/v1/embeddings") else {
+            return Array(repeating: nil, count: texts.count)
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["model": model, "input": texts])
+        request.timeoutInterval = 60
+
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let dataArray = json["data"] as? [[String: Any]] else {
+            return Array(repeating: nil, count: texts.count)
+        }
+
+        var results: [EmbeddingResult?] = Array(repeating: nil, count: texts.count)
+        for item in dataArray {
+            guard let index = item["index"] as? Int, index >= 0, index < texts.count,
+                  let array = item["embedding"] as? [Double], !array.isEmpty else { continue }
+            results[index] = EmbeddingResult(providerID: "openai-\(model)", vector: array.map { Float($0) })
+        }
+        return results
+    }
 }

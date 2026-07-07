@@ -17,6 +17,22 @@ struct EmbeddingResult: Sendable {
 protocol TextEmbedder: Sendable {
     /// Embedding di un testo; nil se non calcolabile (lingua non supportata, rete assente…).
     func embed(_ text: String) async -> EmbeddingResult?
+
+    /// Embedding di più testi in una volta, nello stesso ordine (elemento nil = non calcolabile).
+    /// Default: sequenziale. I provider di rete lo sovrascrivono per inviare UNA sola richiesta
+    /// (meno latenza e soprattutto meno rate-limit: prima si faceva una richiesta per chunk).
+    func embedBatch(_ texts: [String]) async -> [EmbeddingResult?]
+}
+
+extension TextEmbedder {
+    func embedBatch(_ texts: [String]) async -> [EmbeddingResult?] {
+        var results: [EmbeddingResult?] = []
+        results.reserveCapacity(texts.count)
+        for text in texts {
+            results.append(await embed(text))
+        }
+        return results
+    }
 }
 
 /// Embedder **on-device** basato su `NLEmbedding.sentenceEmbedding` (framework NaturalLanguage,

@@ -176,24 +176,35 @@ final class IndexingService: ObservableObject {
 
             if upToDate, let existingText = store.extractedText(for: item.identity) {
                 // Testo già estratto: rigenera solo gli embedding, senza ri-estrarre né ri-OCR.
-                let chunks = await Task.detached(priority: .utility) {
+                let build = await Task.detached(priority: .utility) {
                     await Self.buildChunkVectors(from: existingText, embedder: embedder)
                 }.value
-                store.replaceChunks(for: item.identity, chunks: chunks)
+                // Se l'embedder ha fallito (nessun vettore da chunk esistenti), NON toccare i
+                // vettori già salvati: il file resterà da reindicizzare e verrà riprovato, invece
+                // di perdere il lavoro fatto.
+                if !build.embedderFailed {
+                    store.replaceChunks(for: item.identity, chunks: build.vectors)
+                }
             } else {
                 let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
                 if size > maxFileSize {
                     store.markContentUnsupported(for: item, hash: effectiveHash)
                 } else {
-                    let result = await Task.detached(priority: .utility) { () -> (ExtractedText, [ChunkVector])? in
+                    let result = await Task.detached(priority: .utility) { () -> (ExtractedText, ChunkBuild)? in
                         guard let extracted = TextExtractor.extractText(from: url),
                               !extracted.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
                         return (extracted, await Self.buildChunkVectors(from: extracted.text, embedder: embedder))
                     }.value
 
-                    if let (extracted, chunks) = result {
+                    if let (extracted, build) = result {
+                        // Salva sempre il testo (indice full-text) anche se l'embedding fallisce.
                         store.storeExtractedText(for: item, text: extracted.text, ocrUsed: extracted.ocrUsed, hash: effectiveHash)
-                        store.replaceChunks(for: item.identity, chunks: chunks)
+                        // I vettori si scrivono solo se l'embedder ha risposto: così un errore
+                        // transitorio (rate-limit, rete) non cancella eventuali vettori esistenti
+                        // e il file verrà riprovato al prossimo reindex.
+                        if !build.embedderFailed {
+                            store.replaceChunks(for: item.identity, chunks: build.vectors)
+                        }
                     } else {
                         store.markContentUnsupported(for: item, hash: effectiveHash)
                     }
@@ -205,16 +216,28 @@ final class IndexingService: ObservableObject {
         }
     }
 
-    /// Chunk del testo + embedding di ciascun chunk con l'embedder attivo. Eseguita su thread di
-    /// background (`nonisolated`).
-    nonisolated static func buildChunkVectors(from text: String, embedder: TextEmbedder) async -> [ChunkVector] {
+    /// Esito della costruzione dei vettori di un file: i vettori riusciti e quanti chunk c'erano.
+    /// `embedderFailed` = c'erano chunk ma NESSUNO è stato embeddato (embedder non disponibile /
+    /// errore) → i chiamanti evitano di sovrascrivere/cancellare i vettori esistenti.
+    struct ChunkBuild: Sendable {
+        let vectors: [ChunkVector]
+        let chunkCount: Int
+        var embedderFailed: Bool { chunkCount > 0 && vectors.isEmpty }
+    }
+
+    /// Chunk del testo + embedding (in BATCH: una richiesta sola per i provider di rete). Eseguita
+    /// su thread di background (`nonisolated`).
+    nonisolated static func buildChunkVectors(from text: String, embedder: TextEmbedder) async -> ChunkBuild {
         let chunks = TextChunker.chunks(from: text)
+        guard !chunks.isEmpty else { return ChunkBuild(vectors: [], chunkCount: 0) }
+
+        let embeddings = await embedder.embedBatch(chunks)
         var result: [ChunkVector] = []
-        for (index, chunk) in chunks.enumerated() {
-            guard let embedding = await embedder.embed(chunk) else { continue }
-            result.append((ordinal: index, text: chunk, providerID: embedding.providerID, vector: embedding.vector))
+        for (index, embedding) in embeddings.enumerated() where index < chunks.count {
+            guard let embedding else { continue }
+            result.append((ordinal: index, text: chunks[index], providerID: embedding.providerID, vector: embedding.vector))
         }
-        return result
+        return ChunkBuild(vectors: result, chunkCount: chunks.count)
     }
 
     /// Hash leggero di change-detection: dimensione + data di modifica. Non è crittografico,
