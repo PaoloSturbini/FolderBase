@@ -29,7 +29,10 @@ struct FileTableView: View {
     let showFileExtensions: Bool
     let templates: [MetadataTemplate]
     let applyTemplate: (MetadataTemplate) -> Void
-    @ObservedObject var chatService: ChatService
+    /// Riferimento NON osservato: la tabella non deve ri-renderizzarsi ad ogni token della chat
+    /// in streaming (causava saturazione del main thread e blocco dell'app). Solo `ChatView`
+    /// (che lo dichiara @ObservedObject) si aggiorna durante la conversazione.
+    let chatService: ChatService
 
     @State private var isAddingField = false
     /// Impostato per aprire la chat: l'ambito effettivo (candidati + etichetta) è già configurato

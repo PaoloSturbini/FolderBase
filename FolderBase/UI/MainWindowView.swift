@@ -7,7 +7,10 @@ struct MainWindowView: View {
     @StateObject private var templateStore = TemplateStore()
     @StateObject private var backupService = BackupService()
     @StateObject private var indexingService = IndexingService()
-    @StateObject private var chatService = ChatService()
+    // @State (non @StateObject): MainWindowView possiede chatService in modo stabile ma NON si
+    // ri-renderizza ai suoi cambi (streaming chat). Solo ChatView lo osserva. Evita che ogni token
+    // della risposta rigeneri l'intera finestra/tabella (causa del blocco a 99% CPU).
+    @State private var chatService = ChatService()
     @State private var selectedFolderURL: URL?
     /// Radice STABILE dell'albero nella sidebar. Resta la cartella "base" scelta:
     /// navigando nelle sottocartelle non cambia, così l'albero non viene ricostruito/riletto.
