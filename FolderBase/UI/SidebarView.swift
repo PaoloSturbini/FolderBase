@@ -85,6 +85,7 @@ struct SidebarView: View {
     @AppStorage(AIProviderSettings.Keys.chatProvider) private var aiChatProviderRaw = AIChatProvider.none.rawValue
     @AppStorage(AIProviderSettings.Keys.ollamaChatModel) private var aiOllamaChatModel = AIProviderSettings.defaultOllamaChatModel
     @AppStorage(AIProviderSettings.Keys.openAIChatModel) private var aiOpenAIChatModel = AIProviderSettings.defaultOpenAIChatModel
+    @AppStorage(AIProviderSettings.Keys.chatContextChunks) private var aiChatContextChunks = AIProviderSettings.defaultChatContextChunks
     @State private var chatTesting = false
     @State private var chatTestMessage: String?
 
@@ -576,6 +577,16 @@ struct SidebarView: View {
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                         }
+
+                        Divider()
+
+                        Stepper(value: $aiChatContextChunks, in: 1...40) {
+                            Text("\(L("ai.chat.sources")): \(aiChatContextChunks)")
+                        }
+                        Text(L("ai.chat.sourcesNote"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

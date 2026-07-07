@@ -27,12 +27,25 @@ final class ChatService: ObservableObject {
     @Published private(set) var isBusy = false
     @Published var errorMessage: String?
 
+    /// Ambito corrente della chat: insieme di identità su cui cercare (vuoto = tutto l'indice) e
+    /// un'etichetta descrittiva mostrata nell'header ("Tutto l'indice", "Cartella: …", "File: …").
+    @Published private(set) var scopeLabel: String = ""
+    private var candidates: Set<String> = []
+    /// Ultima domanda posta, per il pulsante "Rilancia".
+    @Published private(set) var lastQuestion: String?
+
     private var task: Task<Void, Never>?
 
-    /// Numero di chunk di contesto passati al modello.
-    private let contextChunks = 8
-
     var isConfigured: Bool { ChatEngine.active() != nil }
+    var canRerun: Bool { lastQuestion != nil && !isBusy }
+    var hasConversation: Bool { !messages.isEmpty }
+
+    /// Imposta l'ambito della chat e azzera la conversazione (nuovo contesto = nuova chat).
+    func configure(candidates: Set<String>, scopeLabel: String) {
+        self.candidates = candidates
+        self.scopeLabel = scopeLabel
+        reset()
+    }
 
     func reset() {
         task?.cancel()
@@ -40,6 +53,7 @@ final class ChatService: ObservableObject {
         messages = []
         errorMessage = nil
         isBusy = false
+        lastQuestion = nil
     }
 
     func cancel() {
@@ -48,8 +62,14 @@ final class ChatService: ObservableObject {
         isBusy = false
     }
 
-    /// Pone una domanda. `candidates` limita la ricerca (vuoto = tutto l'indice).
-    func ask(_ question: String, candidates: Set<String>, store: MetadataStore) {
+    /// Ripete l'ultima domanda posta (utile dopo un cambio di modello o una reindicizzazione).
+    func rerun(store: MetadataStore) {
+        guard let question = lastQuestion else { return }
+        ask(question, store: store)
+    }
+
+    /// Pone una domanda usando l'ambito corrente (`candidates`, vuoto = tutto l'indice).
+    func ask(_ question: String, store: MetadataStore) {
         let query = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty, !isBusy else { return }
         guard ChatEngine.active() != nil else {
@@ -59,11 +79,13 @@ final class ChatService: ObservableObject {
 
         errorMessage = nil
         isBusy = true
+        lastQuestion = query
         messages.append(Message(role: .user, text: query, sources: []))
         let assistant = Message(role: .assistant, text: "", sources: [])
         messages.append(assistant)
         let assistantID = assistant.id
-        let chunkCount = contextChunks
+        let chunkCount = AIProviderSettings.chatContextChunks
+        let candidates = self.candidates
 
         task = Task { [weak self] in
             guard let self else { return }
@@ -121,6 +143,29 @@ final class ChatService: ObservableObject {
     Se il contesto non contiene la risposta, dillo con chiarezza senza inventare. Cita le fonti pertinenti con la notazione [n]. \
     Rispondi nella stessa lingua della domanda, in modo chiaro e conciso.
     """
+
+    // MARK: - Esportazione / copia della conversazione
+
+    /// Conversazione in Markdown (domande, risposte e fonti citate), per esportazione o copia.
+    func transcriptMarkdown() -> String {
+        var lines: [String] = ["# \(L("chat.title"))"]
+        if !scopeLabel.isEmpty { lines.append("_\(L("chat.scope.label")): \(scopeLabel)_") }
+        lines.append("")
+        for message in messages {
+            let heading = message.role == .user ? L("chat.export.you") : L("chat.export.assistant")
+            lines.append("## \(heading)")
+            lines.append(message.text)
+            if !message.sources.isEmpty {
+                lines.append("")
+                lines.append("**\(L("chat.sources"))**")
+                for (index, source) in message.sources.enumerated() {
+                    lines.append("- [\(index + 1)] \(source.name) — `\(source.path)`")
+                }
+            }
+            lines.append("")
+        }
+        return lines.joined(separator: "\n")
+    }
 
     // MARK: - Mutazioni del messaggio in streaming
 

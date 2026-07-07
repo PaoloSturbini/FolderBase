@@ -1265,6 +1265,25 @@ final class MetadataStore: ObservableObject {
         return result
     }
 
+    /// Come `searchFileContent`, ma ritorna le identità ORDINATE per rilevanza testuale (bm25:
+    /// più rilevante prima). Serve alla ricerca ibrida per costruire il ranking FTS da fondere
+    /// con quello semantico via Reciprocal Rank Fusion.
+    func searchFileContentRanked(_ rawQuery: String) -> [String] {
+        guard let matchQuery = Self.ftsMatchQuery(from: rawQuery) else { return [] }
+        var statement: OpaquePointer?
+        // bm25() ritorna valori più bassi (più negativi) per i match più rilevanti → ASC = migliori prima.
+        let sql = "SELECT file_identity FROM content_fts WHERE content_fts MATCH ? ORDER BY bm25(content_fts) ASC"
+        guard (try? prepare(sql, statement: &statement)) != nil else { return [] }
+        defer { sqlite3_finalize(statement) }
+        try? bind([.text(matchQuery)], to: statement)
+
+        var result: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result.append(columnText(statement, 0))
+        }
+        return result
+    }
+
     /// Costruisce una query MATCH FTS5 sicura: estrae solo token alfanumerici (così eventuali
     /// caratteri speciali non rompono la sintassi) e li trasforma in prefissi in AND.
     static func ftsMatchQuery(from raw: String) -> String? {

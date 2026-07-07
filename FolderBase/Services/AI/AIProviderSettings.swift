@@ -45,8 +45,19 @@ enum AIProviderSettings {
         static let chatProvider = "aiChatProvider"
         static let ollamaChatModel = "aiOllamaChatModel"
         static let openAIChatModel = "aiOpenAIChatModel"
+        static let chatContextChunks = "aiChatContextChunks"
     }
     static let openAIKeyAccount = "openai-api-key"
+
+    /// Numero di frammenti (chunk) di contesto recuperati per ogni domanda alla chat. Più alto =
+    /// più fonti potenziali e risposte più complete, ma prompt più lungo (rischio di sforare la
+    /// finestra dei modelli piccoli). Limitato tra 1 e 40; default 12.
+    static let defaultChatContextChunks = 12
+    static var chatContextChunks: Int {
+        let value = UserDefaults.standard.integer(forKey: Keys.chatContextChunks)
+        guard value > 0 else { return defaultChatContextChunks }
+        return min(max(value, 1), 40)
+    }
 
     static let defaultOllamaBaseURL = "http://localhost:11434"
     static let defaultOllamaModel = "nomic-embed-text"
@@ -55,7 +66,10 @@ enum AIProviderSettings {
     static let defaultOpenAIChatModel = "gpt-4o-mini"
 
     static var provider: AIEmbeddingProvider {
-        AIEmbeddingProvider(rawValue: UserDefaults.standard.string(forKey: Keys.provider) ?? "") ?? .apple
+        // Default: Ollama (qualità semantica nettamente migliore dell'on-device Apple, richiesta
+        // dalla ricerca ibrida). Se Ollama non è raggiungibile la ricerca ripiega comunque su FTS
+        // e l'utente può scegliere Apple/OpenAI dalla Configurazione. Vedi docs/AI-Indexing-Study.md.
+        AIEmbeddingProvider(rawValue: UserDefaults.standard.string(forKey: Keys.provider) ?? "") ?? .ollama
     }
     static var ollamaBaseURL: String {
         let value = UserDefaults.standard.string(forKey: Keys.ollamaBaseURL) ?? ""

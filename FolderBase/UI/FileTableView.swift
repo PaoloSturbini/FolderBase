@@ -32,7 +32,9 @@ struct FileTableView: View {
     @ObservedObject var chatService: ChatService
 
     @State private var isAddingField = false
-    @State private var isShowingChat = false
+    /// Impostato per aprire la chat: l'ambito effettivo (candidati + etichetta) è già configurato
+    /// in `chatService` al momento dell'apertura (vedi `startChat`).
+    @State private var chatRequest: ChatRequest?
     @State private var newItemRequest: NewItemRequest?
     @State private var fieldPendingEdit: MetadataField?
     @State private var itemPendingRename: FileItem?
@@ -46,10 +48,11 @@ struct FileTableView: View {
     @State private var selection: Set<FileItem.ID> = []
     @State private var searchText = ""
     @State private var searchScope: SearchScope = .name
-    /// Ranking della ricerca semantica (identità→posizione), calcolato in modo asincrono.
-    @State private var semanticRank: [String: Int]?
-    /// Token anti-race: scarta i risultati di una ricerca semantica superata da una più recente.
-    @State private var semanticToken = UUID()
+    /// Ranking di rilevanza della ricerca "Contenuto" (ibrida FTS+semantica), identità→posizione,
+    /// calcolato in modo asincrono in `onSearchChanged`.
+    @State private var relevanceRank: [String: Int]?
+    /// Token anti-race: scarta i risultati di una ricerca superata da una più recente.
+    @State private var searchToken = UUID()
     @State private var optionFilters: [String: Set<String>] = [:]
     @State private var viewMode: ViewMode = .table
     @State private var boardFieldID: String?
@@ -70,12 +73,16 @@ struct FileTableView: View {
         var id: String { rawValue }
     }
 
-    /// Ambito della ricerca: per nome (storico), per contenuto indicizzato (FTS testuale),
-    /// o per significato (ricerca semantica sugli embedding).
+    /// Token per presentare la finestra di chat (l'ambito è già in `chatService`).
+    private struct ChatRequest: Identifiable { let id = UUID() }
+
+    /// Ambito della ricerca: per nome (storico) o per contenuto. La ricerca "Contenuto" è IBRIDA:
+    /// fonde il full-text (parole esatte, FTS5/bm25) con la ricerca semantica (significato,
+    /// embedding) via Reciprocal Rank Fusion, così non fa mai peggio dell'FTS e in più cattura i
+    /// sinonimi/parafrasi. Vedi docs/AI-Indexing-Study.md §Fase 4.
     private enum SearchScope: String, CaseIterable, Identifiable {
         case name
         case content
-        case semantic
         var id: String { rawValue }
     }
 
@@ -135,9 +142,9 @@ struct FileTableView: View {
         .sheet(item: $quickLookItem) { item in
             QuickLookSheet(url: item.url) { quickLookItem = nil }
         }
-        .sheet(isPresented: $isShowingChat) {
-            ChatView(chatService: chatService, candidates: [], store: metadataStore) {
-                isShowingChat = false
+        .sheet(item: $chatRequest) { _ in
+            ChatView(chatService: chatService, store: metadataStore) {
+                chatRequest = nil
             }
         }
         .onAppear { onSearchChanged() }
@@ -150,33 +157,68 @@ struct FileTableView: View {
         .onChange(of: metadataStore.metadataByFileIdentity) { refreshDisplayCache() }
     }
 
-    /// Gestisce i cambi di ricerca. In modalità "Significato" l'embedding della query è
-    /// asincrono (può essere una chiamata di rete con Ollama/OpenAI): si calcola il ranking in
-    /// un Task e poi si aggiorna la cache; per Nome/Contenuto si aggiorna subito.
+    /// Gestisce i cambi di ricerca. In modalità "Contenuto" (ibrida) il ranking di rilevanza si
+    /// calcola in modo asincrono, perché l'embedding della query può essere una chiamata di rete
+    /// (Ollama/OpenAI): l'FTS è sincrona (pochi ms), l'embedding gira in un Task, i due elenchi
+    /// vengono fusi via RRF e infine si aggiorna la cache. Per "Nome" si aggiorna subito.
     private func onSearchChanged() {
         let rawNeedle = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard searchScope == .semantic, !rawNeedle.isEmpty else {
-            semanticRank = nil
+        guard searchScope == .content, !rawNeedle.isEmpty else {
+            relevanceRank = nil
             refreshDisplayCache()
             return
         }
 
         let token = UUID()
-        semanticToken = token
+        searchToken = token
         let candidates = Set(items.map { $0.id })
+        // Elenco full-text (sincrono), limitato ai file della vista corrente.
+        let ftsRanked = metadataStore.searchFileContentRanked(rawNeedle).filter { candidates.contains($0) }
+
         Task {
             let embedder = EmbeddingEngine.active()
             let embedding = await embedder.embed(rawNeedle)
-            guard semanticToken == token else { return }   // superata da una ricerca più recente
+            guard searchToken == token else { return }   // superata da una ricerca più recente
 
+            // Elenco semantico (se l'embedding è disponibile: Ollama/OpenAI raggiungibili o Apple).
+            var semanticRanked: [String] = []
             if let embedding {
-                let ranked = metadataStore.semanticSearch(queryVector: embedding.vector, providerID: embedding.providerID, candidates: candidates, limit: 300)
-                semanticRank = Dictionary(uniqueKeysWithValues: ranked.enumerated().map { ($0.element.identity, $0.offset) })
-            } else {
-                semanticRank = [:]
+                semanticRanked = metadataStore
+                    .semanticSearch(queryVector: embedding.vector, providerID: embedding.providerID, candidates: candidates, limit: 300)
+                    .map { $0.identity }
             }
+
+            // Fusione: se manca uno dei due elenchi (es. Ollama spento → niente semantica) la
+            // ricerca ripiega automaticamente sull'altro, quindi non fa mai peggio dell'FTS.
+            let lists = [ftsRanked, semanticRanked].filter { !$0.isEmpty }
+            relevanceRank = lists.isEmpty ? [:] : Self.reciprocalRankFusion(lists)
             refreshDisplayCache()
         }
+    }
+
+    /// Reciprocal Rank Fusion: combina più elenchi ordinati per rilevanza in un unico ranking.
+    /// Il punteggio di un documento è la somma di 1/(k + posizione) su tutti gli elenchi in cui
+    /// compare (k=60, valore standard). Ritorna identità→posizione finale (0-based, migliori prima).
+    private static func reciprocalRankFusion(_ lists: [[String]], k: Double = 60) -> [String: Int] {
+        var scores: [String: Double] = [:]
+        for list in lists {
+            for (index, identity) in list.enumerated() {
+                scores[identity, default: 0] += 1.0 / (k + Double(index + 1))
+            }
+        }
+        let ordered = scores.sorted { $0.value > $1.value }.map { $0.key }
+        return Dictionary(uniqueKeysWithValues: ordered.enumerated().map { ($0.element, $0.offset) })
+    }
+
+    /// Configura l'ambito della chat (candidati + etichetta) e la apre.
+    private func startChat(candidates: Set<String>, scopeLabel: String) {
+        chatService.configure(candidates: candidates, scopeLabel: scopeLabel)
+        chatRequest = ChatRequest()
+    }
+
+    /// Identità dei file indicizzabili sotto una cartella (ricorsivo), da usare come ambito chat.
+    private func folderChatCandidates(_ folder: FileItem) -> Set<String> {
+        Set(IndexingService.fileItems(under: folder.url, limit: 20000).map { $0.identity })
     }
 
     private var emptyState: some View {
@@ -273,39 +315,20 @@ struct FileTableView: View {
         .border(Color(nsColor: .separatorColor), width: 0.5)
     }
 
-    /// Box di ricerca unico: campo testo + menu per scegliere il tipo di ricerca
-    /// (Nome / Contenuto / Significato), tutto in un'unica capsula.
+    /// Box di ricerca unico, stile barra di ricerca macOS: a sinistra la lente e il selettore
+    /// del tipo di ricerca (Nome / Contenuto ibrido), poi il campo di testo. Tutto in una capsula.
     private var searchField: some View {
         HStack(spacing: 6) {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary)
-
-            TextField(searchPlaceholder, text: $searchText)
-                .textFieldStyle(.plain)
-                .frame(width: 180)
-
-            if !searchText.isEmpty {
-                Button {
-                    searchText = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.borderless)
-            }
-
-            Divider().frame(height: 14)
-
             Menu {
                 Picker(L("search.scope.help"), selection: $searchScope) {
                     Text(L("search.scope.name")).tag(SearchScope.name)
                     Text(L("search.scope.content")).tag(SearchScope.content)
-                    Text(L("search.scope.semantic")).tag(SearchScope.semantic)
                 }
                 .pickerStyle(.inline)
                 .labelsHidden()
             } label: {
                 HStack(spacing: 3) {
+                    Image(systemName: "magnifyingglass")
                     Text(searchScopeLabel)
                         .font(.caption)
                     Image(systemName: "chevron.down")
@@ -317,6 +340,22 @@ struct FileTableView: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .hoverDescription(L("search.scope.help"))
+
+            Divider().frame(height: 14)
+
+            TextField(searchPlaceholder, text: $searchText)
+                .textFieldStyle(.plain)
+                .frame(width: 170)
+
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
@@ -327,7 +366,6 @@ struct FileTableView: View {
         switch searchScope {
         case .name: return L("search.scope.name")
         case .content: return L("search.scope.content")
-        case .semantic: return L("search.scope.semantic")
         }
     }
 
@@ -335,7 +373,6 @@ struct FileTableView: View {
         switch searchScope {
         case .name: return "\(L("table.search")) · \(L("search.scope.name"))"
         case .content: return "\(L("table.search")) · \(L("search.scope.content"))"
-        case .semantic: return "\(L("table.search")) · \(L("search.scope.semantic"))"
         }
     }
 
@@ -343,7 +380,7 @@ struct FileTableView: View {
     private var toolbarButtons: some View {
         HStack(spacing: 8) {
             Button {
-                isShowingChat = true
+                startChat(candidates: [], scopeLabel: L("chat.scope.all"))
             } label: {
                 Label(L("toolbar.chat"), systemImage: "bubble.left.and.bubble.right")
             }
@@ -591,15 +628,11 @@ struct FileTableView: View {
         let needle = rawNeedle.lowercased()
         var result: [FileItem]
 
-        // Ricerca semantica: il ranking è calcolato in modo asincrono in `onSearchChanged` e
-        // conservato in `semanticRank` (qui viene solo usato). Sostituisce l'ordinamento normale.
-        let activeSemanticRank: [String: Int]? = (searchScope == .semantic && !rawNeedle.isEmpty) ? semanticRank : nil
-
-        // In modalità "contenuto" la corrispondenza arriva dall'indice full-text (FTS): il set
-        // di identità che matchano viene calcolato una volta sola qui (query SQLite, pochi ms).
-        let contentMatches: Set<String>? = (searchScope == .content && !needle.isEmpty)
-            ? metadataStore.searchFileContent(needle)
-            : nil
+        // Ricerca "Contenuto" (ibrida FTS+semantica): il ranking di rilevanza è calcolato in modo
+        // asincrono in `onSearchChanged` e conservato in `relevanceRank`; qui filtra i risultati
+        // (appartenenza al ranking) e ne sostituisce l'ordinamento. Finché il calcolo è in corso
+        // `relevanceRank` è nil → si usa una mappa vuota (nessun match) invece di ricadere sul nome.
+        let activeRank: [String: Int]? = (searchScope == .content && !rawNeedle.isEmpty) ? (relevanceRank ?? [:]) : nil
 
         if optionFilters.isEmpty, needle.isEmpty {
             result = items
@@ -613,11 +646,8 @@ struct FileTableView: View {
 
                 guard !needle.isEmpty else { return true }
 
-                if let activeSemanticRank {
-                    return activeSemanticRank[item.id] != nil
-                }
-                if let contentMatches {
-                    return contentMatches.contains(item.id)
+                if let activeRank {
+                    return activeRank[item.id] != nil
                 }
 
                 // Modalità "nome": nome file o valori metadata.
@@ -629,9 +659,9 @@ struct FileTableView: View {
             }
         }
 
-        if let activeSemanticRank {
-            // Ordina per rilevanza semantica (i più simili in alto).
-            result.sort { (activeSemanticRank[$0.id] ?? .max) < (activeSemanticRank[$1.id] ?? .max) }
+        if let activeRank {
+            // Ordina per rilevanza ibrida (i più pertinenti in alto).
+            result.sort { (activeRank[$0.id] ?? .max) < (activeRank[$1.id] ?? .max) }
         } else if let comparator = tableSortOrder.first {
             result.sort { comparator.compare($0, $1) == .orderedAscending }
         }
@@ -789,6 +819,24 @@ struct FileTableView: View {
                 revealInFinder([single])
             } label: {
                 Label(L("ctx.revealFinder"), systemImage: "magnifyingglass")
+            }
+
+            Divider()
+
+            if single.isFolder {
+                Button {
+                    startChat(candidates: folderChatCandidates(single),
+                              scopeLabel: "\(L("chat.scope.folder")): \(single.name)")
+                } label: {
+                    Label(L("ctx.chatFolder"), systemImage: "bubble.left.and.bubble.right")
+                }
+            } else {
+                Button {
+                    startChat(candidates: [single.identity],
+                              scopeLabel: "\(L("chat.scope.file")): \(single.name)")
+                } label: {
+                    Label(L("ctx.chatFile"), systemImage: "bubble.left.and.bubble.right")
+                }
             }
 
             Divider()
