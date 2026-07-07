@@ -22,6 +22,13 @@ protocol TextEmbedder: Sendable {
     /// Default: sequenziale. I provider di rete lo sovrascrivono per inviare UNA sola richiesta
     /// (meno latenza e soprattutto meno rate-limit: prima si faceva una richiesta per chunk).
     func embedBatch(_ texts: [String]) async -> [EmbeddingResult?]
+
+    /// Embedding della query per PIÙ spazi (provider/lingua) presenti nell'indice, così una domanda
+    /// può essere confrontata anche con documenti embeddati in un'ALTRA lingua dello stesso motore
+    /// (retrieval cross-lingua). Default: un solo embedding (lo spazio attivo) — i motori multilingue
+    /// (Ollama/OpenAI) usano un unico spazio, quindi coprono già tutte le lingue. Apple, che ha un
+    /// modello per lingua, lo sovrascrive per produrre un vettore per ciascuna lingua richiesta.
+    func embedForSpaces(_ text: String, providerIDs: [String]) async -> [EmbeddingResult]
 }
 
 extension TextEmbedder {
@@ -32,6 +39,11 @@ extension TextEmbedder {
             results.append(await embed(text))
         }
         return results
+    }
+
+    func embedForSpaces(_ text: String, providerIDs: [String]) async -> [EmbeddingResult] {
+        if let result = await embed(text) { return [result] }
+        return []
     }
 }
 
@@ -56,6 +68,32 @@ final class AppleNLEmbedder: TextEmbedder, @unchecked Sendable {
               let vector = embedding.vector(for: trimmed) else { return nil }
 
         return EmbeddingResult(providerID: "apple-nl-\(language.rawValue)", vector: vector.map { Float($0) })
+    }
+
+    /// Cross-lingua on-device: embedda la query in OGNI lingua richiesta (i provider `apple-nl-*`
+    /// presenti nell'indice) più la lingua rilevata della domanda. Ogni modello NL è per-lingua, così
+    /// la stessa domanda genera un vettore per lo spazio italiano e uno per quello inglese, permettendo
+    /// di confrontarla con documenti nell'una o nell'altra lingua. Nota: la qualità semantica tra lingue
+    /// diverse resta limitata (i modelli NL non sono allineati cross-lingua); per un vero retrieval
+    /// multilingue conviene un motore multilingue (Ollama/OpenAI). Il segnale lessicale integra comunque.
+    func embedForSpaces(_ text: String, providerIDs: [String]) async -> [EmbeddingResult] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        var languageCodes = Set<String>()
+        for id in providerIDs where id.hasPrefix("apple-nl-") {
+            languageCodes.insert(String(id.dropFirst("apple-nl-".count)))
+        }
+        languageCodes.insert(dominantLanguage(of: trimmed).rawValue)
+
+        var results: [EmbeddingResult] = []
+        for code in languageCodes {
+            let language = NLLanguage(code)
+            guard let embedding = embedding(for: language),
+                  let vector = embedding.vector(for: trimmed) else { continue }
+            results.append(EmbeddingResult(providerID: "apple-nl-\(code)", vector: vector.map { Float($0) }))
+        }
+        return results
     }
 
     /// Sceglie la lingua: quella rilevata se ha un modello, altrimenti il primo fallback disponibile.

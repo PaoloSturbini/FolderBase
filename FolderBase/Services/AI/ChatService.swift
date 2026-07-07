@@ -99,13 +99,16 @@ final class ChatService: ObservableObject {
                 return
             }
 
+            // Vettore della domanda per OGNI spazio (lingua/motore) presente nell'indice, così la
+            // ricerca può raggiungere anche documenti in una lingua diversa dalla domanda (es. domanda
+            // in italiano, documenti in inglese). Con un motore multilingue (Ollama/OpenAI) lo spazio
+            // è unico e copre già tutte le lingue.
             let embedder = EmbeddingEngine.active()
-            guard let embedding = await embedder.embed(query) else {
-                self.fail(L("chat.embedFail"), id: assistantID)
-                return
-            }
+            let spaces = store.indexedProviderIDs()
+            let queries = await embedder.embedForSpaces(query, providerIDs: spaces)
 
-            let chunks = store.semanticChunks(query: query, queryVector: embedding.vector, providerID: embedding.providerID, candidates: candidates, limit: chunkCount)
+            // Non si fallisce se manca l'embedding: il recupero per parole chiave è comunque possibile.
+            let chunks = store.semanticChunks(query: query, queries: queries, candidates: candidates, limit: chunkCount)
             guard !chunks.isEmpty else {
                 self.fail(L("chat.noContext"), id: assistantID)
                 return

@@ -1171,62 +1171,81 @@ final class MetadataStore: ObservableObject {
     /// che parlano davvero degli argomenti chiesti salgono sopra i semplici "vicini vettoriali",
     /// rendendo le fonti citate più attinenti alla domanda. Con embedder debole/assente il segnale
     /// lessicale sostiene comunque la pertinenza; senza parole chiave utili resta il solo semantico.
-    func semanticChunks(query: String, queryVector: [Float], providerID: String, candidates: Set<String>, limit: Int) -> [(identity: String, path: String, name: String, text: String, score: Float)] {
-        guard !queryVector.isEmpty else { return [] }
+    /// `queries` = uno o più vettori della domanda, uno per SPAZIO (provider/lingua) presente
+    /// nell'indice. Un chunk riceve un punteggio semantico solo se esiste un vettore-query dello
+    /// stesso spazio (stessa lingua/motore), mentre il punteggio lessicale (copertura parole chiave)
+    /// vale su TUTTI gli spazi. Così una domanda in italiano può recuperare anche documenti in inglese:
+    /// per via semantica se è disponibile un vettore-query inglese (o con un motore multilingue), e
+    /// comunque per parole chiave condivise (nomi, sigle, numeri, termini tecnici uguali nelle due lingue).
+    func semanticChunks(query: String, queries: [EmbeddingResult], candidates: Set<String>, limit: Int) -> [(identity: String, path: String, name: String, text: String, score: Float)] {
+        // Vettori della query indicizzati per spazio (provider_id → vettore + norma).
+        var queryBySpace: [String: (vector: [Float], norm: Float)] = [:]
+        for q in queries where !q.vector.isEmpty {
+            let norm = Self.norm(q.vector)
+            if norm > 0 { queryBySpace[q.providerID] = (q.vector, norm) }
+        }
+        let terms = Self.meaningfulTerms(from: query)
+        // Senza né vettori-query né parole chiave non c'è nulla da recuperare.
+        guard !queryBySpace.isEmpty || !terms.isEmpty else { return [] }
+
         var statement: OpaquePointer?
-        // Prefiltro per dimensione oltre che per provider: scarta a livello SQL i vettori di
-        // dimensione incompatibile (evita di caricarne il BLOB e ricontrollarne la lunghezza).
+        // Nessun prefiltro su provider/dimensione: si caricano i chunk di TUTTI gli spazi, così i
+        // documenti in una lingua diversa dalla domanda restano raggiungibili (semantica se possibile,
+        // altrimenti per parole chiave). Il BLOB del vettore si decodifica solo dove serve il coseno.
         let sql = """
-            SELECT c.file_identity, f.last_known_path, f.name, c.text, v.vector, v.norm
+            SELECT c.file_identity, f.last_known_path, f.name, c.text, v.provider_id, v.vector, v.norm
             FROM chunk_vectors v
             JOIN content_chunks c ON c.id = v.chunk_id
             JOIN files f ON f.identity = c.file_identity
-            WHERE v.provider_id = ? AND v.dimension = ?
             """
         guard (try? prepare(sql, statement: &statement)) != nil else { return [] }
         defer { sqlite3_finalize(statement) }
-        try? bind([.text(providerID), .int(queryVector.count)], to: statement)
 
-        let queryNorm = Self.norm(queryVector)
-        guard queryNorm > 0 else { return [] }
-
-        var scored: [(identity: String, path: String, name: String, text: String, score: Float)] = []
+        struct ScoredChunk { let identity: String; let path: String; let name: String; let text: String; let semantic: Float?; let lexical: Int }
+        var scored: [ScoredChunk] = []
         while sqlite3_step(statement) == SQLITE_ROW {
             let identity = columnText(statement, 0)
             if !candidates.isEmpty, !candidates.contains(identity) { continue }
-            guard let blob = columnBlob(statement, 4) else { continue }
-            let vector = Self.floats(from: blob)
-            guard vector.count == queryVector.count else { continue }
-            let storedNorm = Float(sqlite3_column_double(statement, 5))
-            let vectorNorm = storedNorm > 0 ? storedNorm : Self.norm(vector)
-            let score = Self.cosine(queryVector, vector, aNorm: queryNorm, bNorm: vectorNorm)
-            scored.append((identity, columnText(statement, 1), columnText(statement, 2), columnText(statement, 3), score))
+            let text = columnText(statement, 3)
+            let providerID = columnText(statement, 4)
+
+            // Semantico: solo se abbiamo un vettore-query per QUESTO spazio (stessa lingua/motore).
+            var semantic: Float? = nil
+            if let queryVec = queryBySpace[providerID], let blob = columnBlob(statement, 5) {
+                let vector = Self.floats(from: blob)
+                if vector.count == queryVec.vector.count {
+                    let storedNorm = Float(sqlite3_column_double(statement, 6))
+                    let vectorNorm = storedNorm > 0 ? storedNorm : Self.norm(vector)
+                    semantic = Self.cosine(queryVec.vector, vector, aNorm: queryVec.norm, bNorm: vectorNorm)
+                }
+            }
+
+            // Lessicale: quante parole chiave distinte della domanda compaiono nel chunk (match di
+            // token esatto o per prefisso). Funziona a prescindere dalla lingua per i token condivisi.
+            var lexical = 0
+            if !terms.isEmpty {
+                let tokens = Set(text.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted))
+                for term in terms where tokens.contains(where: { $0 == term || $0.hasPrefix(term) }) { lexical += 1 }
+            }
+
+            if semantic != nil || lexical > 0 {
+                scored.append(ScoredChunk(identity: identity, path: columnText(statement, 1), name: columnText(statement, 2), text: text, semantic: semantic, lexical: lexical))
+            }
         }
         guard !scored.isEmpty else { return [] }
 
-        // Ranking semantico: indici dei chunk ordinati per coseno decrescente (tutti presenti).
-        let semanticOrder = scored.indices.sorted { scored[$0].score > scored[$1].score }
-
-        // Ranking lessicale: per ogni chunk conta quante PAROLE CHIAVE distinte della domanda vi
-        // compaiono (match di token esatto o per prefisso, come l'FTS). Solo i chunk con almeno un
-        // riscontro entrano nell'elenco, ordinati per numero di riscontri (poi per coseno a parità).
-        let terms = Self.meaningfulTerms(from: query)
-        var lexicalOrder: [Int] = []
-        if !terms.isEmpty {
-            var hitsByIndex: [Int: Int] = [:]
-            for (index, chunk) in scored.enumerated() {
-                let tokens = Set(chunk.text.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted))
-                var hits = 0
-                for term in terms where tokens.contains(where: { $0 == term || $0.hasPrefix(term) }) { hits += 1 }
-                if hits > 0 { hitsByIndex[index] = hits }
+        // Ranking semantico (solo i chunk con un punteggio) e lessicale (solo quelli con riscontri),
+        // fusi via RRF: pertinenza per parole chiave e vicinanza semantica si rinforzano.
+        let semanticOrder = scored.indices
+            .filter { scored[$0].semantic != nil }
+            .sorted { (scored[$0].semantic ?? 0) > (scored[$1].semantic ?? 0) }
+        let lexicalOrder = scored.indices
+            .filter { scored[$0].lexical > 0 }
+            .sorted { lhs, rhs in
+                scored[lhs].lexical != scored[rhs].lexical
+                    ? scored[lhs].lexical > scored[rhs].lexical
+                    : (scored[lhs].semantic ?? 0) > (scored[rhs].semantic ?? 0)
             }
-            lexicalOrder = hitsByIndex.sorted { lhs, rhs in
-                lhs.value != rhs.value ? lhs.value > rhs.value : scored[lhs.key].score > scored[rhs.key].score
-            }.map { $0.key }
-        }
-
-        // Fusione dei due ranking: la pertinenza per parole chiave e la vicinanza semantica si
-        // rinforzano. Se manca uno dei due elenchi si usa l'altro (mai peggio del solo semantico).
         let fused = Self.fuseRanks([semanticOrder, lexicalOrder].filter { !$0.isEmpty })
 
         // Selezione con DIVERSITÀ: scorre il ranking fuso ma limita a `maxPerFile` chunk per file,
@@ -1239,8 +1258,21 @@ final class MetadataStore: ObservableObject {
             let count = perFile[chunk.identity, default: 0]
             guard count < maxPerFile else { continue }
             perFile[chunk.identity] = count + 1
-            result.append(chunk)
+            result.append((identity: chunk.identity, path: chunk.path, name: chunk.name, text: chunk.text, score: chunk.semantic ?? 0))
             if result.count >= limit { break }
+        }
+        return result
+    }
+
+    /// Insieme dei `provider_id` (spazi/lingue di embedding) presenti nell'indice. Serve alla chat per
+    /// generare un vettore-query per ciascuno spazio e abilitare il retrieval cross-lingua.
+    func indexedProviderIDs() -> [String] {
+        var statement: OpaquePointer?
+        guard (try? prepare("SELECT DISTINCT provider_id FROM chunk_vectors", statement: &statement)) != nil else { return [] }
+        defer { sqlite3_finalize(statement) }
+        var result: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result.append(columnText(statement, 0))
         }
         return result
     }
