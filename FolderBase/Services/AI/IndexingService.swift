@@ -115,15 +115,26 @@ final class IndexingService: ObservableObject {
         guard !fingerprints.isEmpty else { return .notIndexed }
 
         let indexed = store.indexedHashes()
-        // Un file è "aggiornato" solo se il testo è indicizzato (hash combacia) E ha embedding per
-        // il MOTORE ATTUALE: cambiando provider i vettori non sono compatibili → il pallino diventa
-        // arancione finché non si reindicizza.
+        // File senza testo estraibile (es. .xls legacy, .html vuoti, immagini senza testo): sono
+        // stati processati, non c'è altro da fare → vanno contati come "coperti", altrimenti
+        // tengono la cartella arancione per sempre pur essendo a posto.
+        let unsupported = store.unsupportedHashes()
+        // Un file è "aggiornato" se il testo è indicizzato (hash combacia) E ha embedding per il
+        // MOTORE ATTUALE: cambiando provider i vettori non sono compatibili → arancione finché non
+        // si reindicizza.
         let vectorized = store.identitiesWithVectors(providerPrefix: Self.activeProviderPrefix())
         var textIndexed = 0
         var upToDate = 0
-        for fingerprint in fingerprints where indexed[fingerprint.identity] == fingerprint.hash {
-            textIndexed += 1
-            if vectorized.contains(fingerprint.identity) { upToDate += 1 }
+        for fingerprint in fingerprints {
+            let identity = fingerprint.identity
+            if indexed[identity] == fingerprint.hash {
+                textIndexed += 1
+                if vectorized.contains(identity) { upToDate += 1 }
+            } else if unsupported[identity] == fingerprint.hash {
+                // Processato ma senza contenuto indicizzabile: coperto.
+                textIndexed += 1
+                upToDate += 1
+            }
         }
 
         if textIndexed == 0 { return .notIndexed }

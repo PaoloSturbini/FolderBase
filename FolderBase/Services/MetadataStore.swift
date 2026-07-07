@@ -1213,6 +1213,20 @@ final class MetadataStore: ObservableObject {
         return result
     }
 
+    /// Mappa identità→hash dei file processati ma SENZA contenuto indicizzabile (index_state
+    /// = 'unsupported': testo non estraibile). Usata dallo stato per contarli come "coperti".
+    func unsupportedHashes() -> [String: String] {
+        var result: [String: String] = [:]
+        var statement: OpaquePointer?
+        let sql = "SELECT file_identity, content_hash FROM file_content WHERE index_state = 'unsupported' AND content_hash IS NOT NULL"
+        guard (try? prepare(sql, statement: &statement)) != nil else { return [:] }
+        defer { sqlite3_finalize(statement) }
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result[columnText(statement, 0)] = columnText(statement, 1)
+        }
+        return result
+    }
+
     /// Salva il testo estratto da un file e aggiorna l'indice full-text. Registra prima il
     /// file nella tabella `files` (necessario per la foreign key) senza toccare il percorso
     /// caldo di navigazione.
