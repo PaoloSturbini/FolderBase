@@ -41,10 +41,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct FolderBaseApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    /// Icona nella barra dei menu (top bar): consente di tenere FolderBase "ridotto" lì e
+    /// riaprire la finestra direttamente su una delle cartelle disponibili. Disattivabile
+    /// da Configurazione → Visualizzazione.
+    @AppStorage("showMenuBarIcon") private var showMenuBarIcon = true
 
     var body: some Scene {
-        WindowGroup {
+        // L'id "main" permette al menu della barra dei menu di ritrovare/riaprire la finestra.
+        WindowGroup(id: "main") {
             MainWindowView()
+        }
+
+        MenuBarExtra(isInserted: $showMenuBarIcon) {
+            MenuBarMenu()
+        } label: {
+            Image(systemName: "folder.badge.gearshape")
         }
     }
 }

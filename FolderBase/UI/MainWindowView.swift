@@ -95,6 +95,17 @@ struct MainWindowView: View {
         .onChange(of: showHiddenFiles) { _, _ in
             reloadCurrentFolder()
         }
+        // Richieste dal menu della barra dei menu: carica la cartella scelta. Il publisher
+        // emette il valore corrente anche alla sottoscrizione, così funziona pure quando la
+        // finestra era chiusa ed è appena stata ricreata.
+        .onReceive(MenuBarBridge.shared.$requestedFolder) { url in
+            guard let url else { return }
+            MenuBarBridge.shared.requestedFolder = nil
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue else { return }
+            selectFolder(url)
+        }
         .alert(
             L("update.available.title"),
             isPresented: Binding(
