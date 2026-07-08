@@ -115,6 +115,84 @@ enum EmbeddingEngine {
     }
 }
 
+/// Esito del controllo di salute del motore di embedding attivo. Serve a distinguere — quando
+/// l'embedding di alcuni file fallisce — un problema del MOTORE (servizio spento, modello
+/// mancante, chiave non valida, rete assente) da un problema dei singoli FILE.
+enum EngineHealth: Equatable, Sendable {
+    case ok
+    case unreachable(detail: String)
+}
+
+extension EmbeddingEngine {
+    /// Verifica se il motore ATTIVO è raggiungibile e configurato correttamente.
+    /// Chiamata a fine indicizzazione solo se ci sono stati fallimenti (una richiesta leggera).
+    static func healthCheck() async -> EngineHealth {
+        switch AIProviderSettings.provider {
+        case .apple:
+            return appleHealth()
+        case .ollama:
+            return await ollamaHealth(baseURL: AIProviderSettings.ollamaBaseURL, model: AIProviderSettings.ollamaModel)
+        case .openai:
+            // Stessa logica di fallback di `active()`: senza chiave si usa l'embedder Apple.
+            guard let key = KeychainStore.load(account: AIProviderSettings.openAIKeyAccount), !key.isEmpty else {
+                return appleHealth()
+            }
+            return await openAIHealth(apiKey: key)
+        }
+    }
+
+    private static func appleHealth() -> EngineHealth {
+        AppleNLEmbedder.availabilityProblem().map { .unreachable(detail: $0) } ?? .ok
+    }
+
+    /// Ollama: `GET /api/tags` (istantanea, nessun costo). Distingue servizio spento,
+    /// errore HTTP e modello di embedding non installato.
+    private static func ollamaHealth(baseURL: String, model: String) async -> EngineHealth {
+        let base = baseURL.trimmingCharacters(in: .whitespaces).hasSuffix("/")
+            ? String(baseURL.dropLast()) : baseURL
+        guard let url = URL(string: base + "/api/tags") else {
+            return .unreachable(detail: "\(L("engine.health.badURL")) \(baseURL)")
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+
+        guard let (data, response) = try? await URLSession.shared.data(for: request) else {
+            return .unreachable(detail: "\(L("engine.health.ollamaDown")) \(base)")
+        }
+        guard let status = (response as? HTTPURLResponse)?.statusCode, status == 200 else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            return .unreachable(detail: "\(L("engine.health.http")) \(status) (\(base))")
+        }
+        // Il servizio risponde: controlla che il modello di embedding sia installato.
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let models = json["models"] as? [[String: Any]] {
+            let names = models.compactMap { $0["name"] as? String }
+            let found = names.contains { $0 == model || $0.hasPrefix(model + ":") }
+            if !found {
+                return .unreachable(detail: "\(L("engine.health.modelMissing")) \u{201C}\(model)\u{201D} — ollama pull \(model)")
+            }
+        }
+        return .ok
+    }
+
+    /// OpenAI: `GET /v1/models` (gratuita). Distingue rete assente da chiave non valida.
+    private static func openAIHealth(apiKey: String) async -> EngineHealth {
+        guard let url = URL(string: "https://api.openai.com/v1/models") else { return .ok }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 10
+
+        guard let (_, response) = try? await URLSession.shared.data(for: request) else {
+            return .unreachable(detail: L("engine.health.openaiDown"))
+        }
+        switch (response as? HTTPURLResponse)?.statusCode ?? 0 {
+        case 200: return .ok
+        case 401: return .unreachable(detail: L("engine.health.openaiKey"))
+        case let status: return .unreachable(detail: "\(L("engine.health.http")) \(status) (api.openai.com)")
+        }
+    }
+}
+
 /// Risolve il provider di chat attivo (nil se non configurato o senza chiave).
 enum ChatEngine {
     static func active() -> ChatProvider? {

@@ -25,6 +25,24 @@ final class IndexingService: ObservableObject {
 
     @Published private(set) var isIndexing = false
     @Published private(set) var progress: Progress?
+    /// File per cui l'EMBEDDING è fallito nell'ultima esecuzione (motore non raggiungibile o in
+    /// errore): il testo è stato salvato ma i vettori no. Serve alla UI per NON fallire in
+    /// silenzio — prima l'indicizzazione "finiva" senza dire che i vettori mancavano.
+    @Published private(set) var embeddingFailures = 0
+    /// Nomi dei file il cui embedding è fallito nell'ultima esecuzione (limitati, per la UI).
+    @Published private(set) var embeddingFailedFiles: [String] = []
+    /// Diagnosi calcolata a fine indicizzazione (solo se ci sono fallimenti): distingue un motore
+    /// non raggiungibile (problema di servizio/configurazione, NON dei file) da un problema dei
+    /// singoli file (il motore risponde ma quei contenuti non sono stati embeddati).
+    @Published private(set) var embeddingFailureDiagnosis: EmbeddingFailureDiagnosis?
+
+    enum EmbeddingFailureDiagnosis: Equatable {
+        case engineUnreachable(detail: String)
+        case fileSpecific
+    }
+
+    /// Quanti nomi di file falliti conservare per mostrarli nella UI.
+    private let maxReportedFailedFiles = 20
 
     /// File oltre questa dimensione vengono saltati (leggerli interi non ha senso per la ricerca).
     private let maxFileSize = 50 * 1024 * 1024
@@ -166,6 +184,9 @@ final class IndexingService: ObservableObject {
     private func runLoop(files: [FileItem], store: MetadataStore, embedder: TextEmbedder) async {
         let total = files.count
         progress = Progress(processed: 0, total: total)
+        embeddingFailures = 0
+        embeddingFailedFiles = []
+        embeddingFailureDiagnosis = nil
         var processed = 0
         // Prefisso del motore attivo: un file è "a posto" solo se ha i vettori di QUESTO motore
         // (altrimenti va reindicizzato — es. dopo un cambio provider).
@@ -195,6 +216,8 @@ final class IndexingService: ObservableObject {
                 // di perdere il lavoro fatto.
                 if !build.embedderFailed {
                     store.replaceChunks(for: item.identity, chunks: build.vectors)
+                } else {
+                    recordEmbeddingFailure(fileName: item.name)
                 }
             } else {
                 let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
@@ -215,6 +238,8 @@ final class IndexingService: ObservableObject {
                         // e il file verrà riprovato al prossimo reindex.
                         if !build.embedderFailed {
                             store.replaceChunks(for: item.identity, chunks: build.vectors)
+                        } else {
+                            recordEmbeddingFailure(fileName: item.name)
                         }
                     } else {
                         store.markContentUnsupported(for: item, hash: effectiveHash)
@@ -224,6 +249,25 @@ final class IndexingService: ObservableObject {
 
             processed += 1
             progress = Progress(processed: processed, total: total)
+        }
+
+        // Con dei fallimenti, interroga il motore UNA volta per capire di chi è la colpa:
+        // se non risponde il problema è il motore (i file sono a posto), altrimenti sono
+        // i singoli file. La UI usa questa diagnosi per un messaggio non ambiguo.
+        if embeddingFailures > 0 {
+            switch await EmbeddingEngine.healthCheck() {
+            case .ok:
+                embeddingFailureDiagnosis = .fileSpecific
+            case let .unreachable(detail):
+                embeddingFailureDiagnosis = .engineUnreachable(detail: detail)
+            }
+        }
+    }
+
+    private func recordEmbeddingFailure(fileName: String) {
+        embeddingFailures += 1
+        if embeddingFailedFiles.count < maxReportedFailedFiles {
+            embeddingFailedFiles.append(fileName)
         }
     }
 

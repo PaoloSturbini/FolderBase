@@ -54,6 +54,15 @@ extension TextEmbedder {
 final class AppleNLEmbedder: TextEmbedder, @unchecked Sendable {
     static let shared = AppleNLEmbedder()
 
+    /// nil se almeno un modello di sentence embedding è disponibile; altrimenti la descrizione
+    /// del problema (usata dal health-check per spiegare i fallimenti di embedding).
+    static func availabilityProblem() -> String? {
+        for language in [NLLanguage.italian, .english] where NLEmbedding.sentenceEmbedding(for: language) != nil {
+            return nil
+        }
+        return L("engine.health.appleMissing")
+    }
+
     private var cache: [String: NLEmbedding] = [:]
     private let lock = NSLock()
 

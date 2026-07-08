@@ -43,6 +43,9 @@ struct SidebarView: View {
     @Binding var appearanceMode: String
     @Binding var showHiddenFiles: Bool
     @Binding var showFileExtensions: Bool
+    /// Icona nella barra dei menu: letta/scritta direttamente qui (stessa chiave usata da
+    /// `FolderBaseApp` per inserire/rimuovere la `MenuBarExtra`).
+    @AppStorage("showMenuBarIcon") private var showMenuBarIcon = true
     let selectFolder: (URL) -> Void
     let removeFolder: (URL) -> Void
     let chooseFolder: () -> Void
@@ -442,6 +445,40 @@ struct SidebarView: View {
                                 .buttonStyle(.bordered)
                             }
                         }
+
+                        // Avviso NON silenzioso: l'ultima indicizzazione ha salvato i testi ma
+                        // l'embedding è fallito per N file. La diagnosi distingue le due cause:
+                        // motore non raggiungibile (i file sono a posto) vs problema dei file.
+                        if !indexingService.isIndexing, indexingService.embeddingFailures > 0 {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Label(
+                                    "\(L("indexing.embedFailures")) \(indexingService.embeddingFailures) file.",
+                                    systemImage: "exclamationmark.triangle.fill"
+                                )
+                                .foregroundStyle(.orange)
+
+                                switch indexingService.embeddingFailureDiagnosis {
+                                case let .engineUnreachable(detail):
+                                    Text("\(L("indexing.embedFailures.engineDown")) \(detail).")
+                                        .foregroundStyle(.orange)
+                                    Text(L("indexing.embedFailures.hint"))
+                                        .foregroundStyle(.secondary)
+                                case .fileSpecific:
+                                    Text(L("indexing.embedFailures.fileSpecific"))
+                                        .foregroundStyle(.secondary)
+                                    if !indexingService.embeddingFailedFiles.isEmpty {
+                                        Text("\(L("indexing.embedFailures.failedList")) \(failedFilesPreview)")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                case nil:
+                                    Text(L("indexing.embedFailures.hint"))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .font(.callout)
+                            .fixedSize(horizontal: false, vertical: true)
+                        }
                     } else {
                         Text(L("indexing.noFolder"))
                             .foregroundStyle(.secondary)
@@ -733,6 +770,15 @@ struct SidebarView: View {
         guard let progress = indexingService.progress else { return "" }
         if progress.total == 0 { return L("indexing.scanning") }
         return "\(progress.processed)/\(progress.total)"
+    }
+
+    /// Anteprima dei file con embedding fallito: i primi nomi, più "e altri N" se sono di più.
+    private var failedFilesPreview: String {
+        let names = indexingService.embeddingFailedFiles
+        let shown = names.prefix(5).joined(separator: ", ")
+        let hidden = indexingService.embeddingFailures - min(names.count, 5)
+        guard hidden > 0 else { return shown }
+        return "\(shown) \(L("indexing.embedFailures.andMore")) \(hidden)"
     }
 
     private var maintenanceSettings: some View {
@@ -1110,6 +1156,16 @@ struct SidebarView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Toggle(L("display.showExtensions"), isOn: $showFileExtensions)
                         Text(L("display.showExtensionsNote"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle(L("display.menuBarIcon"), isOn: $showMenuBarIcon)
+                        Text(L("display.menuBarIconNote"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)

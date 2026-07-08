@@ -118,6 +118,28 @@ enum LocalizedStrings {
         "indexing.status.stale": ("Da aggiornare", "Needs update"),
         "indexing.recheck": ("Ricalcola stato", "Recheck status"),
         "indexing.checkedAt": ("verificato", "checked"),
+        "indexing.embedFailures": ("Embedding NON riuscito per", "Embedding FAILED for"),
+        "indexing.embedFailures.hint": ("Verifica che il motore sia in esecuzione (es. Ollama) e l'URL in \u{201C}Motore AI\u{201D}, poi rilancia l'indicizzazione. I testi sono salvati: verranno creati solo i vettori mancanti.", "Check that the engine is running (e.g. Ollama) and the URL in \u{201C}AI Engine\u{201D}, then re-run indexing. Texts are saved: only the missing vectors will be created."),
+        "indexing.embedFailures.engineDown": ("Causa: il MOTORE di embedding non è raggiungibile — il problema non riguarda i file", "Cause: the embedding ENGINE is unreachable — the files themselves are fine"),
+        "indexing.embedFailures.fileSpecific": ("Il motore di embedding è raggiungibile: il problema riguarda questi FILE specifici (contenuto non elaborabile dal modello o errore temporaneo). Rilancia l'indicizzazione; se fallisce ancora sugli stessi file, i loro contenuti restano comunque cercabili per parole chiave.", "The embedding engine is reachable: the problem is with these specific FILES (content the model could not process, or a transient error). Re-run indexing; if it keeps failing on the same files, their contents remain searchable by keywords."),
+        "indexing.embedFailures.failedList": ("File interessati:", "Affected files:"),
+        "indexing.embedFailures.andMore": ("e altri", "and"),
+
+        // MARK: Icona nella barra dei menu
+        "display.menuBarIcon": ("Icona nella barra dei menu", "Menu bar icon"),
+        "display.menuBarIconNote": ("Mostra un'icona nella barra dei menu del Mac: puoi chiudere o ridurre la finestra e riaprirla da lì direttamente su una delle cartelle disponibili.", "Shows an icon in the Mac menu bar: you can close or minimize the window and reopen it from there directly on one of the available folders."),
+        "menubar.foldersHeader": ("Apri cartella", "Open folder"),
+        "menubar.openApp": ("Apri FolderBase", "Open FolderBase"),
+        "menubar.quit": ("Esci da FolderBase", "Quit FolderBase"),
+
+        // MARK: Diagnosi motore di embedding (health check)
+        "engine.health.badURL": ("URL del motore non valido:", "Invalid engine URL:"),
+        "engine.health.ollamaDown": ("Ollama non risponde su", "Ollama is not responding at"),
+        "engine.health.modelMissing": ("Ollama è attivo ma il modello di embedding non è installato:", "Ollama is running but the embedding model is not installed:"),
+        "engine.health.openaiDown": ("OpenAI non è raggiungibile (connessione internet assente?)", "OpenAI is unreachable (no internet connection?)"),
+        "engine.health.openaiKey": ("la chiave API OpenAI non è valida o è scaduta", "the OpenAI API key is invalid or expired"),
+        "engine.health.appleMissing": ("i modelli linguistici Apple non sono disponibili su questo Mac", "Apple language models are unavailable on this Mac"),
+        "engine.health.http": ("il motore risponde con errore HTTP", "the engine responds with HTTP error"),
 
         // MARK: Motore AI (provider embedding)
         "ai.engine.card": ("Motore AI (embedding)", "AI engine (embeddings)"),
@@ -166,6 +188,11 @@ enum LocalizedStrings {
         "chat.streamFail": ("Errore nella comunicazione con il motore di chat. Verifica configurazione/rete.", "Error communicating with the chat engine. Check configuration/network."),
         "chat.contextLabel": ("Contesto", "Context"),
         "chat.questionLabel": ("Domanda", "Question"),
+        "chat.clarify.similar": ("Ho trovato più documenti diversi che potrebbero rispondere alla domanda, con pertinenza simile:", "I found several distinct documents that could answer this question, with similar relevance:"),
+        "chat.clarify.versions": ("Ho trovato più versioni dello stesso documento, con indizi di aggiornamento contrastanti:", "I found multiple versions of the same document, with conflicting freshness signals:"),
+        "chat.clarify.question": ("Quale devo usare? Rispondi con il numero, il nome del file, oppure con «tutti» o «il più recente».", "Which one should I use? Reply with the number, the file name, or with “all” / “the most recent”."),
+        "chat.source.updated": ("aggiornato al", "updated on"),
+        "chat.note.newerUsed": ("Nota sulle fonti: «{old}» sembra una versione precedente di «{new}»; privilegia la versione più recente e segnala eventuali differenze.", "Source note: “{old}” appears to be an older version of “{new}”; favor the most recent version and point out any differences."),
         "chat.rerun": ("Rilancia l'ultima domanda", "Re-run last question"),
         "chat.copy": ("Copia conversazione", "Copy conversation"),
         "chat.export": ("Esporta conversazione (Markdown)", "Export conversation (Markdown)"),
