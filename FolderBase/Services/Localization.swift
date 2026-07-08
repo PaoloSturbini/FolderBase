@@ -91,7 +91,7 @@ enum LocalizedStrings {
         "settings.startup.title": ("Avvio", "Startup"),
         "settings.language.title": ("Lingua", "Language"),
         "settings.templates.title": ("Template", "Templates"),
-        "settings.indexing.title": ("Indicizzazione", "Indexing"),
+        "settings.indexing.title": ("Funzioni di A.I.", "A.I. Features"),
         "settings.maintenance.title": ("Manutenzione", "Maintenance"),
         "settings.backup.title": ("Backup", "Backup"),
         "settings.help.title": ("Aiuto", "Help"),
