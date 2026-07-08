@@ -146,6 +146,11 @@ enum LocalizedStrings {
         "engine.health.appleMissing": ("i modelli linguistici Apple non sono disponibili su questo Mac", "Apple language models are unavailable on this Mac"),
         "engine.health.http": ("il motore risponde con errore HTTP", "the engine responds with HTTP error"),
 
+        // MARK: Interruttore generale AI
+        "ai.enabled.card": ("Intelligenza artificiale", "Artificial intelligence"),
+        "ai.enabled": ("Abilita l'intelligenza artificiale", "Enable artificial intelligence"),
+        "ai.enabledNote": ("Attiva indicizzazione dei contenuti, chat e ricerca per contenuto. Quando è disattivata, FolderBase resta un file manager classico: le icone della chat spariscono e la ricerca funziona solo per nome.", "Enables content indexing, chat and content search. When off, FolderBase stays a classic file manager: chat icons disappear and search works by name only."),
+
         // MARK: Motore AI (provider embedding)
         "ai.engine.card": ("Motore AI (embedding)", "AI engine (embeddings)"),
         "ai.engine.intro": ("Scegli come vengono calcolati gli embedding per la ricerca semantica. Il motore su questo Mac è gratuito e privato; i motori locale e cloud offrono qualità superiore.", "Choose how embeddings are computed for semantic search. The on-device engine is free and private; the local and cloud engines offer higher quality."),

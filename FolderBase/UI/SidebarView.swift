@@ -79,6 +79,9 @@ struct SidebarView: View {
     @State private var indexStatus: FolderIndexStatus = .unknown
     @State private var isCheckingIndexStatus = false
     @State private var indexStatusCheckedAt: Date?
+    /// Interruttore generale dell'AI: quando è false l'indicizzazione, la chat e la ricerca per
+    /// contenuto sono disattivate e le relative icone spariscono dall'interfaccia.
+    @AppStorage(AIProviderSettings.Keys.enabled) private var aiEnabled = true
     @AppStorage(AIProviderSettings.Keys.provider) private var aiProviderRaw = AIEmbeddingProvider.apple.rawValue
     @AppStorage(AIProviderSettings.Keys.ollamaBaseURL) private var aiOllamaBaseURL = AIProviderSettings.defaultOllamaBaseURL
     @AppStorage(AIProviderSettings.Keys.ollamaModel) private var aiOllamaModel = AIProviderSettings.defaultOllamaModel
@@ -391,6 +394,22 @@ struct SidebarView: View {
     private var indexingSettings: some View {
         VStack(alignment: .leading, spacing: 18) {
             GroupBox {
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle(L("ai.enabled"), isOn: $aiEnabled)
+                        .font(.headline)
+                    Text(L("ai.enabledNote"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+            } label: {
+                settingsCardLabel(L("ai.enabled.card"), systemImage: "sparkles")
+            }
+
+            if aiEnabled {
+            GroupBox {
                 VStack(alignment: .leading, spacing: 14) {
                     Text(L("indexing.intro"))
                         .font(.callout)
@@ -635,6 +654,7 @@ struct SidebarView: View {
             } label: {
                 settingsCardLabel(L("ai.chat.card"), systemImage: "bubble.left.and.bubble.right")
             }
+            } // if aiEnabled
         }
         .task(id: selectedFolderURL?.path ?? "") {
             loadCachedStatus()

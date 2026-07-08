@@ -38,6 +38,10 @@ enum AIChatProvider: String, CaseIterable, Identifiable {
 /// Chiavi di persistenza (UserDefaults per le impostazioni non segrete, Portachiavi per la chiave).
 enum AIProviderSettings {
     enum Keys {
+        /// Interruttore generale dell'intelligenza artificiale (chat + ricerca per contenuto +
+        /// indicizzazione). Quando è false l'app resta un file manager "classico": niente icone
+        /// chat e ricerca limitata al solo nome. Default: attiva.
+        static let enabled = "aiEnabled"
         static let provider = "aiEmbeddingProvider"
         static let ollamaBaseURL = "aiOllamaBaseURL"
         static let ollamaModel = "aiOllamaModel"

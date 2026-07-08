@@ -49,6 +49,9 @@ struct FileTableView: View {
     @State private var showDeleteConfirmation = false
     @State private var tableSortOrder: [FileItemSortComparator] = []
     @State private var selection: Set<FileItem.ID> = []
+    /// Interruttore generale dell'AI (stessa chiave usata nella Configurazione). Quando è false
+    /// spariscono le icone chat e la ricerca resta limitata al solo nome.
+    @AppStorage(AIProviderSettings.Keys.enabled) private var aiEnabled = true
     @State private var searchText = ""
     @State private var searchScope: SearchScope = .name
     /// Ranking di rilevanza della ricerca "Contenuto" (ibrida FTS+semantica), identità→posizione,
@@ -161,7 +164,17 @@ struct FileTableView: View {
                 chatRequest = nil
             }
         }
-        .onAppear { rebuildMetadataIndex() }
+        .onAppear {
+            // Con AI disattivata la ricerca per contenuto non è disponibile: torna al solo nome.
+            if !aiEnabled { searchScope = .name }
+            rebuildMetadataIndex()
+        }
+        .onChange(of: aiEnabled) { _, enabled in
+            if !enabled {
+                searchScope = .name
+                onSearchChanged()
+            }
+        }
         .onChange(of: items) {
             // Cambiando cartella il riferimento di "Trova simili" non è più valido.
             similarRank = nil
@@ -407,14 +420,18 @@ struct FileTableView: View {
     private var searchField: some View {
         HStack(spacing: 6) {
             Menu {
-                Picker(L("search.scope.help"), selection: $searchScope) {
-                    Text(L("search.scope.name")).tag(SearchScope.name)
-                    Text(L("search.scope.content")).tag(SearchScope.content)
-                }
-                .pickerStyle(.inline)
-                .labelsHidden()
+                // La scelta Nome/Contenuto ha senso solo con l'AI attiva: la ricerca "Contenuto"
+                // è ibrida FTS+semantica. Con AI disattiva resta il solo nome.
+                if aiEnabled {
+                    Picker(L("search.scope.help"), selection: $searchScope) {
+                        Text(L("search.scope.name")).tag(SearchScope.name)
+                        Text(L("search.scope.content")).tag(SearchScope.content)
+                    }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
 
-                Divider()
+                    Divider()
+                }
 
                 Toggle(isOn: $searchAllSubfolders) {
                     Text(L("search.subfolders"))
@@ -472,13 +489,15 @@ struct FileTableView: View {
     @ViewBuilder
     private var toolbarButtons: some View {
         HStack(spacing: 8) {
-            Button {
-                startChat(candidates: [], scopeLabel: L("chat.scope.all"))
-            } label: {
-                Label(L("toolbar.chat"), systemImage: "bubble.left.and.bubble.right")
+            if aiEnabled {
+                Button {
+                    startChat(candidates: [], scopeLabel: L("chat.scope.all"))
+                } label: {
+                    Label(L("toolbar.chat"), systemImage: "bubble.left.and.bubble.right")
+                }
+                .labelStyle(.iconOnly)
+                .hoverDescription(L("toolbar.chatHelp"))
             }
-            .labelStyle(.iconOnly)
-            .hoverDescription(L("toolbar.chatHelp"))
 
             if hasKanbanField {
                 Picker(L("toolbar.view"), selection: $viewMode) {
@@ -940,27 +959,29 @@ struct FileTableView: View {
                 Label(L("ctx.revealFinder"), systemImage: "magnifyingglass")
             }
 
-            Divider()
+            if aiEnabled {
+                Divider()
 
-            if single.isFolder {
-                Button {
-                    startChat(candidates: folderChatCandidates(single),
-                              scopeLabel: "\(L("chat.scope.folder")): \(single.name)")
-                } label: {
-                    Label(L("ctx.chatFolder"), systemImage: "bubble.left.and.bubble.right")
-                }
-            } else {
-                Button {
-                    startChat(candidates: [single.identity],
-                              scopeLabel: "\(L("chat.scope.file")): \(single.name)")
-                } label: {
-                    Label(L("ctx.chatFile"), systemImage: "bubble.left.and.bubble.right")
-                }
+                if single.isFolder {
+                    Button {
+                        startChat(candidates: folderChatCandidates(single),
+                                  scopeLabel: "\(L("chat.scope.folder")): \(single.name)")
+                    } label: {
+                        Label(L("ctx.chatFolder"), systemImage: "bubble.left.and.bubble.right")
+                    }
+                } else {
+                    Button {
+                        startChat(candidates: [single.identity],
+                                  scopeLabel: "\(L("chat.scope.file")): \(single.name)")
+                    } label: {
+                        Label(L("ctx.chatFile"), systemImage: "bubble.left.and.bubble.right")
+                    }
 
-                Button {
-                    findSimilar(to: single)
-                } label: {
-                    Label(L("ctx.findSimilar"), systemImage: "sparkles")
+                    Button {
+                        findSimilar(to: single)
+                    } label: {
+                        Label(L("ctx.findSimilar"), systemImage: "sparkles")
+                    }
                 }
             }
 
