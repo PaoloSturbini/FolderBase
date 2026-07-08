@@ -46,6 +46,8 @@ struct SidebarView: View {
     /// Icona nella barra dei menu: letta/scritta direttamente qui (stessa chiave usata da
     /// `FolderBaseApp` per inserire/rimuovere la `MenuBarExtra`).
     @AppStorage("showMenuBarIcon") private var showMenuBarIcon = true
+    /// Avvio automatico al login del Mac (gestito via SMAppService).
+    @ObservedObject private var launchAtLogin = LaunchAtLoginService.shared
     let selectFolder: (URL) -> Void
     let removeFolder: (URL) -> Void
     let chooseFolder: () -> Void
@@ -288,6 +290,8 @@ struct SidebarView: View {
                         appearanceSettings
                     case .display:
                         displaySettings
+                    case .startup:
+                        startupSettings
                     case .language:
                         languageSettings
                     case .templates:
@@ -1179,6 +1183,28 @@ struct SidebarView: View {
         }
     }
 
+    private var startupSettings: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            GroupBox {
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle(L("display.launchAtLogin"), isOn: Binding(
+                        get: { launchAtLogin.isEnabled },
+                        set: { launchAtLogin.setEnabled($0) }
+                    ))
+                    Text(L("display.launchAtLoginNote"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+                .onAppear { launchAtLogin.refresh() }
+            } label: {
+                settingsCardLabel(L("startup.card"), systemImage: "power")
+            }
+        }
+    }
+
     private var languageSettings: some View {
         VStack(alignment: .leading, spacing: 18) {
             GroupBox {
@@ -1509,6 +1535,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     case folders
     case appearance
     case display
+    case startup
     case language
     case templates
     case indexing
@@ -1527,6 +1554,8 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             return L("settings.appearance.title")
         case .display:
             return L("settings.display.title")
+        case .startup:
+            return L("settings.startup.title")
         case .language:
             return L("settings.language.title")
         case .templates:
@@ -1552,6 +1581,8 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             return "paintbrush"
         case .display:
             return "eye"
+        case .startup:
+            return "power"
         case .language:
             return "globe"
         case .templates:
@@ -1577,6 +1608,8 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             return L("settings.appearance.subtitle")
         case .display:
             return L("settings.display.subtitle")
+        case .startup:
+            return L("settings.startup.subtitle")
         case .language:
             return L("settings.language.subtitle")
         case .templates:
