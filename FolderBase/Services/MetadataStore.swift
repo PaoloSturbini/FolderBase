@@ -1166,18 +1166,23 @@ final class MetadataStore: ObservableObject {
     /// testo del chunk e nome/percorso del file per costruire il prompt e citare le fonti.
     /// Se `candidates` è vuoto, cerca su tutto l'indice.
     ///
-    /// Retrieval IBRIDO: fonde il ranking semantico (coseno) con un ranking lessicale (quante parole
-    /// chiave distinte della domanda compaiono nel chunk) via Reciprocal Rank Fusion. Così i chunk
-    /// che parlano davvero degli argomenti chiesti salgono sopra i semplici "vicini vettoriali",
-    /// rendendo le fonti citate più attinenti alla domanda. Con embedder debole/assente il segnale
-    /// lessicale sostiene comunque la pertinenza; senza parole chiave utili resta il solo semantico.
+    /// Retrieval IBRIDO: fonde il ranking semantico (coseno) con un ranking lessicale via
+    /// Reciprocal Rank Fusion. Il segnale lessicale è pesato per rarità (IDF): i termini rari della
+    /// domanda (nomi propri, sigle, codici) contano molto più delle parole comuni, i match nel NOME
+    /// del file ricevono un bonus e la copertura dei termini (quanti termini distinti della domanda
+    /// il chunk soddisfa) amplifica il punteggio. Così i chunk che parlano davvero degli argomenti
+    /// chiesti salgono sopra i semplici "vicini vettoriali".
     /// `queries` = uno o più vettori della domanda, uno per SPAZIO (provider/lingua) presente
     /// nell'indice. Un chunk riceve un punteggio semantico solo se esiste un vettore-query dello
-    /// stesso spazio (stessa lingua/motore), mentre il punteggio lessicale (copertura parole chiave)
-    /// vale su TUTTI gli spazi. Così una domanda in italiano può recuperare anche documenti in inglese:
-    /// per via semantica se è disponibile un vettore-query inglese (o con un motore multilingue), e
-    /// comunque per parole chiave condivise (nomi, sigle, numeri, termini tecnici uguali nelle due lingue).
-    func semanticChunks(query: String, queries: [EmbeddingResult], candidates: Set<String>, limit: Int) -> [(identity: String, path: String, name: String, text: String, score: Float)] {
+    /// stesso spazio (stessa lingua/motore), mentre il punteggio lessicale vale su TUTTI gli spazi.
+    /// Così una domanda in italiano può recuperare anche documenti in inglese: per via semantica se
+    /// è disponibile un vettore-query inglese (o con un motore multilingue), e comunque per parole
+    /// chiave condivise (nomi, sigle, numeri, termini tecnici uguali nelle due lingue).
+    ///
+    /// Ritorna un POOL ordinato per punteggio fuso (`fused`), con un tetto di chunk per file che
+    /// preserva la varietà di documenti: la selezione finale (diversità, recency, conflitti tra
+    /// versioni) è compito del `SourceSelector`.
+    func semanticChunks(query: String, queries: [EmbeddingResult], candidates: Set<String>, limit: Int) -> [RetrievedChunk] {
         // Vettori della query indicizzati per spazio (provider_id → vettore + norma).
         var queryBySpace: [String: (vector: [Float], norm: Float)] = [:]
         for q in queries where !q.vector.isEmpty {
@@ -1201,13 +1206,23 @@ final class MetadataStore: ObservableObject {
         guard (try? prepare(sql, statement: &statement)) != nil else { return [] }
         defer { sqlite3_finalize(statement) }
 
-        struct ScoredChunk { let identity: String; let path: String; let name: String; let text: String; let semantic: Float?; let lexical: Int }
-        var scored: [ScoredChunk] = []
+        // Prima passata: scansione dei chunk. Per ogni termine si registra il PESO del match
+        // (esatto nel testo 1.0, prefisso 0.7, con bonus se compare anche nel nome del file) e la
+        // document frequency (in quanti chunk compare), che serve poi per l'IDF.
+        struct ScannedChunk {
+            let identity: String; let path: String; let name: String; let text: String
+            let semantic: Float?; let termWeights: [Float]
+        }
+        var scanned: [ScannedChunk] = []
+        var documentFrequency = [Int](repeating: 0, count: terms.count)
+        var totalChunks = 0
         while sqlite3_step(statement) == SQLITE_ROW {
             let identity = columnText(statement, 0)
             if !candidates.isEmpty, !candidates.contains(identity) { continue }
+            let name = columnText(statement, 2)
             let text = columnText(statement, 3)
             let providerID = columnText(statement, 4)
+            totalChunks += 1
 
             // Semantico: solo se abbiamo un vettore-query per QUESTO spazio (stessa lingua/motore).
             var semantic: Float? = nil
@@ -1220,45 +1235,97 @@ final class MetadataStore: ObservableObject {
                 }
             }
 
-            // Lessicale: quante parole chiave distinte della domanda compaiono nel chunk (match di
-            // token esatto o per prefisso). Funziona a prescindere dalla lingua per i token condivisi.
-            var lexical = 0
+            // Lessicale: peso del match per ciascun termine della domanda. Il match nel nome del
+            // file è un segnale forte ("contratto" nella domanda + "Contratto_2026.pdf") e si somma.
+            var termWeights = [Float](repeating: 0, count: terms.count)
             if !terms.isEmpty {
-                let tokens = Set(text.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted))
-                for term in terms where tokens.contains(where: { $0 == term || $0.hasPrefix(term) }) { lexical += 1 }
+                let textTokens = Set(text.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty })
+                let nameTokens = Set(name.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty })
+                for (index, term) in terms.enumerated() {
+                    var weight: Float = 0
+                    if textTokens.contains(term) {
+                        weight = 1.0
+                    } else if textTokens.contains(where: { $0.hasPrefix(term) }) {
+                        weight = 0.7
+                    }
+                    if weight > 0 { documentFrequency[index] += 1 }
+                    if nameTokens.contains(term) {
+                        weight += 0.8
+                    } else if nameTokens.contains(where: { $0.hasPrefix(term) }) {
+                        weight += 0.5
+                    }
+                    termWeights[index] = weight
+                }
             }
 
-            if semantic != nil || lexical > 0 {
-                scored.append(ScoredChunk(identity: identity, path: columnText(statement, 1), name: columnText(statement, 2), text: text, semantic: semantic, lexical: lexical))
+            if semantic != nil || termWeights.contains(where: { $0 > 0 }) {
+                scanned.append(ScannedChunk(identity: identity, path: columnText(statement, 1), name: name, text: text, semantic: semantic, termWeights: termWeights))
             }
         }
-        guard !scored.isEmpty else { return [] }
+        guard !scanned.isEmpty else { return [] }
+
+        // Seconda passata: punteggio lessicale = Σ peso(termine) × IDF(termine), amplificato dalla
+        // copertura (quanti termini distinti della domanda sono soddisfatti). L'IDF fa contare i
+        // termini rari (che discriminano i documenti) più delle parole presenti ovunque.
+        let corpusSize = Float(max(totalChunks, 1))
+        let idf: [Float] = documentFrequency.map { Foundation.log(1 + corpusSize / Float($0 + 1)) }
+        var lexicalScores = [Float](repeating: 0, count: scanned.count)
+        for (index, chunk) in scanned.enumerated() {
+            var score: Float = 0
+            var matched = 0
+            for term in terms.indices where chunk.termWeights[term] > 0 {
+                score += chunk.termWeights[term] * idf[term]
+                matched += 1
+            }
+            if matched > 0, !terms.isEmpty {
+                score *= 1 + Float(matched) / Float(terms.count)
+            }
+            lexicalScores[index] = score
+        }
 
         // Ranking semantico (solo i chunk con un punteggio) e lessicale (solo quelli con riscontri),
-        // fusi via RRF: pertinenza per parole chiave e vicinanza semantica si rinforzano.
-        let semanticOrder = scored.indices
-            .filter { scored[$0].semantic != nil }
-            .sorted { (scored[$0].semantic ?? 0) > (scored[$1].semantic ?? 0) }
-        let lexicalOrder = scored.indices
-            .filter { scored[$0].lexical > 0 }
+        // fusi via RRF: pertinenza per parole chiave e vicinanza semantica si rinforzano. Il
+        // punteggio fuso viene ESPOSTO nel risultato, così il chiamante può ragionare su distacchi
+        // e pareggi tra documenti (ambiguità, conflitti di versione).
+        let semanticOrder = scanned.indices
+            .filter { scanned[$0].semantic != nil }
+            .sorted { (scanned[$0].semantic ?? 0) > (scanned[$1].semantic ?? 0) }
+        let lexicalOrder = scanned.indices
+            .filter { lexicalScores[$0] > 0 }
             .sorted { lhs, rhs in
-                scored[lhs].lexical != scored[rhs].lexical
-                    ? scored[lhs].lexical > scored[rhs].lexical
-                    : (scored[lhs].semantic ?? 0) > (scored[rhs].semantic ?? 0)
+                lexicalScores[lhs] != lexicalScores[rhs]
+                    ? lexicalScores[lhs] > lexicalScores[rhs]
+                    : (scanned[lhs].semantic ?? 0) > (scanned[rhs].semantic ?? 0)
             }
-        let fused = Self.fuseRanks([semanticOrder, lexicalOrder].filter { !$0.isEmpty })
+        var fusedScores: [Int: Float] = [:]
+        for list in [semanticOrder, lexicalOrder] where !list.isEmpty {
+            for (position, index) in list.enumerated() {
+                fusedScores[index, default: 0] += 1.0 / Float(60 + position + 1)
+            }
+        }
+        let orderedIndices = fusedScores
+            .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+            .map(\.key)
 
-        // Selezione con DIVERSITÀ: scorre il ranking fuso ma limita a `maxPerFile` chunk per file,
-        // così le fonti citate coprono più documenti distinti invece di concentrarsi su uno solo.
-        let maxPerFile = 2
+        // Pool con tetto di chunk per file: evita che un solo documento lungo saturi il pool
+        // rendendo invisibili le alternative (necessarie per rilevare ambiguità e versioni).
+        let maxPerFileInPool = 4
         var perFile: [String: Int] = [:]
-        var result: [(identity: String, path: String, name: String, text: String, score: Float)] = []
-        for index in fused {
-            let chunk = scored[index]
+        var result: [RetrievedChunk] = []
+        for index in orderedIndices {
+            let chunk = scanned[index]
             let count = perFile[chunk.identity, default: 0]
-            guard count < maxPerFile else { continue }
+            guard count < maxPerFileInPool else { continue }
             perFile[chunk.identity] = count + 1
-            result.append((identity: chunk.identity, path: chunk.path, name: chunk.name, text: chunk.text, score: chunk.semantic ?? 0))
+            result.append(RetrievedChunk(
+                identity: chunk.identity,
+                path: chunk.path,
+                name: chunk.name,
+                text: chunk.text,
+                semantic: chunk.semantic,
+                lexical: lexicalScores[index],
+                fused: fusedScores[index] ?? 0
+            ))
             if result.count >= limit { break }
         }
         return result
