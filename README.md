@@ -1,12 +1,14 @@
 # FolderBase
 
-**File manager *metadata-first* per macOS.**
+**File manager *metadata-first* per macOS, con funzioni AI opzionali.**
 
 FolderBase mostra cartelle e file reali del tuo Mac in una tabella alla quale puoi aggiungere colonne personalizzate — note, numeri, date, stati Kanban, tag e link — senza mai spostare, copiare o modificare i file originali. I metadata vivono in un database SQLite locale separato e *seguono i file* anche quando li rinomini o li sposti.
 
-L'idea è avvicinare l'esperienza di uno strumento tipo Notion/Airtable ai file veri del filesystem: il Finder mostra solo nome, dimensione e data; FolderBase ti lascia annotare, classificare e organizzare lo stesso contenuto con campi tuoi.
+In più, con un livello di **intelligenza artificiale opzionale**, FolderBase può indicizzare il contenuto dei documenti (con OCR), abilitare una **ricerca ibrida per significato** e una **chat che risponde sui tuoi documenti citando le fonti**. Tutte le funzioni AI si disattivano con un unico interruttore: da spente, FolderBase resta un file manager classico.
 
-> 🇬🇧 A metadata-first file manager for macOS: enrich real files and folders with custom columns (notes, numbers, dates, Kanban, tags, links) without ever moving or altering them. UI available in Italian and English. MIT licensed — free to use, fork and build.
+L'idea è avvicinare l'esperienza di uno strumento tipo Notion/Airtable ai file veri del filesystem: il Finder mostra solo nome, dimensione e data; FolderBase ti lascia annotare, classificare, cercare e interrogare lo stesso contenuto con campi e strumenti tuoi.
+
+> 🇬🇧 A metadata-first file manager for macOS: enrich real files and folders with custom columns (notes, numbers, dates, Kanban, tags, links) without ever moving or altering them. Optional on-device AI adds content indexing (with OCR), hybrid semantic search and a RAG chat over your documents that cites its sources. UI in Italian and English. MIT licensed — free to use, fork and build.
 
 ---
 
@@ -59,24 +61,44 @@ In alternativa puoi aprire `Package.swift` con Xcode e premere ▶︎.
 
 ## Funzionalità principali
 
-- Sidebar con cartelle recenti, albero della struttura e configurazione a sezioni.
+### Organizzazione per metadata
+- Sidebar con cartelle recenti, albero della struttura, **pannello dettagli** (inspector) e Configurazione a sezioni.
 - Tabella nativa con colonne standard (Nome, Tipo, Creato, Dimensioni) + colonne **metadata per-cartella**.
 - Tipi di colonna: **nota libera, numero, data, Kanban, Select** (tag colorati) e **link** (URL, file locali, markdown e wiki link `[[…]]`).
+- **Template** di colonne riutilizzabili, applicabili con un clic a cartelle nuove.
 - Vista **Kanban a board** con drag tra colonne.
 - Ricerca, filtri a chip, ordinamento, selezione multipla e **modifica in blocco**, export **CSV**.
 - I metadata seguono i file su **rename e spostamenti** (identità basata sugli identificatori filesystem di macOS).
-- **Manutenzione** del DB: riallineamento e pulizia degli orfani.
-- Tema chiaro / scuro / automatico, dimensione caratteri regolabile.
+
+### Funzioni AI (opzionali, opt-in)
+- **Indicizzazione dei contenuti** di cartella e sottocartelle, con **OCR** per PDF scansionati e immagini; reindicizzazione incrementale.
+- **Ricerca per contenuto** ibrida (parole esatte + significato).
+- **Chat con i documenti** (RAG) con retrieval ibrido, citazione delle fonti, disambiguazione di versioni e ambito selezionabile (indice / cartella / file).
+- **Motori intercambiabili**: embedding su questo Mac (Apple, gratis e privato), locale (Ollama) o cloud (OpenAI, BYOK con chiave nel Portachiavi); chat via Ollama o OpenAI.
+- Interruttore generale: da spento, la chat sparisce e la ricerca torna al solo nome.
+
+### Sistema
+- **Backup e ripristino** del database, con backup automatici pianificabili.
+- **Avvio al login** del Mac e **icona nella barra dei menu** per riaprire rapidamente le cartelle.
+- **Manutenzione** del DB: riallineamento e pulizia degli orfani (anche automatica).
+- Tema chiaro / scuro / automatico, dimensione caratteri e **colore d'accento** regolabili.
+- Controllo **aggiornamenti** su GitHub all'avvio.
 - **Interfaccia in Italiano e Inglese**, con guida d'uso integrata (Configurazione → Aiuto).
 - Salvataggio locale e non invasivo in `~/Library/Application Support/FolderBase/folderbase.sqlite`: le tue cartelle non vengono mai modificate.
 
 ---
 
+## Privacy
+
+Con il motore di embedding **Apple** (su questo Mac) e la chat **Ollama** (locale), nessun dato lascia il tuo Mac. Se scegli **OpenAI** per embedding o chat, le domande e gli estratti dei file vengono inviati a OpenAI; la chiave API è custodita nel Portachiavi di macOS. Con l'interruttore AI spento, nessuna funzione di intelligenza artificiale è attiva.
+
+---
+
 ## Stack
 
-Swift · SwiftUI · Swift Package Manager · SQLite (metadata e indice locale) · FileManager / AppKit.
+Swift · SwiftUI · Swift Package Manager · SQLite (metadata, indice e embedding locali; FTS5 per il full-text) · FileManager / AppKit · Vision (OCR) · FSEvents · SMAppService.
 
-Struttura del codice e dettagli architetturali nel **[MANUALE.md](MANUALE.md)**.
+Struttura del codice e dettagli architetturali nel **[MANUALE.md](MANUALE.md)**. Guida rapida in **[COME_TROVARE_E_USARE.md](COME_TROVARE_E_USARE.md)**.
 
 ---
 
