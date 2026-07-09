@@ -899,6 +899,15 @@ struct FileTableView: View {
                 // così il menù di sistema sull'header non mostra più "Nascondi/Mostra".
                 .disabledCustomizationBehavior(.visibility)
             }
+
+            // Colonna vuota finale: fa da spaziatore e, soprattutto, offre una maniglia a destra
+            // per ridimensionare l'ultima colonna dati (SwiftUI non dà un handle sul bordo estremo).
+            TableColumn("") { _ in
+                Color.clear
+            }
+            .width(min: 16, ideal: 60)
+            .customizationID("__trailing_spacer__")
+            .disabledCustomizationBehavior(.all)
         }
         .font(.system(size: contentFontSize))
         .contextMenu(forSelectionType: FileItem.ID.self) { ids in
@@ -1430,8 +1439,10 @@ struct FileTableView: View {
         case .number:
             return 100
         case .date:
-            return 140
-        case .kanban, .select:
+            return 90
+        case .kanban:
+            return 50
+        case .select:
             return 150
         case .link:
             return 260
@@ -1448,7 +1459,9 @@ struct FileTableView: View {
             return 50
         case .date:
             return 60
-        case .kanban, .select:
+        case .kanban:
+            return 40
+        case .select:
             return 60
         case .link:
             return 70
@@ -1881,6 +1894,8 @@ extension FileDragSourceView: NSDraggingSource {
 private struct DateMetadataCell: View {
     @Binding var text: String
     @State private var isEditing = false
+    @State private var isHovering = false
+    @FocusState private var focused: Bool
 
     private var date: Date? {
         MetadataValueFormatter.date(from: text)
@@ -1903,30 +1918,54 @@ private struct DateMetadataCell: View {
 
     var body: some View {
         Group {
-            if text.isEmpty {
-                // Cella vuota appena creata: non mostra nulla. Un clic imposta la data odierna.
+            if isEditing {
+                // In editing: campo con giorno/mese/anno che scorrono con le frecce. Cliccando
+                // fuori (perdita di focus) l'editing termina e resta la sola data.
+                DatePicker("", selection: dateBinding, displayedComponents: .date)
+                    .datePickerStyle(.stepperField)
+                    .labelsHidden()
+                    .focused($focused)
+                    .onChange(of: focused) { _, isFocused in
+                        if !isFocused { isEditing = false }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else if text.isEmpty {
+                // Cella vuota: un clic imposta la data odierna ed entra in editing.
                 Color.clear
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .contentShape(Rectangle())
-                    .onTapGesture {
-                        text = MetadataValueFormatter.string(from: Date())
-                    }
+                    .onTapGesture { beginEditing() }
             } else {
-                // Mostra solo la data (niente frecce né pulsante di rimozione). Rossa se futura.
-                // Un clic apre un calendario in popover per modificarla.
-                Text(MetadataValueFormatter.displayDate(from: text))
-                    .foregroundStyle(isExpired ? Color.red : Color.primary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .onTapGesture { isEditing = true }
-                    .popover(isPresented: $isEditing) {
-                        DatePicker("", selection: dateBinding, displayedComponents: .date)
-                            .datePickerStyle(.graphical)
-                            .labelsHidden()
-                            .padding()
+                // A riposo mostra solo la data. Un clic entra in editing. La X per cancellare
+                // compare al passaggio del mouse (così a riposo la cella resta pulita).
+                HStack(spacing: 4) {
+                    Text(MetadataValueFormatter.displayDate(from: text))
+                        .foregroundStyle(isExpired ? Color.red : Color.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture { beginEditing() }
+
+                    if isHovering {
+                        Button {
+                            text = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.secondary)
+                        .help(L("common.empty"))
                     }
+                }
+                .onHover { isHovering = $0 }
             }
         }
+    }
+
+    private func beginEditing() {
+        if text.isEmpty { text = MetadataValueFormatter.string(from: Date()) }
+        isEditing = true
+        // Il focus va assegnato dopo che il DatePicker è montato nella gerarchia.
+        DispatchQueue.main.async { focused = true }
     }
 }
 

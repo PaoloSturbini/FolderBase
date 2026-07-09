@@ -406,8 +406,10 @@ struct SidebarView: View {
     @ViewBuilder
     private func fieldCell(_ field: MetadataField, item: FileItem) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(field.name)
-                .font(.caption2)
+            // Stesso stile dell'intestazione "STRUTTURA" sopra l'albero.
+            Text(field.name.uppercased())
+                .font(.caption)
+                .fontWeight(.semibold)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             fieldEditor(field, item: item)
@@ -2013,15 +2015,17 @@ private struct SidebarLineEditor: View {
     }
 }
 
-/// Editor compatto per un campo data, con lo stesso stile della tabella: la data (rossa se
-/// scaduta) apre un calendario in popover; una X azzera il valore.
+/// Editor per un campo data, con lo stesso comportamento delle note: a riposo mostra solo la
+/// data (o un box bianco se vuota); al clic entra in editing con lo stepper field (giorno/mese/
+/// anno che scorrono con le frecce). Cliccando altrove l'editing termina.
 private struct SidebarDateEditor: View {
     @Binding var value: String
     @State private var isEditing = false
+    @State private var isHovering = false
+    @FocusState private var focused: Bool
 
     private var date: Date? { MetadataValueFormatter.date(from: value) }
 
-    /// Scaduta se il giorno è precedente a oggi (come nella tabella).
     private var isExpired: Bool {
         guard let date else { return false }
         let calendar = Calendar.current
@@ -2036,36 +2040,52 @@ private struct SidebarDateEditor: View {
     }
 
     var body: some View {
-        HStack(spacing: 4) {
-            Button {
-                isEditing = true
-            } label: {
-                Text(value.isEmpty ? " " : MetadataValueFormatter.displayDate(from: value))
-                    .foregroundStyle(isExpired ? Color.red : Color.primary)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, minHeight: 14, alignment: .leading)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 4)
-                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
-            }
-            .buttonStyle(.plain)
-            .popover(isPresented: $isEditing) {
+        Group {
+            if isEditing {
                 DatePicker("", selection: dateBinding, displayedComponents: .date)
-                    .datePickerStyle(.graphical)
+                    .datePickerStyle(.stepperField)
                     .labelsHidden()
-                    .padding()
-            }
+                    .focused($focused)
+                    .onChange(of: focused) { _, isFocused in
+                        if !isFocused { isEditing = false }
+                    }
+            } else if value.isEmpty {
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(Color(nsColor: .textBackgroundColor))
+                    .frame(height: 22)
+                    .frame(maxWidth: .infinity)
+                    .contentShape(Rectangle())
+                    .onTapGesture { beginEditing() }
+            } else {
+                HStack(spacing: 4) {
+                    Text(MetadataValueFormatter.displayDate(from: value))
+                        .foregroundStyle(isExpired ? Color.red : Color.primary)
+                        .frame(maxWidth: .infinity, minHeight: 22, alignment: .leading)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 4)
+                        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
+                        .contentShape(Rectangle())
+                        .onTapGesture { beginEditing() }
 
-            if !value.isEmpty {
-                Button {
-                    value = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
+                    if isHovering {
+                        Button {
+                            value = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.secondary)
+                    }
                 }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.secondary)
+                .onHover { isHovering = $0 }
             }
         }
+    }
+
+    private func beginEditing() {
+        if value.isEmpty { value = MetadataValueFormatter.string(from: Date()) }
+        isEditing = true
+        DispatchQueue.main.async { focused = true }
     }
 }
 
