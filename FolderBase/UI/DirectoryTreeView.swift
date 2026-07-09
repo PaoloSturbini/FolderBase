@@ -39,6 +39,9 @@ private struct DirectoryNodeView: View {
     @State private var children: [URL] = []
     @State private var didLoad = false
     @State private var isDropTargeted = false
+    @AppStorage(AppAccentColor.storageKey) private var appAccentRaw = AppAccentColor.blue.rawValue
+    @AppStorage(AppAccentColor.customHexKey) private var appAccentCustomHex = ""
+    private var accent: Color { AppAccentColor.color(forRaw: appAccentRaw, customHex: appAccentCustomHex) }
 
     private var isSelected: Bool {
         selectedFolderURL?.standardizedFileURL.path == url.standardizedFileURL.path
@@ -92,9 +95,9 @@ private struct DirectoryNodeView: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: isSelected ? "folder.fill" : "folder")
-                        .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                        .foregroundStyle(isSelected ? accent : .secondary)
                     Text(url.lastPathComponent)
-                        .foregroundStyle(isSelected ? Color.accentColor : .primary)
+                        .foregroundStyle(isSelected ? accent : .primary)
                         .lineLimit(1)
                     Spacer(minLength: 0)
                 }
@@ -108,7 +111,7 @@ private struct DirectoryNodeView: View {
         .padding(.leading, 6 + CGFloat(depth) * 14)
         .background(
             RoundedRectangle(cornerRadius: 5)
-                .fill(isSelected ? Color.accentColor.opacity(0.15) : (isDropTargeted ? Color.accentColor.opacity(0.10) : Color.clear))
+                .fill(isSelected ? accent.opacity(0.15) : (isDropTargeted ? accent.opacity(0.10) : Color.clear))
         )
         .contentShape(Rectangle())
         .dropDestination(for: URL.self) { urls, _ in

@@ -33,6 +33,106 @@ enum AppearanceMode: String, CaseIterable, Identifiable {
     }
 }
 
+/// Colore d'accento dell'app, scelto dall'utente. È il colore usato per le barre di selezione
+/// (albero, nota selezionata) e per i controlli standard (via `.tint`). Persistito in AppStorage.
+enum AppAccentColor: String, CaseIterable, Identifiable {
+    case blue
+    case purple
+    case pink
+    case red
+    case orange
+    case yellow
+    case green
+    case graphite
+
+    var id: String { rawValue }
+
+    static let storageKey = "appAccentColor"
+    /// Valore speciale di `storageKey` che indica un colore personalizzato (letto da `customHexKey`).
+    static let customRaw = "custom"
+    static let customHexKey = "appAccentCustomHex"
+
+    var color: Color {
+        switch self {
+        case .blue:
+            return .blue
+        case .purple:
+            return .purple
+        case .pink:
+            return .pink
+        case .red:
+            return .red
+        case .orange:
+            return .orange
+        case .yellow:
+            return .yellow
+        case .green:
+            return .green
+        case .graphite:
+            return Color(nsColor: .systemGray)
+        }
+    }
+
+    /// Titolo localizzato (riusa le chiavi dei colori dei tag).
+    var title: String {
+        switch self {
+        case .blue:
+            return L("tagColor.blue")
+        case .purple:
+            return L("tagColor.purple")
+        case .pink:
+            return L("tagColor.pink")
+        case .red:
+            return L("tagColor.red")
+        case .orange:
+            return L("tagColor.orange")
+        case .yellow:
+            return L("tagColor.yellow")
+        case .green:
+            return L("tagColor.green")
+        case .graphite:
+            return L("tagColor.gray")
+        }
+    }
+
+    /// Risolve il colore dato il raw salvato e l'eventuale hex personalizzato.
+    static func color(forRaw raw: String, customHex: String) -> Color {
+        if raw == customRaw, let custom = Color(hexString: customHex) {
+            return custom
+        }
+        return (AppAccentColor(rawValue: raw) ?? .blue).color
+    }
+
+    /// Legge il colore corrente da UserDefaults (per contesti senza @AppStorage).
+    static var current: Color {
+        let raw = UserDefaults.standard.string(forKey: storageKey) ?? AppAccentColor.blue.rawValue
+        let hex = UserDefaults.standard.string(forKey: customHexKey) ?? ""
+        return color(forRaw: raw, customHex: hex)
+    }
+}
+
+extension Color {
+    /// Inizializza da una stringa esadecimale "#RRGGBB" (o "RRGGBB").
+    init?(hexString: String) {
+        var s = hexString.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6, let value = UInt64(s, radix: 16) else { return nil }
+        let r = Double((value >> 16) & 0xFF) / 255
+        let g = Double((value >> 8) & 0xFF) / 255
+        let b = Double(value & 0xFF) / 255
+        self = Color(red: r, green: g, blue: b)
+    }
+
+    /// Rappresentazione esadecimale "#RRGGBB" in spazio colore sRGB.
+    var hexString: String {
+        let ns = (NSColor(self).usingColorSpace(.sRGB)) ?? NSColor.systemBlue
+        let r = Int(round(ns.redComponent * 255))
+        let g = Int(round(ns.greenComponent * 255))
+        let b = Int(round(ns.blueComponent * 255))
+        return String(format: "#%02X%02X%02X", r, g, b)
+    }
+}
+
 struct SidebarView: View {
     let selectedFolderURL: URL?
     let recentFolderURLs: [URL]
@@ -57,6 +157,8 @@ struct SidebarView: View {
     @ObservedObject var metadataStore: MetadataStore
     @ObservedObject var backupService: BackupService
     @ObservedObject var indexingService: IndexingService
+    /// Item selezionato nella tabella: ne mostriamo la nota nel pannello in fondo alla sidebar.
+    let selectedNoteItem: FileItem?
     @ObservedObject private var loc = LocalizationManager.shared
 
     @State private var isShowingSettings = false
@@ -96,6 +198,17 @@ struct SidebarView: View {
     @AppStorage(AIProviderSettings.Keys.chatContextChunks) private var aiChatContextChunks = AIProviderSettings.defaultChatContextChunks
     @State private var chatTesting = false
     @State private var chatTestMessage: String?
+    /// Altezza del pannello note in fondo alla sidebar, regolabile dall'utente e persistita.
+    @AppStorage(AppAccentColor.storageKey) private var appAccentRaw = AppAccentColor.blue.rawValue
+    @AppStorage(AppAccentColor.customHexKey) private var appAccentCustomHex = ""
+    /// Copia locale del colore personalizzato: il ColorPicker vi scrive in modo continuo (senza
+    /// il round-trip su hex che causava lo "scatto" del selettore).
+    @State private var customAccentDraft = Color.blue
+    /// Colore d'accento corrente (barre di selezione, evidenziazioni).
+    private var accent: Color { AppAccentColor.color(forRaw: appAccentRaw, customHex: appAccentCustomHex) }
+    @AppStorage("notesPanelHeight") private var notesPanelHeight = 160.0
+    /// Altezza di partenza catturata all'inizio del trascinamento dell'handle di resize.
+    @State private var notesDragBaseline: Double?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -157,6 +270,12 @@ struct SidebarView: View {
                 .padding(.top, 12)
             }
 
+            // Il pannello dettagli appare solo se nella cartella è stato configurato almeno un
+            // campo. Senza campi non viene mostrato.
+            if selectedFolderURL != nil, !allFields.isEmpty {
+                notesPanel
+            }
+
             Divider()
 
             Button {
@@ -182,6 +301,199 @@ struct SidebarView: View {
             .foregroundStyle(.secondary)
             .padding(.horizontal, 4)
             .padding(.top, 2)
+    }
+
+    // MARK: - Pannello Note (in fondo alla sidebar, sotto l'albero)
+
+    /// Mostra ed EDITA tutti i campi metadata configurati per l'item selezionato nella tabella:
+    /// prima gli altri campi (numero, data, select/kanban, link), poi le note libere. Le modifiche
+    /// scrivono nel metadataStore, quindi aggiornano anche la cella corrispondente nella tabella.
+    private var notesPanel: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            resizeHandle
+
+            if let selectedNoteItem {
+                HStack(spacing: 6) {
+                    Image(nsImage: FileIconProvider.icon(for: selectedNoteItem))
+                        .resizable()
+                        .frame(width: sidebarFontSize + 3, height: sidebarFontSize + 3)
+                    Text(displayName(for: selectedNoteItem))
+                        .foregroundStyle(accent)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 0)
+                }
+                .font(.system(size: sidebarFontSize))
+                .padding(.vertical, 3)
+                .padding(.horizontal, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(accent.opacity(0.15))
+                )
+                .padding(.horizontal, 4)
+            }
+
+            notesBody
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 4)
+        .frame(height: notesPanelHeight)
+    }
+
+    /// Handle in cima al pannello: trascinandolo su/giù se ne regola l'altezza.
+    private var resizeHandle: some View {
+        ZStack {
+            Divider()
+            RoundedRectangle(cornerRadius: 2)
+                .fill(Color.secondary.opacity(0.45))
+                .frame(width: 28, height: 4)
+        }
+        .frame(height: 12)
+        .frame(maxWidth: .infinity)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            if hovering { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+        }
+        .gesture(
+            DragGesture()
+                .onChanged { value in
+                    let baseline = notesDragBaseline ?? notesPanelHeight
+                    if notesDragBaseline == nil { notesDragBaseline = baseline }
+                    // Trascinando verso l'alto (translation negativa) il pannello si ingrandisce.
+                    let proposed = baseline - Double(value.translation.height)
+                    notesPanelHeight = min(max(proposed, 90), 520)
+                }
+                .onEnded { _ in notesDragBaseline = nil }
+        )
+    }
+
+    @ViewBuilder
+    private var notesBody: some View {
+        if let selectedNoteItem {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    // Gli altri campi (numero, data, select/kanban, link) sono affiancati in un
+                    // layout a flusso, ciascuno con la larghezza adatta al proprio dato.
+                    if !otherFields.isEmpty {
+                        FlowLayout(spacing: 12, lineSpacing: 10) {
+                            ForEach(otherFields) { field in
+                                fieldCell(field, item: selectedNoteItem)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    // Le note libere occupano tutta la larghezza, una sotto l'altra.
+                    ForEach(noteFields) { field in
+                        fieldCell(field, item: selectedNoteItem)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 2)
+            }
+            .frame(maxWidth: .infinity)
+        } else {
+            Text(L("notes.noSelection"))
+                .font(.system(size: sidebarFontSize))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(.horizontal, 4)
+        }
+    }
+
+    /// Una cella dell'inspector: etichetta (ingrandita) del campo + editor adatto al tipo,
+    /// con larghezza proporzionata al dato (le note libere si estendono a tutta la larghezza).
+    @ViewBuilder
+    private func fieldCell(_ field: MetadataField, item: FileItem) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(field.name)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            fieldEditor(field, item: item)
+        }
+        .modifier(FieldWidth(width: fieldWidth(for: field.kind)))
+    }
+
+    /// Larghezza consigliata per tipo di campo (nil = tutta la larghezza disponibile).
+    private func fieldWidth(for kind: MetadataFieldKind) -> CGFloat? {
+        switch kind {
+        case .number:
+            return 96
+        case .date:
+            return 150
+        case .select, .kanban:
+            return 150
+        case .link:
+            return 240
+        case .text:
+            return nil
+        }
+    }
+
+    /// Editor specifico per il tipo di campo. Le modifiche scrivono nel metadataStore.
+    @ViewBuilder
+    private func fieldEditor(_ field: MetadataField, item: FileItem) -> some View {
+        let identityKey = "\(item.identity)#\(field.id)"
+        switch field.kind {
+        case .text:
+            NoteFieldEditor(
+                fontSize: sidebarFontSize,
+                identityKey: identityKey,
+                initialValue: metadataStore.value(for: item, field: field),
+                onChange: { metadataStore.update(item: item, field: field, value: $0) }
+            )
+        case .number:
+            SidebarLineEditor(
+                fontSize: sidebarFontSize,
+                identityKey: identityKey,
+                initialValue: metadataStore.value(for: item, field: field),
+                onChange: { metadataStore.update(item: item, field: field, value: $0) }
+            )
+        case .link:
+            SidebarLineEditor(
+                fontSize: sidebarFontSize,
+                identityKey: identityKey,
+                initialValue: metadataStore.value(for: item, field: field),
+                placeholder: L("link.placeholder"),
+                showsOpenButton: true,
+                onChange: { metadataStore.update(item: item, field: field, value: $0) }
+            )
+        case .date:
+            SidebarDateEditor(value: fieldBinding(for: field, item: item))
+        case .select, .kanban:
+            SidebarSelectEditor(field: field, value: fieldBinding(for: field, item: item))
+        }
+    }
+
+    /// Binding diretto sul valore del campo (usato per editor a modifica discreta: data, select).
+    private func fieldBinding(for field: MetadataField, item: FileItem) -> Binding<String> {
+        Binding(
+            get: { metadataStore.value(for: item, field: field) },
+            set: { metadataStore.update(item: item, field: field, value: $0) }
+        )
+    }
+
+    /// Nome mostrato nell'intestazione: senza l'estensione del file (le cartelle restano intatte).
+    private func displayName(for item: FileItem) -> String {
+        guard !item.isFolder else { return item.name }
+        let withoutExt = (item.name as NSString).deletingPathExtension
+        return withoutExt.isEmpty ? item.name : withoutExt
+    }
+
+    /// Tutti i campi configurati per la cartella corrente.
+    private var allFields: [MetadataField] {
+        metadataStore.fields(for: selectedFolderURL)
+    }
+
+    /// Campi di tipo testo ("Nota libera") della cartella corrente.
+    private var noteFields: [MetadataField] {
+        allFields.filter { $0.kind == .text }
+    }
+
+    /// Campi diversi dalla nota libera (mostrati sopra le note).
+    private var otherFields: [MetadataField] {
+        allFields.filter { $0.kind != .text }
     }
 
     // MARK: - Finestra Configurazione (sidebar + dettaglio, stile Impostazioni di sistema)
@@ -230,7 +542,7 @@ struct SidebarView: View {
                         Image(systemName: section.systemImage)
                             .font(.body)
                             .frame(width: 20)
-                            .foregroundStyle(isSelected ? Color.white : Color.accentColor)
+                            .foregroundStyle(isSelected ? Color.white : accent)
 
                         Text(section.title)
                             .foregroundStyle(isSelected ? Color.white : Color.primary)
@@ -241,7 +553,7 @@ struct SidebarView: View {
                     .padding(.vertical, 6)
                     .background(
                         RoundedRectangle(cornerRadius: 7)
-                            .fill(isSelected ? Color.accentColor : Color.clear)
+                            .fill(isSelected ? accent : Color.clear)
                     )
                     .contentShape(Rectangle())
                 }
@@ -260,7 +572,7 @@ struct SidebarView: View {
             HStack(spacing: 10) {
                 Image(systemName: settingsSection.systemImage)
                     .font(.title2)
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(accent)
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text(settingsSection.title)
@@ -1124,6 +1436,71 @@ struct SidebarView: View {
             }
 
             GroupBox {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 12) {
+                        ForEach(AppAccentColor.allCases) { option in
+                            let isSelected = appAccentRaw == option.rawValue
+                            Circle()
+                                .fill(option.color)
+                                .frame(width: 24, height: 24)
+                                .overlay(
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 11, weight: .bold))
+                                        .foregroundStyle(.white)
+                                        .opacity(isSelected ? 1 : 0)
+                                )
+                                .overlay(
+                                    Circle()
+                                        .stroke(Color.primary.opacity(isSelected ? 0.9 : 0), lineWidth: 2)
+                                        .padding(-3)
+                                )
+                                .contentShape(Circle())
+                                .onTapGesture { appAccentRaw = option.rawValue }
+                                .help(option.title)
+                        }
+                        Spacer(minLength: 0)
+                    }
+
+                    // Colore personalizzato: il ColorPicker scrive nella copia locale (fluida) e
+                    // persiste l'hex; il valore letto è sempre quello locale, quindi niente scatti.
+                    HStack(spacing: 10) {
+                        let isCustom = appAccentRaw == AppAccentColor.customRaw
+                        ColorPicker(selection: Binding(
+                            get: { customAccentDraft },
+                            set: { newColor in
+                                customAccentDraft = newColor
+                                appAccentCustomHex = newColor.hexString
+                                appAccentRaw = AppAccentColor.customRaw
+                            }
+                        ), supportsOpacity: false) {
+                            Text(L("appearance.accentCustom"))
+                        }
+
+                        if isCustom {
+                            Label(L("appearance.accentCustomActive"), systemImage: "checkmark.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(accent)
+                        }
+
+                        Spacer(minLength: 0)
+                    }
+
+                    Text(L("appearance.accentNote"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .onAppear {
+                    // Allinea la copia locale al colore salvato senza innescare la set del picker.
+                    customAccentDraft = Color(hexString: appAccentCustomHex) ?? accent
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+            } label: {
+                settingsCardLabel(L("appearance.accentCard"), systemImage: "paintpalette")
+            }
+
+            GroupBox {
                 VStack(alignment: .leading, spacing: 16) {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
@@ -1285,7 +1662,7 @@ struct SidebarView: View {
                         ForEach(templateStore.templates) { template in
                             HStack(spacing: 10) {
                                 Image(systemName: "rectangle.stack")
-                                    .foregroundStyle(Color.accentColor)
+                                    .foregroundStyle(accent)
                                     .frame(width: 18)
 
                                 VStack(alignment: .leading, spacing: 1) {
@@ -1466,7 +1843,7 @@ struct SidebarView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Label("\(L("update.availablePrefix")) \(latest)", systemImage: "sparkles")
                     .font(.callout)
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(accent)
 
                 Button {
                     NSWorkspace.shared.open(downloadURL ?? releaseURL)
@@ -1548,6 +1925,258 @@ private struct KofiWidgetView: NSViewRepresentable {
         </body>
         </html>
         """
+    }
+}
+
+/// Editor multilinea di una nota nel pannello della sidebar. Tiene una copia locale del testo
+/// (come le celle della tabella) per non ri-renderizzarsi ad ogni notifica dello store durante
+/// la digitazione; si risincronizza quando cambia l'item o il campo (`identityKey`). Il tasto
+/// Invio termina la modifica (rimuove il focus) invece di inserire un a capo.
+private struct NoteFieldEditor: View {
+    let fontSize: Double
+    let identityKey: String
+    let initialValue: String
+    let onChange: (String) -> Void
+
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextEditor(text: $text)
+            .font(.system(size: fontSize))
+            .scrollContentBackground(.hidden)
+            .frame(minHeight: 60)
+            .padding(4)
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+            .focused($focused)
+            .onKeyPress(.return) {
+                // Invio: termina l'editing (niente a capo). Per un a capo usare Opt/Shift+Invio.
+                focused = false
+                return .handled
+            }
+            .onChange(of: text) { _, newValue in
+                onChange(newValue)
+            }
+            // Cambiando file (o campo) ricarica il testo salvato senza propagarlo come modifica.
+            .task(id: identityKey) {
+                text = initialValue
+            }
+    }
+}
+
+/// Editor a riga singola per campi numero/link. Copia locale del testo con risincronizzazione
+/// su `identityKey`; Invio conferma e chiude l'editing. Per i link mostra un pulsante di apertura.
+private struct SidebarLineEditor: View {
+    let fontSize: Double
+    let identityKey: String
+    let initialValue: String
+    var placeholder = ""
+    var showsOpenButton = false
+    let onChange: (String) -> Void
+
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            TextField(placeholder, text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: fontSize))
+                .focused($focused)
+                .onSubmit { focused = false }
+                .onChange(of: text) { _, newValue in onChange(newValue) }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 4)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
+
+            if showsOpenButton {
+                Button {
+                    openLink()
+                } label: {
+                    Image(systemName: "arrow.up.right.square")
+                }
+                .buttonStyle(.borderless)
+                .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .task(id: identityKey) { text = initialValue }
+    }
+
+    private func openLink() {
+        let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return }
+        if let url = URL(string: raw), url.scheme != nil {
+            NSWorkspace.shared.open(url)
+        } else {
+            NSWorkspace.shared.open(URL(fileURLWithPath: (raw as NSString).expandingTildeInPath))
+        }
+    }
+}
+
+/// Editor compatto per un campo data, con lo stesso stile della tabella: la data (rossa se
+/// scaduta) apre un calendario in popover; una X azzera il valore.
+private struct SidebarDateEditor: View {
+    @Binding var value: String
+    @State private var isEditing = false
+
+    private var date: Date? { MetadataValueFormatter.date(from: value) }
+
+    /// Scaduta se il giorno è precedente a oggi (come nella tabella).
+    private var isExpired: Bool {
+        guard let date else { return false }
+        let calendar = Calendar.current
+        return calendar.startOfDay(for: date) < calendar.startOfDay(for: Date())
+    }
+
+    private var dateBinding: Binding<Date> {
+        Binding(
+            get: { date ?? Date() },
+            set: { value = MetadataValueFormatter.string(from: $0) }
+        )
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Button {
+                isEditing = true
+            } label: {
+                Text(value.isEmpty ? " " : MetadataValueFormatter.displayDate(from: value))
+                    .foregroundStyle(isExpired ? Color.red : Color.primary)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, minHeight: 14, alignment: .leading)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $isEditing) {
+                DatePicker("", selection: dateBinding, displayedComponents: .date)
+                    .datePickerStyle(.graphical)
+                    .labelsHidden()
+                    .padding()
+            }
+
+            if !value.isEmpty {
+                Button {
+                    value = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+/// Editor per campi select/kanban con lo STESSO aspetto della tabella: mostra il tag colorato
+/// (capsula) e, al clic, un menù nascosto sovrapposto permette di cambiare opzione.
+private struct SidebarSelectEditor: View {
+    let field: MetadataField
+    @Binding var value: String
+
+    private var selected: MetadataSelectOption {
+        field.options.first { $0.label == value } ?? MetadataSelectOption(label: value, color: .gray)
+    }
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            Picker("", selection: $value) {
+                Text(L("common.empty")).tag("")
+                ForEach(field.options) { option in
+                    Text(option.label).tag(option.label)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .opacity(0.02)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if value.isEmpty {
+                // Campo vuoto: box bianco (come i campi testo/data), senza scritta e senza contorno.
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(Color(nsColor: .textBackgroundColor))
+                    .frame(height: 22)
+                    .allowsHitTesting(false)
+            } else {
+                MetadataTagView(label: selected.label, color: selected.color)
+                    .allowsHitTesting(false)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+}
+
+/// Applica una larghezza fissa alla cella del campo, oppure la lascia estendere a tutta la
+/// larghezza disponibile quando `width` è nil (usato per le note libere).
+private struct FieldWidth: ViewModifier {
+    let width: CGFloat?
+
+    func body(content: Content) -> some View {
+        if let width {
+            content.frame(width: width, alignment: .leading)
+        } else {
+            content.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+/// Layout a flusso: dispone le sottoviste in orizzontale mandandole a capo quando non c'è più
+/// spazio, rispettando la larghezza intrinseca di ciascuna (celle dei campi affiancate).
+private struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+    var lineSpacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        let rows = computeRows(maxWidth: maxWidth, subviews: subviews)
+        let width = rows.map(\.width).max() ?? 0
+        let height = rows.map(\.height).reduce(0, +) + CGFloat(max(0, rows.count - 1)) * lineSpacing
+        return CGSize(width: maxWidth.isFinite ? maxWidth : width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) {
+        let rows = computeRows(maxWidth: bounds.width, subviews: subviews)
+        var y = bounds.minY
+        for row in rows {
+            var x = bounds.minX
+            for index in row.indices {
+                let size = subviews[index].sizeThatFits(.unspecified)
+                subviews[index].place(
+                    at: CGPoint(x: x, y: y),
+                    anchor: .topLeading,
+                    proposal: ProposedViewSize(size)
+                )
+                x += size.width + spacing
+            }
+            y += row.height + lineSpacing
+        }
+    }
+
+    private struct Row {
+        var indices: [Int] = []
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+    }
+
+    private func computeRows(maxWidth: CGFloat, subviews: Subviews) -> [Row] {
+        var rows: [Row] = []
+        var current = Row()
+        for index in subviews.indices {
+            let size = subviews[index].sizeThatFits(.unspecified)
+            let projected = current.indices.isEmpty ? size.width : current.width + spacing + size.width
+            if !current.indices.isEmpty, projected > maxWidth {
+                rows.append(current)
+                current = Row(indices: [index], width: size.width, height: size.height)
+            } else {
+                current.width = current.indices.isEmpty ? size.width : current.width + spacing + size.width
+                current.height = max(current.height, size.height)
+                current.indices.append(index)
+            }
+        }
+        if !current.indices.isEmpty { rows.append(current) }
+        return rows
     }
 }
 

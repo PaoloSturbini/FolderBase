@@ -29,6 +29,9 @@ struct FileTableView: View {
     let showFileExtensions: Bool
     let templates: [MetadataTemplate]
     let applyTemplate: (MetadataTemplate) -> Void
+    /// Riporta al contenitore l'unico item selezionato (o nil se la selezione è vuota o
+    /// multipla): serve al pannello note nella sidebar, che mostra la nota della riga scelta.
+    var onSelectItem: (FileItem?) -> Void = { _ in }
     /// Riferimento NON osservato: la tabella non deve ri-renderizzarsi ad ogni token della chat
     /// in streaming (causava saturazione del main thread e blocco dell'app). Solo `ChatView`
     /// (che lo dichiara @ObservedObject) si aggiorna durante la conversazione.
@@ -196,6 +199,21 @@ struct FileTableView: View {
         // Cambi di DATI → ricostruzione indice.
         .onChange(of: metadataFields) { rebuildMetadataIndex() }
         .onChange(of: metadataStore.metadataByFileIdentity) { rebuildMetadataIndex() }
+        // Selezione → riporta l'item singolo al pannello note (o nil).
+        .onChange(of: selection) { reportSelectedItem() }
+        // Cambiando cartella gli item si rinnovano: riallinea il pannello note.
+        .onChange(of: items) { reportSelectedItem() }
+    }
+
+    /// Riporta al contenitore l'item selezionato se e solo se la selezione è singola.
+    private func reportSelectedItem() {
+        if selection.count == 1,
+           let id = selection.first,
+           let item = visibleItems.first(where: { $0.id == id }) {
+            onSelectItem(item)
+        } else {
+            onSelectItem(nil)
+        }
     }
 
     /// Gestisce i cambi di ricerca. In modalità "Contenuto" (ibrida) il ranking di rilevanza si
@@ -1240,7 +1258,9 @@ struct FileTableView: View {
     private func metadataCell(for item: FileItem, field: MetadataField) -> some View {
         switch field.kind {
         case .text:
-            EditableTextCell(text: valueBinding(for: item, field: field), showsHoverPreview: true)
+            // Niente popover in hover: la nota della riga selezionata è mostrata nel
+            // pannello dedicato in fondo alla sidebar.
+            EditableTextCell(text: valueBinding(for: item, field: field))
         case .number:
             EditableTextCell(text: valueBinding(for: item, field: field), alignment: .trailing, monospacedDigits: true)
         case .date:

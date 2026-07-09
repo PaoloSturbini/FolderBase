@@ -81,6 +81,10 @@ enum LocalizedStrings {
         // MARK: Sidebar
         "sidebar.folders": ("Cartelle", "Folders"),
         "sidebar.structure": ("Struttura", "Structure"),
+        "sidebar.notes": ("Note", "Notes"),
+        "sidebar.details": ("Dettagli", "Details"),
+        "notes.noSelection": ("Seleziona un file per vederne i dettagli.", "Select a file to see its details."),
+        "notes.empty": ("Nessuna nota per questo elemento.", "No notes for this item."),
         "sidebar.removeFolder": ("Togli cartella", "Remove folder"),
         "sidebar.configuration": ("Configurazione", "Settings"),
 
@@ -304,6 +308,10 @@ enum LocalizedStrings {
         "appearance.dark": ("Scuro", "Dark"),
         "appearance.themeCard": ("Tema", "Theme"),
         "appearance.themeNote": ("Segui il sistema oppure forza chiaro/scuro.", "Follow the system or force light/dark."),
+        "appearance.accentCard": ("Accento", "Accent"),
+        "appearance.accentNote": ("Colore usato per le barre di selezione e i controlli dell'app.", "Color used for selection bars and app controls."),
+        "appearance.accentCustom": ("Colore personalizzato", "Custom color"),
+        "appearance.accentCustomActive": ("Attivo", "Active"),
         "appearance.sidebar": ("Sidebar", "Sidebar"),
         "appearance.table": ("Tabella", "Table"),
         "appearance.resetDefault": ("Ripristina default", "Reset to default"),
