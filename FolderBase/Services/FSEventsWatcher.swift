@@ -1,5 +1,6 @@
 import CoreServices
 import Foundation
+import os.log
 
 /// Osserva un insieme di cartelle con FSEvents e notifica (debounced, sul main thread)
 /// qualsiasi modifica al loro contenuto — anche fatta da altre app come il Finder.
@@ -12,19 +13,36 @@ final class FSEventsWatcher {
     private var debounceWork: DispatchWorkItem?
     private let latency: CFTimeInterval = 0.3
     private var watchedPaths: [String] = []
+    private var retryWork: DispatchWorkItem?
+    private var retryAttempts = 0
+    private let maxRetryAttempts = 3
+
+    private static let log = Logger(subsystem: "com.paolosturbini.folderbase", category: "FSEvents")
 
     init(onChange: @escaping () -> Void) {
         self.onChange = onChange
     }
 
     deinit {
+        retryWork?.cancel()
         stop()
     }
 
     /// (Ri)avvia l'osservazione sull'insieme di percorsi indicato. Idempotente: se i percorsi
     /// non cambiano non ricrea lo stream.
+    ///
+    /// I percorsi che non esistono (o non sono directory) vengono scartati: passare a
+    /// `FSEventStreamCreate` percorsi non più esistenti — es. una cartella gestita su un
+    /// volume esterno non ancora rimontato dopo sleep/wake, o cancellata — può far fallire
+    /// la creazione dello stream e, per un bug del framework FSEvents (macOS 26), il suo
+    /// percorso di errore chiude il file descriptor 0 (guarded) → crash EXC_GUARD.
     func watch(paths: [String]) {
-        let normalized = Array(Set(paths)).sorted()
+        let fm = FileManager.default
+        let existing = paths.filter { path in
+            var isDirectory: ObjCBool = false
+            return fm.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
+        }
+        let normalized = Array(Set(existing)).sorted()
         guard normalized != watchedPaths else { return }
         watchedPaths = normalized
 
@@ -41,7 +59,15 @@ final class FSEventsWatcher {
 
         let flags = UInt32(kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagWatchRoot)
 
-        guard let stream = FSEventStreamCreate(
+        // Bug di FSEvents (macOS 26): se la creazione dello stream fallisce internamente, il suo
+        // percorso di errore esegue close(0). Se fd 0 è il nostro tappo /dev/null (non protetto)
+        // non succede nulla; ma quel close LIBERA fd 0, e se una libreria di sistema (es. SQLite)
+        // vi apre poi un descriptor PROTETTO, il fallimento SUCCESSIVO scatena EXC_GUARD e l'app
+        // muore (visto riaprendo la finestra dalla barra dei menu). Difesa in due mosse:
+        // ri-tappare fd 0..2 sia PRIMA della chiamata (nel caso qualcosa li abbia liberati)
+        // sia SUBITO DOPO (un fallimento ha appena chiuso fd 0: va rioccupato all'istante).
+        ensureStandardFileDescriptors()
+        let created = FSEventStreamCreate(
             kCFAllocatorDefault,
             fsEventsCallback,
             &context,
@@ -49,11 +75,36 @@ final class FSEventsWatcher {
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
             latency,
             flags
-        ) else { return }
+        )
+        ensureStandardFileDescriptors()
 
+        guard let stream = created else {
+            // Non fatale: fseventsd può essere momentaneamente indisponibile (es. subito dopo
+            // il risveglio dal sleep). Logga e riprova più tardi invece di restare senza watcher.
+            Self.log.error("FSEventStreamCreate fallita per \(normalized.count) percorsi; nuovo tentativo tra 10s (\(self.retryAttempts + 1)/\(self.maxRetryAttempts))")
+            scheduleRetry(paths: normalized)
+            return
+        }
+
+        retryAttempts = 0
         self.stream = stream
         FSEventStreamSetDispatchQueue(stream, queue)
         FSEventStreamStart(stream)
+    }
+
+    /// Ritenta la creazione dello stream dopo un fallimento (limitato per non insistere
+    /// all'infinito se fseventsd resta indisponibile: la ricerca/reconcile funziona comunque).
+    private func scheduleRetry(paths: [String]) {
+        guard retryAttempts < maxRetryAttempts else { return }
+        retryAttempts += 1
+        retryWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            watchedPaths = []   // forza la ricreazione oltre il controllo di idempotenza
+            watch(paths: paths)
+        }
+        retryWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: work)
     }
 
     func stop() {

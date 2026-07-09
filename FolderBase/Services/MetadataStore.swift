@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import Accelerate
 
 struct FileMetadata: Codable, Equatable {
     var values: [String: String]
@@ -809,6 +810,11 @@ final class MetadataStore: ObservableObject {
         // Con WAL, NORMAL è lo standard consigliato: dimezza il costo dei commit
         // mantenendo la durabilità a livello di checkpoint.
         try execute("PRAGMA synchronous = NORMAL")
+        // Perf letture/ordinamenti (sicuri, solo memoria). NB: `PRAGMA mmap_size` NON viene usato
+        // di proposito: la causa dei crash durante l'indicizzazione era il file descriptor stdin
+        // in TextExtractor.runProcess, non i pragma, ma il memory-map resta un rischio inutile qui.
+        try? execute("PRAGMA temp_store = MEMORY")
+        try? execute("PRAGMA cache_size = -16000")
     }
 
     private func migrateSchema() throws {
@@ -863,6 +869,89 @@ final class MetadataStore: ObservableObject {
         // per cartella farebbero altrimenti una scansione completa della tabella.
         try execute("CREATE INDEX IF NOT EXISTS idx_metadata_values_field ON metadata_values(field_id)")
         try execute("CREATE INDEX IF NOT EXISTS idx_metadata_fields_folder ON metadata_fields(folder_identity)")
+
+        try migrateContentSchema()
+    }
+
+    /// Schema per l'indicizzazione del CONTENUTO dei file (Fase 0: estrazione testo/OCR +
+    /// full-text search). Additivo: nessuna modifica alle tabelle esistenti.
+    /// - `file_content`: una riga per file indicizzato, con testo estratto, stato e hash
+    ///   di change-detection (evita di ri-estrarre file immutati).
+    /// - `content_fts`: indice FTS5 (unicode61, diacritici rimossi) per la ricerca testuale;
+    ///   `file_identity` non è indicizzato, serve solo a ricondurre i match al file.
+    private func migrateContentSchema() throws {
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS file_content (
+                file_identity TEXT PRIMARY KEY,
+                extracted_text TEXT,
+                ocr_used INTEGER NOT NULL DEFAULT 0,
+                content_hash TEXT,
+                extracted_at REAL,
+                index_state TEXT NOT NULL DEFAULT 'pending',
+                FOREIGN KEY(file_identity) REFERENCES files(identity) ON DELETE CASCADE
+            )
+            """
+        )
+
+        try execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS content_fts USING fts5(
+                file_identity UNINDEXED,
+                name,
+                body,
+                tokenize = 'unicode61 remove_diacritics 2'
+            )
+            """
+        )
+
+        // Fase 1 — ricerca semantica: chunk di testo + relativi embedding.
+        // - `content_chunks`: porzioni di testo di un file (per snippet/RAG futuri).
+        // - `chunk_vectors`: embedding per chunk, taggato col provider (lingua/modello) e la
+        //   dimensione; vettore serializzato come BLOB di Float32.
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS content_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_identity TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                FOREIGN KEY(file_identity) REFERENCES files(identity) ON DELETE CASCADE
+            )
+            """
+        )
+        try execute("CREATE INDEX IF NOT EXISTS idx_chunks_file ON content_chunks(file_identity)")
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS chunk_vectors (
+                chunk_id INTEGER PRIMARY KEY,
+                provider_id TEXT NOT NULL,
+                dimension INTEGER NOT NULL,
+                vector BLOB NOT NULL,
+                FOREIGN KEY(chunk_id) REFERENCES content_chunks(id) ON DELETE CASCADE
+            )
+            """
+        )
+        try execute("CREATE INDEX IF NOT EXISTS idx_chunk_vectors_provider ON chunk_vectors(provider_id)")
+        // Perf ricerca semantica (Fase 4): norma L2 precalcolata (evita di ricalcolarla a ogni
+        // query) e indice composito a supporto del prefiltro provider_id+dimension. L'ALTER è
+        // idempotente: fallisce silenziosamente se la colonna esiste già (DB aggiornati).
+        _ = try? execute("ALTER TABLE chunk_vectors ADD COLUMN norm REAL NOT NULL DEFAULT 0")
+        try execute("CREATE INDEX IF NOT EXISTS idx_chunk_vectors_provider_dim ON chunk_vectors(provider_id, dimension)")
+
+        // Esito memorizzato dell'ultimo calcolo di stato di indicizzazione per cartella
+        // (evita di ri-enumerare il sottoalbero a ogni apertura della Configurazione).
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS folder_index_status (
+                folder_path TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                indexed_count INTEGER NOT NULL,
+                total_count INTEGER NOT NULL,
+                checked_at REAL NOT NULL
+            )
+            """
+        )
     }
 
     private func migrateLegacyJSONIfNeeded() throws {
@@ -1005,6 +1094,596 @@ final class MetadataStore: ObservableObject {
             volumeIdentifier: stableDescription(resourceValues.volumeIdentifier),
             path: fileURL.path
         )
+    }
+
+    // MARK: - Indicizzazione contenuti (Fase 0: estrazione + full-text search)
+
+    /// Hash di change-detection dei soli file già **indicizzati** con successo (nil altrimenti).
+    /// Usato dall'`IndexingService` per saltare i file immutati; i file marcati "unsupported"
+    /// ritornano nil di proposito, così vengono riprovati (utile quando l'estrattore impara
+    /// nuovi formati) senza doverli modificare.
+    func contentHash(for identity: String) -> String? {
+        var statement: OpaquePointer?
+        guard (try? prepare("SELECT content_hash FROM file_content WHERE file_identity = ? AND index_state = 'indexed'", statement: &statement)) != nil else { return nil }
+        defer { sqlite3_finalize(statement) }
+        try? bind([.text(identity)], to: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        let value = columnText(statement, 0)
+        return value.isEmpty ? nil : value
+    }
+
+    /// Numero di file con contenuto effettivamente indicizzato (stato "indexed").
+    func indexedContentCount() -> Int {
+        (try? intValue("SELECT COUNT(*) FROM file_content WHERE index_state = 'indexed'")) ?? 0
+    }
+
+    /// Salva l'esito del calcolo di stato di una cartella (memorizzato, ricalcolato su richiesta).
+    func saveFolderIndexStatus(path: String, state: String, indexed: Int, total: Int) {
+        try? execute(
+            """
+            INSERT INTO folder_index_status (folder_path, state, indexed_count, total_count, checked_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(folder_path) DO UPDATE SET
+                state = excluded.state,
+                indexed_count = excluded.indexed_count,
+                total_count = excluded.total_count,
+                checked_at = excluded.checked_at
+            """,
+            bindings: [.text(path), .text(state), .int(indexed), .int(total), .real(Date().timeIntervalSince1970)]
+        )
+    }
+
+    /// Esito memorizzato dell'ultimo calcolo di stato per una cartella (nil se mai calcolato).
+    func folderIndexStatus(path: String) -> (state: String, indexed: Int, total: Int, checkedAt: Date)? {
+        var statement: OpaquePointer?
+        guard (try? prepare("SELECT state, indexed_count, total_count, checked_at FROM folder_index_status WHERE folder_path = ?", statement: &statement)) != nil else { return nil }
+        defer { sqlite3_finalize(statement) }
+        try? bind([.text(path)], to: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        let state = columnText(statement, 0)
+        let indexed = Int(sqlite3_column_int(statement, 1))
+        let total = Int(sqlite3_column_int(statement, 2))
+        let checkedAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 3))
+        return (state, indexed, total, checkedAt)
+    }
+
+    /// Identità dei file che hanno almeno un embedding con provider che inizia per `providerPrefix`
+    /// (es. "apple-nl-", "ollama-<model>", "openai-<model>"). Serve a legare lo stato al motore AI.
+    func identitiesWithVectors(providerPrefix: String) -> Set<String> {
+        var result: Set<String> = []
+        var statement: OpaquePointer?
+        let sql = "SELECT DISTINCT c.file_identity FROM chunk_vectors v JOIN content_chunks c ON c.id = v.chunk_id WHERE v.provider_id LIKE ?"
+        guard (try? prepare(sql, statement: &statement)) != nil else { return [] }
+        defer { sqlite3_finalize(statement) }
+        try? bind([.text(providerPrefix + "%")], to: statement)
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result.insert(columnText(statement, 0))
+        }
+        return result
+    }
+
+    /// Recupero dei chunk più pertinenti per la CHAT (RAG): oltre a identità e punteggio ritorna il
+    /// testo del chunk e nome/percorso del file per costruire il prompt e citare le fonti.
+    /// Se `candidates` è vuoto, cerca su tutto l'indice.
+    ///
+    /// Retrieval IBRIDO: fonde il ranking semantico (coseno) con un ranking lessicale via
+    /// Reciprocal Rank Fusion. Il segnale lessicale è pesato per rarità (IDF): i termini rari della
+    /// domanda (nomi propri, sigle, codici) contano molto più delle parole comuni, i match nel NOME
+    /// del file ricevono un bonus e la copertura dei termini (quanti termini distinti della domanda
+    /// il chunk soddisfa) amplifica il punteggio. Così i chunk che parlano davvero degli argomenti
+    /// chiesti salgono sopra i semplici "vicini vettoriali".
+    /// `queries` = uno o più vettori della domanda, uno per SPAZIO (provider/lingua) presente
+    /// nell'indice. Un chunk riceve un punteggio semantico solo se esiste un vettore-query dello
+    /// stesso spazio (stessa lingua/motore), mentre il punteggio lessicale vale su TUTTI gli spazi.
+    /// Così una domanda in italiano può recuperare anche documenti in inglese: per via semantica se
+    /// è disponibile un vettore-query inglese (o con un motore multilingue), e comunque per parole
+    /// chiave condivise (nomi, sigle, numeri, termini tecnici uguali nelle due lingue).
+    ///
+    /// Ritorna un POOL ordinato per punteggio fuso (`fused`), con un tetto di chunk per file che
+    /// preserva la varietà di documenti: la selezione finale (diversità, recency, conflitti tra
+    /// versioni) è compito del `SourceSelector`.
+    func semanticChunks(query: String, queries: [EmbeddingResult], candidates: Set<String>, limit: Int) -> [RetrievedChunk] {
+        // Vettori della query indicizzati per spazio (provider_id → vettore + norma).
+        var queryBySpace: [String: (vector: [Float], norm: Float)] = [:]
+        for q in queries where !q.vector.isEmpty {
+            let norm = Self.norm(q.vector)
+            if norm > 0 { queryBySpace[q.providerID] = (q.vector, norm) }
+        }
+        let terms = Self.meaningfulTerms(from: query)
+        // Senza né vettori-query né parole chiave non c'è nulla da recuperare.
+        guard !queryBySpace.isEmpty || !terms.isEmpty else { return [] }
+
+        var statement: OpaquePointer?
+        // Nessun prefiltro su provider/dimensione: si caricano i chunk di TUTTI gli spazi, così i
+        // documenti in una lingua diversa dalla domanda restano raggiungibili (semantica se possibile,
+        // altrimenti per parole chiave). Il BLOB del vettore si decodifica solo dove serve il coseno.
+        let sql = """
+            SELECT c.file_identity, f.last_known_path, f.name, c.text, v.provider_id, v.vector, v.norm
+            FROM chunk_vectors v
+            JOIN content_chunks c ON c.id = v.chunk_id
+            JOIN files f ON f.identity = c.file_identity
+            """
+        guard (try? prepare(sql, statement: &statement)) != nil else { return [] }
+        defer { sqlite3_finalize(statement) }
+
+        // Prima passata: scansione dei chunk. Per ogni termine si registra il PESO del match
+        // (esatto nel testo 1.0, prefisso 0.7, con bonus se compare anche nel nome del file) e la
+        // document frequency (in quanti chunk compare), che serve poi per l'IDF.
+        struct ScannedChunk {
+            let identity: String; let path: String; let name: String; let text: String
+            let semantic: Float?; let termWeights: [Float]
+        }
+        var scanned: [ScannedChunk] = []
+        var documentFrequency = [Int](repeating: 0, count: terms.count)
+        var totalChunks = 0
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let identity = columnText(statement, 0)
+            if !candidates.isEmpty, !candidates.contains(identity) { continue }
+            let name = columnText(statement, 2)
+            let text = columnText(statement, 3)
+            let providerID = columnText(statement, 4)
+            totalChunks += 1
+
+            // Semantico: solo se abbiamo un vettore-query per QUESTO spazio (stessa lingua/motore).
+            var semantic: Float? = nil
+            if let queryVec = queryBySpace[providerID], let blob = columnBlob(statement, 5) {
+                let vector = Self.floats(from: blob)
+                if vector.count == queryVec.vector.count {
+                    let storedNorm = Float(sqlite3_column_double(statement, 6))
+                    let vectorNorm = storedNorm > 0 ? storedNorm : Self.norm(vector)
+                    semantic = Self.cosine(queryVec.vector, vector, aNorm: queryVec.norm, bNorm: vectorNorm)
+                }
+            }
+
+            // Lessicale: peso del match per ciascun termine della domanda. Il match nel nome del
+            // file è un segnale forte ("contratto" nella domanda + "Contratto_2026.pdf") e si somma.
+            var termWeights = [Float](repeating: 0, count: terms.count)
+            if !terms.isEmpty {
+                let textTokens = Set(text.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty })
+                let nameTokens = Set(name.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty })
+                for (index, term) in terms.enumerated() {
+                    var weight: Float = 0
+                    if textTokens.contains(term) {
+                        weight = 1.0
+                    } else if textTokens.contains(where: { $0.hasPrefix(term) }) {
+                        weight = 0.7
+                    }
+                    if weight > 0 { documentFrequency[index] += 1 }
+                    if nameTokens.contains(term) {
+                        weight += 0.8
+                    } else if nameTokens.contains(where: { $0.hasPrefix(term) }) {
+                        weight += 0.5
+                    }
+                    termWeights[index] = weight
+                }
+            }
+
+            if semantic != nil || termWeights.contains(where: { $0 > 0 }) {
+                scanned.append(ScannedChunk(identity: identity, path: columnText(statement, 1), name: name, text: text, semantic: semantic, termWeights: termWeights))
+            }
+        }
+        guard !scanned.isEmpty else { return [] }
+
+        // Seconda passata: punteggio lessicale = Σ peso(termine) × IDF(termine), amplificato dalla
+        // copertura (quanti termini distinti della domanda sono soddisfatti). L'IDF fa contare i
+        // termini rari (che discriminano i documenti) più delle parole presenti ovunque.
+        let corpusSize = Float(max(totalChunks, 1))
+        let idf: [Float] = documentFrequency.map { Foundation.log(1 + corpusSize / Float($0 + 1)) }
+        var lexicalScores = [Float](repeating: 0, count: scanned.count)
+        for (index, chunk) in scanned.enumerated() {
+            var score: Float = 0
+            var matched = 0
+            for term in terms.indices where chunk.termWeights[term] > 0 {
+                score += chunk.termWeights[term] * idf[term]
+                matched += 1
+            }
+            if matched > 0, !terms.isEmpty {
+                score *= 1 + Float(matched) / Float(terms.count)
+            }
+            lexicalScores[index] = score
+        }
+
+        // Ranking semantico (solo i chunk con un punteggio) e lessicale (solo quelli con riscontri),
+        // fusi via RRF: pertinenza per parole chiave e vicinanza semantica si rinforzano. Il
+        // punteggio fuso viene ESPOSTO nel risultato, così il chiamante può ragionare su distacchi
+        // e pareggi tra documenti (ambiguità, conflitti di versione).
+        let semanticOrder = scanned.indices
+            .filter { scanned[$0].semantic != nil }
+            .sorted { (scanned[$0].semantic ?? 0) > (scanned[$1].semantic ?? 0) }
+        let lexicalOrder = scanned.indices
+            .filter { lexicalScores[$0] > 0 }
+            .sorted { lhs, rhs in
+                lexicalScores[lhs] != lexicalScores[rhs]
+                    ? lexicalScores[lhs] > lexicalScores[rhs]
+                    : (scanned[lhs].semantic ?? 0) > (scanned[rhs].semantic ?? 0)
+            }
+        var fusedScores: [Int: Float] = [:]
+        for list in [semanticOrder, lexicalOrder] where !list.isEmpty {
+            for (position, index) in list.enumerated() {
+                fusedScores[index, default: 0] += 1.0 / Float(60 + position + 1)
+            }
+        }
+        let orderedIndices = fusedScores
+            .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+            .map(\.key)
+
+        // Pool con tetto di chunk per file: evita che un solo documento lungo saturi il pool
+        // rendendo invisibili le alternative (necessarie per rilevare ambiguità e versioni).
+        let maxPerFileInPool = 4
+        var perFile: [String: Int] = [:]
+        var result: [RetrievedChunk] = []
+        for index in orderedIndices {
+            let chunk = scanned[index]
+            let count = perFile[chunk.identity, default: 0]
+            guard count < maxPerFileInPool else { continue }
+            perFile[chunk.identity] = count + 1
+            result.append(RetrievedChunk(
+                identity: chunk.identity,
+                path: chunk.path,
+                name: chunk.name,
+                text: chunk.text,
+                semantic: chunk.semantic,
+                lexical: lexicalScores[index],
+                fused: fusedScores[index] ?? 0
+            ))
+            if result.count >= limit { break }
+        }
+        return result
+    }
+
+    /// Insieme dei `provider_id` (spazi/lingue di embedding) presenti nell'indice. Serve alla chat per
+    /// generare un vettore-query per ciascuno spazio e abilitare il retrieval cross-lingua.
+    func indexedProviderIDs() -> [String] {
+        var statement: OpaquePointer?
+        guard (try? prepare("SELECT DISTINCT provider_id FROM chunk_vectors", statement: &statement)) != nil else { return [] }
+        defer { sqlite3_finalize(statement) }
+        var result: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result.append(columnText(statement, 0))
+        }
+        return result
+    }
+
+    /// Mappa identità→hash di TUTTI i file indicizzati con successo. Usata per calcolare la
+    /// copertura di indicizzazione di una cartella (stato verde/arancione).
+    func indexedHashes() -> [String: String] {
+        var result: [String: String] = [:]
+        var statement: OpaquePointer?
+        let sql = "SELECT file_identity, content_hash FROM file_content WHERE index_state = 'indexed' AND content_hash IS NOT NULL"
+        guard (try? prepare(sql, statement: &statement)) != nil else { return [:] }
+        defer { sqlite3_finalize(statement) }
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result[columnText(statement, 0)] = columnText(statement, 1)
+        }
+        return result
+    }
+
+    /// Mappa identità→hash dei file processati ma SENZA contenuto indicizzabile (index_state
+    /// = 'unsupported': testo non estraibile). Usata dallo stato per contarli come "coperti".
+    func unsupportedHashes() -> [String: String] {
+        var result: [String: String] = [:]
+        var statement: OpaquePointer?
+        let sql = "SELECT file_identity, content_hash FROM file_content WHERE index_state = 'unsupported' AND content_hash IS NOT NULL"
+        guard (try? prepare(sql, statement: &statement)) != nil else { return [:] }
+        defer { sqlite3_finalize(statement) }
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result[columnText(statement, 0)] = columnText(statement, 1)
+        }
+        return result
+    }
+
+    /// Salva il testo estratto da un file e aggiorna l'indice full-text. Registra prima il
+    /// file nella tabella `files` (necessario per la foreign key) senza toccare il percorso
+    /// caldo di navigazione.
+    func storeExtractedText(for item: FileItem, text: String, ocrUsed: Bool, hash: String) {
+        _ = try? registerFile(at: item.url)
+        try? execute(
+            """
+            INSERT INTO file_content (file_identity, extracted_text, ocr_used, content_hash, extracted_at, index_state)
+            VALUES (?, ?, ?, ?, ?, 'indexed')
+            ON CONFLICT(file_identity) DO UPDATE SET
+                extracted_text = excluded.extracted_text,
+                ocr_used = excluded.ocr_used,
+                content_hash = excluded.content_hash,
+                extracted_at = excluded.extracted_at,
+                index_state = 'indexed'
+            """,
+            bindings: [
+                .text(item.identity),
+                .text(text),
+                .int(ocrUsed ? 1 : 0),
+                .text(hash),
+                .real(Date().timeIntervalSince1970)
+            ]
+        )
+        try? execute("DELETE FROM content_fts WHERE file_identity = ?", bindings: [.text(item.identity)])
+        try? execute(
+            "INSERT INTO content_fts (file_identity, name, body) VALUES (?, ?, ?)",
+            bindings: [.text(item.identity), .text(item.name), .text(text)]
+        )
+    }
+
+    /// Marca un file come non supportato (nessun testo estraibile) salvando comunque l'hash,
+    /// così l'indicizzazione non lo riprova finché il file non cambia.
+    func markContentUnsupported(for item: FileItem, hash: String) {
+        _ = try? registerFile(at: item.url)
+        try? execute(
+            """
+            INSERT INTO file_content (file_identity, extracted_text, ocr_used, content_hash, extracted_at, index_state)
+            VALUES (?, NULL, 0, ?, ?, 'unsupported')
+            ON CONFLICT(file_identity) DO UPDATE SET
+                extracted_text = NULL,
+                content_hash = excluded.content_hash,
+                extracted_at = excluded.extracted_at,
+                index_state = 'unsupported'
+            """,
+            bindings: [.text(item.identity), .text(hash), .real(Date().timeIntervalSince1970)]
+        )
+        try? execute("DELETE FROM content_fts WHERE file_identity = ?", bindings: [.text(item.identity)])
+    }
+
+    /// Ricerca full-text: ritorna le identità dei file il cui nome o contenuto corrisponde
+    /// alla query. Ogni termine diventa un match di prefisso (`termine*`), combinati in AND.
+    func searchFileContent(_ rawQuery: String) -> Set<String> {
+        guard let matchQuery = Self.ftsMatchQuery(from: rawQuery) else { return [] }
+        var statement: OpaquePointer?
+        guard (try? prepare("SELECT file_identity FROM content_fts WHERE content_fts MATCH ?", statement: &statement)) != nil else { return [] }
+        defer { sqlite3_finalize(statement) }
+        try? bind([.text(matchQuery)], to: statement)
+
+        var result: Set<String> = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result.insert(columnText(statement, 0))
+        }
+        return result
+    }
+
+    /// Come `searchFileContent`, ma ritorna le identità ORDINATE per rilevanza testuale (bm25:
+    /// più rilevante prima). Serve alla ricerca ibrida per costruire il ranking FTS da fondere
+    /// con quello semantico via Reciprocal Rank Fusion.
+    func searchFileContentRanked(_ rawQuery: String) -> [String] {
+        guard let matchQuery = Self.ftsMatchQuery(from: rawQuery) else { return [] }
+        var statement: OpaquePointer?
+        // bm25() ritorna valori più bassi (più negativi) per i match più rilevanti → ASC = migliori prima.
+        let sql = "SELECT file_identity FROM content_fts WHERE content_fts MATCH ? ORDER BY bm25(content_fts) ASC"
+        guard (try? prepare(sql, statement: &statement)) != nil else { return [] }
+        defer { sqlite3_finalize(statement) }
+        try? bind([.text(matchQuery)], to: statement)
+
+        var result: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result.append(columnText(statement, 0))
+        }
+        return result
+    }
+
+    /// Costruisce una query MATCH FTS5 sicura: estrae solo token alfanumerici (così eventuali
+    /// caratteri speciali non rompono la sintassi) e li trasforma in prefissi in AND.
+    static func ftsMatchQuery(from raw: String) -> String? {
+        let terms = raw.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+        guard !terms.isEmpty else { return nil }
+        return terms.map { "\($0)*" }.joined(separator: " ")
+    }
+
+    // MARK: - Comprensione della domanda (query understanding)
+
+    /// Parole "vuote" (articoli, preposizioni, congiunzioni, ausiliari e parole interrogative) in
+    /// italiano e inglese: vengono scartate dai termini significativi così la domanda in linguaggio
+    /// naturale non pesa il retrieval su parole senza contenuto ("quali sono i…", "what is the…").
+    private static let queryStopwords: Set<String> = [
+        // Italiano — articoli, preposizioni (semplici e articolate), congiunzioni
+        "il", "lo", "la", "gli", "le", "un", "uno", "una", "di", "del", "dello", "della", "dei",
+        "degli", "delle", "al", "allo", "alla", "ai", "agli", "alle", "da", "dal", "dallo", "dalla",
+        "dai", "dagli", "dalle", "in", "nel", "nello", "nella", "nei", "negli", "nelle", "con", "col",
+        "coi", "su", "sul", "sullo", "sulla", "sui", "sugli", "sulle", "per", "tra", "fra", "ed", "od",
+        "ma", "se", "che", "chi", "cui", "non", "come", "dove", "quando", "quanto", "quanti", "quante",
+        "quanta", "quale", "quali", "cosa", "cos", "perche", "perché", "sono", "sia", "siano", "essere",
+        "hai", "hanno", "abbiamo", "avere", "questo", "questa", "questi", "queste", "quello", "quella",
+        "quelli", "quelle", "più", "meno", "molto", "poco", "tutto", "tutti", "tutte", "tutta", "anche",
+        "ancora", "già", "solo", "mio", "mia", "miei", "mie", "tuo", "tua", "suo", "sua", "ci", "vi",
+        "ne", "mi", "ti", "si", "lei", "lui", "loro", "noi", "voi", "dammi", "dimmi", "elenca", "mostra",
+        // Inglese — articoli, preposizioni, ausiliari, parole interrogative
+        "the", "an", "of", "to", "on", "for", "and", "or", "but", "if", "is", "are", "was", "were",
+        "be", "been", "being", "what", "which", "who", "whom", "whose", "where", "when", "why", "how",
+        "that", "this", "these", "those", "with", "as", "by", "at", "from", "about", "into", "does",
+        "did", "can", "could", "would", "should", "you", "your", "his", "her", "its", "our", "their",
+        "all", "any", "some", "more", "most", "list", "show", "tell", "give", "there", "here", "will"
+    ]
+
+    /// Estrae i termini "significativi" da una domanda: token alfanumerici, minuscoli, distinti,
+    /// lunghi almeno 2 caratteri e non presenti tra le stopword. Serve a capire di cosa parla la
+    /// domanda per pesare la pertinenza lessicale del retrieval (non solo la vicinanza vettoriale).
+    static func meaningfulTerms(from raw: String) -> [String] {
+        var seen = Set<String>()
+        var terms: [String] = []
+        for token in raw.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted) {
+            guard token.count >= 2, !queryStopwords.contains(token), !seen.contains(token) else { continue }
+            seen.insert(token)
+            terms.append(token)
+        }
+        return terms
+    }
+
+    /// Reciprocal Rank Fusion tra più elenchi ordinati (per posizione): il punteggio di un elemento
+    /// è la somma di 1/(k + posizione) su tutti gli elenchi in cui compare. Ritorna gli elementi
+    /// riordinati (migliori prima). Con un solo elenco lo restituisce invariato.
+    private static func fuseRanks(_ lists: [[Int]], k: Double = 60) -> [Int] {
+        if lists.count <= 1 { return lists.first ?? [] }
+        var scores: [Int: Double] = [:]
+        for list in lists {
+            for (position, index) in list.enumerated() {
+                scores[index, default: 0] += 1.0 / (k + Double(position + 1))
+            }
+        }
+        return scores.sorted { $0.value > $1.value }.map { $0.key }
+    }
+
+    // MARK: - Ricerca semantica (Fase 1: embedding vettoriali)
+
+    /// Testo estratto già salvato per un file (usato per rigenerare i vettori senza ri-estrarre).
+    func extractedText(for identity: String) -> String? {
+        var statement: OpaquePointer?
+        guard (try? prepare("SELECT extracted_text FROM file_content WHERE file_identity = ?", statement: &statement)) != nil else { return nil }
+        defer { sqlite3_finalize(statement) }
+        try? bind([.text(identity)], to: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        let text = columnText(statement, 0)
+        return text.isEmpty ? nil : text
+    }
+
+    /// Vero se il file ha già almeno un embedding calcolato (qualsiasi motore).
+    func hasVectors(for identity: String) -> Bool {
+        var statement: OpaquePointer?
+        let sql = "SELECT 1 FROM content_chunks c JOIN chunk_vectors v ON v.chunk_id = c.id WHERE c.file_identity = ? LIMIT 1"
+        guard (try? prepare(sql, statement: &statement)) != nil else { return false }
+        defer { sqlite3_finalize(statement) }
+        try? bind([.text(identity)], to: statement)
+        return sqlite3_step(statement) == SQLITE_ROW
+    }
+
+    /// Vero se il file ha già embedding del MOTORE indicato (provider_id che inizia per prefisso).
+    /// Serve a evitare di saltare file che hanno vettori di un altro motore quando si cambia provider.
+    func hasVectors(for identity: String, providerPrefix: String) -> Bool {
+        var statement: OpaquePointer?
+        let sql = "SELECT 1 FROM content_chunks c JOIN chunk_vectors v ON v.chunk_id = c.id WHERE c.file_identity = ? AND v.provider_id LIKE ? LIMIT 1"
+        guard (try? prepare(sql, statement: &statement)) != nil else { return false }
+        defer { sqlite3_finalize(statement) }
+        try? bind([.text(identity), .text(providerPrefix + "%")], to: statement)
+        return sqlite3_step(statement) == SQLITE_ROW
+    }
+
+    /// Sostituisce i chunk e i vettori di un file (elimina i precedenti in cascata, poi inserisce).
+    func replaceChunks(for identity: String, chunks: [(ordinal: Int, text: String, providerID: String, vector: [Float])]) {
+        try? execute("DELETE FROM content_chunks WHERE file_identity = ?", bindings: [.text(identity)])
+        for chunk in chunks {
+            try? execute(
+                "INSERT INTO content_chunks (file_identity, ordinal, text) VALUES (?, ?, ?)",
+                bindings: [.text(identity), .int(chunk.ordinal), .text(chunk.text)]
+            )
+            let chunkID = sqlite3_last_insert_rowid(db)
+            try? execute(
+                "INSERT INTO chunk_vectors (chunk_id, provider_id, dimension, vector, norm) VALUES (?, ?, ?, ?, ?)",
+                bindings: [.int(Int(chunkID)), .text(chunk.providerID), .int(chunk.vector.count), .blob(Self.data(from: chunk.vector)), .real(Double(Self.norm(chunk.vector)))]
+            )
+        }
+    }
+
+    /// Ricerca semantica: confronta il vettore della query (coseno) con i vettori dei chunk dello
+    /// stesso `providerID`, limitando ai file candidati. Ritorna un punteggio per file (il migliore
+    /// tra i suoi chunk), ordinato dal più simile, con `limit` risultati.
+    func semanticSearch(queryVector: [Float], providerID: String, candidates: Set<String>, limit: Int) -> [(identity: String, score: Float)] {
+        guard !queryVector.isEmpty, !candidates.isEmpty else { return [] }
+
+        var statement: OpaquePointer?
+        let sql = """
+            SELECT c.file_identity, v.vector, v.norm
+            FROM chunk_vectors v
+            JOIN content_chunks c ON c.id = v.chunk_id
+            WHERE v.provider_id = ? AND v.dimension = ?
+            """
+        guard (try? prepare(sql, statement: &statement)) != nil else { return [] }
+        defer { sqlite3_finalize(statement) }
+        try? bind([.text(providerID), .int(queryVector.count)], to: statement)
+
+        let queryNorm = Self.norm(queryVector)
+        guard queryNorm > 0 else { return [] }
+
+        var bestByFile: [String: Float] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let identity = columnText(statement, 0)
+            guard candidates.contains(identity), let blob = columnBlob(statement, 1) else { continue }
+            let vector = Self.floats(from: blob)
+            guard vector.count == queryVector.count else { continue }
+            let storedNorm = Float(sqlite3_column_double(statement, 2))
+            let vectorNorm = storedNorm > 0 ? storedNorm : Self.norm(vector)
+            let score = Self.cosine(queryVector, vector, aNorm: queryNorm, bNorm: vectorNorm)
+            if let existing = bestByFile[identity] {
+                if score > existing { bestByFile[identity] = score }
+            } else {
+                bestByFile[identity] = score
+            }
+        }
+
+        return bestByFile
+            .sorted { $0.value > $1.value }
+            .prefix(limit)
+            .map { (identity: $0.key, score: $0.value) }
+    }
+
+    /// "Trova simili a questo": usa i vettori del file dato come query. Prende il centroide dei
+    /// chunk del provider DOMINANTE del file (coerente per dimensione), poi riusa `semanticSearch`
+    /// per trovare i file più simili tra i candidati, escluso il file stesso.
+    func similarFiles(to identity: String, providerPrefix: String, candidates: Set<String>, limit: Int) -> [(identity: String, score: Float)] {
+        guard !candidates.isEmpty else { return [] }
+
+        // Carica i vettori del file raggruppati per provider_id (solo quelli del motore attivo).
+        var byProvider: [String: [[Float]]] = [:]
+        var statement: OpaquePointer?
+        let sql = """
+            SELECT v.provider_id, v.vector
+            FROM chunk_vectors v
+            JOIN content_chunks c ON c.id = v.chunk_id
+            WHERE c.file_identity = ? AND v.provider_id LIKE ?
+            """
+        if (try? prepare(sql, statement: &statement)) != nil {
+            try? bind([.text(identity), .text(providerPrefix + "%")], to: statement)
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let blob = columnBlob(statement, 1) else { continue }
+                byProvider[columnText(statement, 0), default: []].append(Self.floats(from: blob))
+            }
+        }
+        sqlite3_finalize(statement)
+
+        // Provider dominante (più chunk) → tutti i suoi vettori hanno la stessa dimensione.
+        guard let (providerID, vectors) = byProvider.max(by: { $0.value.count < $1.value.count }),
+              let dimension = vectors.first?.count, dimension > 0 else { return [] }
+
+        // Centroide dei chunk del file.
+        var centroid = [Float](repeating: 0, count: dimension)
+        var used: Float = 0
+        for vector in vectors where vector.count == dimension {
+            for i in 0..<dimension { centroid[i] += vector[i] }
+            used += 1
+        }
+        guard used > 0 else { return [] }
+        for i in 0..<dimension { centroid[i] /= used }
+
+        return semanticSearch(queryVector: centroid, providerID: providerID,
+                              candidates: candidates.subtracting([identity]), limit: limit)
+    }
+
+    // MARK: - Utility vettori
+
+    /// Serializza [Float] in Data (Float32) e viceversa; coseno via Accelerate.
+    private static func data(from vector: [Float]) -> Data {
+        vector.withUnsafeBufferPointer { Data(buffer: $0) }
+    }
+
+    private static func floats(from data: Data) -> [Float] {
+        let count = data.count / MemoryLayout<Float>.stride
+        guard count > 0 else { return [] }
+        return data.withUnsafeBytes { raw in
+            Array(raw.bindMemory(to: Float.self).prefix(count))
+        }
+    }
+
+    private static func norm(_ v: [Float]) -> Float {
+        var sumSquares: Float = 0
+        vDSP_svesq(v, 1, &sumSquares, vDSP_Length(v.count))
+        return sqrt(sumSquares)
+    }
+
+    /// Coseno tra due vettori della stessa dimensione. Le norme di `a` e `b` possono essere passate
+    /// precalcolate (query e vettore memorizzato) per non ricalcolarle a ogni confronto: rimane
+    /// solo il prodotto scalare.
+    private static func cosine(_ a: [Float], _ b: [Float], aNorm: Float? = nil, bNorm: Float? = nil) -> Float {
+        guard a.count == b.count, !a.isEmpty else { return 0 }
+        var dot: Float = 0
+        vDSP_dotpr(a, 1, b, 1, &dot, vDSP_Length(a.count))
+        let denom = (aNorm ?? norm(a)) * (bNorm ?? norm(b))
+        return denom > 0 ? dot / denom : 0
     }
 }
 

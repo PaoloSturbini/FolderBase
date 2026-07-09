@@ -6,7 +6,14 @@ struct MainWindowView: View {
     @StateObject private var recentFoldersStore = RecentFoldersStore()
     @StateObject private var templateStore = TemplateStore()
     @StateObject private var backupService = BackupService()
+    @StateObject private var indexingService = IndexingService()
+    // @State (non @StateObject): MainWindowView possiede chatService in modo stabile ma NON si
+    // ri-renderizza ai suoi cambi (streaming chat). Solo ChatView lo osserva. Evita che ogni token
+    // della risposta rigeneri l'intera finestra/tabella (causa del blocco a 99% CPU).
+    @State private var chatService = ChatService()
     @State private var selectedFolderURL: URL?
+    /// Item attualmente selezionato (singolo) nella tabella: pilota il pannello note della sidebar.
+    @State private var selectedNoteItem: FileItem?
     /// Radice STABILE dell'albero nella sidebar. Resta la cartella "base" scelta:
     /// navigando nelle sottocartelle non cambia, così l'albero non viene ricostruito/riletto.
     @State private var treeRootURL: URL?
@@ -21,6 +28,8 @@ struct MainWindowView: View {
     @AppStorage("showHiddenFiles") private var showHiddenFiles = false
     @AppStorage("showFileExtensions") private var showFileExtensions = false
     @AppStorage("autoCheckUpdates") private var autoCheckUpdates = false
+    @AppStorage(AppAccentColor.storageKey) private var appAccentRaw = AppAccentColor.blue.rawValue
+    @AppStorage(AppAccentColor.customHexKey) private var appAccentCustomHex = ""
     @State private var managedWatcher: FSEventsWatcher?
     @State private var treeRefreshID = UUID()
     @State private var isLoading = false
@@ -49,7 +58,9 @@ struct MainWindowView: View {
                 moveItems: moveItemsByPath,
                 templateStore: templateStore,
                 metadataStore: metadataStore,
-                backupService: backupService
+                backupService: backupService,
+                indexingService: indexingService,
+                selectedNoteItem: selectedNoteItem
             )
             .frame(minWidth: 220, idealWidth: 260, maxWidth: 380, maxHeight: .infinity)
 
@@ -73,11 +84,14 @@ struct MainWindowView: View {
                 contentFontSize: contentFontSize,
                 showFileExtensions: showFileExtensions,
                 templates: templateStore.templates,
-                applyTemplate: applyTemplate
+                applyTemplate: applyTemplate,
+                onSelectItem: { selectedNoteItem = $0 },
+                chatService: chatService
             )
             .frame(minWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 1100, minHeight: 650)
+        .tint(AppAccentColor.color(forRaw: appAccentRaw, customHex: appAccentCustomHex))
         .preferredColorScheme(AppearanceMode(rawValue: appearanceMode)?.colorScheme)
         .onAppear {
             loadInitialFolderIfNeeded()
@@ -87,6 +101,17 @@ struct MainWindowView: View {
         }
         .onChange(of: showHiddenFiles) { _, _ in
             reloadCurrentFolder()
+        }
+        // Richieste dal menu della barra dei menu: carica la cartella scelta. Il publisher
+        // emette il valore corrente anche alla sottoscrizione, così funziona pure quando la
+        // finestra era chiusa ed è appena stata ricreata.
+        .onReceive(MenuBarBridge.shared.$requestedFolder) { url in
+            guard let url else { return }
+            MenuBarBridge.shared.requestedFolder = nil
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue else { return }
+            selectFolder(url)
         }
         .alert(
             L("update.available.title"),

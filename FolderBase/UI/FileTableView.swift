@@ -29,8 +29,18 @@ struct FileTableView: View {
     let showFileExtensions: Bool
     let templates: [MetadataTemplate]
     let applyTemplate: (MetadataTemplate) -> Void
+    /// Riporta al contenitore l'unico item selezionato (o nil se la selezione è vuota o
+    /// multipla): serve al pannello note nella sidebar, che mostra la nota della riga scelta.
+    var onSelectItem: (FileItem?) -> Void = { _ in }
+    /// Riferimento NON osservato: la tabella non deve ri-renderizzarsi ad ogni token della chat
+    /// in streaming (causava saturazione del main thread e blocco dell'app). Solo `ChatView`
+    /// (che lo dichiara @ObservedObject) si aggiorna durante la conversazione.
+    let chatService: ChatService
 
     @State private var isAddingField = false
+    /// Impostato per aprire la chat: l'ambito effettivo (candidati + etichetta) è già configurato
+    /// in `chatService` al momento dell'apertura (vedi `startChat`).
+    @State private var chatRequest: ChatRequest?
     @State private var newItemRequest: NewItemRequest?
     @State private var fieldPendingEdit: MetadataField?
     @State private var itemPendingRename: FileItem?
@@ -42,7 +52,27 @@ struct FileTableView: View {
     @State private var showDeleteConfirmation = false
     @State private var tableSortOrder: [FileItemSortComparator] = []
     @State private var selection: Set<FileItem.ID> = []
+    /// Interruttore generale dell'AI (stessa chiave usata nella Configurazione). Quando è false
+    /// spariscono le icone chat e la ricerca resta limitata al solo nome.
+    @AppStorage(AIProviderSettings.Keys.enabled) private var aiEnabled = true
     @State private var searchText = ""
+    @State private var searchScope: SearchScope = .name
+    /// Ranking di rilevanza della ricerca "Contenuto" (ibrida FTS+semantica), identità→posizione,
+    /// calcolato in modo asincrono in `onSearchChanged`.
+    @State private var relevanceRank: [String: Int]?
+    /// Token anti-race: scarta i risultati di una ricerca superata da una più recente.
+    @State private var searchToken = UUID()
+    /// "Trova simili a questo": ranking di similarità (identità→posizione) rispetto a un file, e
+    /// nome del file di riferimento (per il chip). Quando attivo prevale su ricerca testo/scope.
+    @State private var similarRank: [String: Int]?
+    @State private var similarToName: String?
+    /// Ricerca estesa a tutto il sottoalbero (cartella corrente + sottocartelle) invece che alla
+    /// sola cartella corrente. Quando attivo e c'è una query, la base di ricerca è `subtreeItems`.
+    @State private var searchAllSubfolders = false
+    /// File del sottoalbero (ricorsivo), enumerati on-demand per la ricerca estesa; cachati per
+    /// il percorso corrente in `subtreeLoadedForPath`.
+    @State private var subtreeItems: [FileItem] = []
+    @State private var subtreeLoadedForPath: String?
     @State private var optionFilters: [String: Set<String>] = [:]
     @State private var viewMode: ViewMode = .table
     @State private var boardFieldID: String?
@@ -63,6 +93,19 @@ struct FileTableView: View {
         var id: String { rawValue }
     }
 
+    /// Token per presentare la finestra di chat (l'ambito è già in `chatService`).
+    private struct ChatRequest: Identifiable { let id = UUID() }
+
+    /// Ambito della ricerca: per nome (storico) o per contenuto. La ricerca "Contenuto" è IBRIDA:
+    /// fonde il full-text (parole esatte, FTS5/bm25) con la ricerca semantica (significato,
+    /// embedding) via Reciprocal Rank Fusion, così non fa mai peggio dell'FTS e in più cattura i
+    /// sinonimi/parafrasi. Vedi docs/AI-Indexing-Study.md §Fase 4.
+    private enum SearchScope: String, CaseIterable, Identifiable {
+        case name
+        case content
+        var id: String { rawValue }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if let errorMessage {
@@ -76,7 +119,7 @@ struct FileTableView: View {
                 emptyState
             } else {
                 navigationBar
-                if !optionFilters.isEmpty || !searchText.isEmpty {
+                if !optionFilters.isEmpty || !searchText.isEmpty || similarRank != nil {
                     activeFiltersBar
                 }
                 content
@@ -119,13 +162,181 @@ struct FileTableView: View {
         .sheet(item: $quickLookItem) { item in
             QuickLookSheet(url: item.url) { quickLookItem = nil }
         }
-        .onAppear { refreshDisplayCache() }
-        .onChange(of: items) { refreshDisplayCache() }
-        .onChange(of: searchText) { refreshDisplayCache() }
+        .sheet(item: $chatRequest) { _ in
+            ChatView(chatService: chatService, store: metadataStore) {
+                chatRequest = nil
+            }
+        }
+        .onAppear {
+            // Con AI disattivata la ricerca per contenuto non è disponibile: torna al solo nome.
+            if !aiEnabled { searchScope = .name }
+            rebuildMetadataIndex()
+        }
+        .onChange(of: aiEnabled) { _, enabled in
+            if !enabled {
+                searchScope = .name
+                onSearchChanged()
+            }
+        }
+        .onChange(of: items) {
+            // Cambiando cartella il riferimento di "Trova simili" non è più valido.
+            similarRank = nil
+            similarToName = nil
+            // Dati cambiati → ricostruisci l'indice, poi riapplica l'eventuale ricerca.
+            rebuildMetadataIndex()
+            onSearchChanged()
+        }
+        // Ricerca/filtri/ordinamento riusano l'indice esistente (nessuna ricostruzione).
+        .onChange(of: searchText) { onSearchChanged() }
+        .onChange(of: searchScope) { onSearchChanged() }
+        .onChange(of: searchAllSubfolders) {
+            // Cambiando ambito, ricostruisci indice+lista sulla nuova base.
+            rebuildMetadataIndex()
+            onSearchChanged()
+        }
         .onChange(of: optionFilters) { refreshDisplayCache() }
         .onChange(of: tableSortOrder) { refreshDisplayCache() }
-        .onChange(of: metadataFields) { refreshDisplayCache() }
-        .onChange(of: metadataStore.metadataByFileIdentity) { refreshDisplayCache() }
+        // Cambi di DATI → ricostruzione indice.
+        .onChange(of: metadataFields) { rebuildMetadataIndex() }
+        .onChange(of: metadataStore.metadataByFileIdentity) { rebuildMetadataIndex() }
+        // Selezione → riporta l'item singolo al pannello note (o nil).
+        .onChange(of: selection) { reportSelectedItem() }
+        // Cambiando cartella gli item si rinnovano: riallinea il pannello note.
+        .onChange(of: items) { reportSelectedItem() }
+    }
+
+    /// Riporta al contenitore l'item selezionato se e solo se la selezione è singola.
+    private func reportSelectedItem() {
+        if selection.count == 1,
+           let id = selection.first,
+           let item = visibleItems.first(where: { $0.id == id }) {
+            onSelectItem(item)
+        } else {
+            onSelectItem(nil)
+        }
+    }
+
+    /// Gestisce i cambi di ricerca. In modalità "Contenuto" (ibrida) il ranking di rilevanza si
+    /// calcola in modo asincrono, perché l'embedding della query può essere una chiamata di rete
+    /// (Ollama/OpenAI): l'FTS è sincrona (pochi ms), l'embedding gira in un Task, i due elenchi
+    /// vengono fusi via RRF e infine si aggiorna la cache. Per "Nome" si aggiorna subito.
+    /// Base della ricerca: cartella corrente (`items`) oppure, con ricerca estesa attiva e una
+    /// query in corso, tutto il sottoalbero (`subtreeItems`).
+    private var searchSource: [FileItem] {
+        let needleEmpty = searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return (searchAllSubfolders && !needleEmpty) ? subtreeItems : items
+    }
+
+    /// Enumera (una volta, cachato per percorso) i file del sottoalbero per la ricerca estesa.
+    private func loadSubtree() async {
+        guard let root = selectedFolderURL else { subtreeItems = []; subtreeLoadedForPath = nil; return }
+        let loaded = await Task.detached(priority: .userInitiated) {
+            IndexingService.fileItems(under: root, limit: 20000)
+        }.value
+        subtreeItems = loaded
+        subtreeLoadedForPath = root.path
+    }
+
+    private func onSearchChanged() {
+        let rawNeedle = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Digitare una ricerca esce dalla modalità "Trova simili".
+        if !rawNeedle.isEmpty, similarRank != nil {
+            similarRank = nil
+            similarToName = nil
+        }
+
+        let token = UUID()
+        searchToken = token
+
+        // Ricerca estesa: assicura il sottoalbero caricato per il percorso corrente, poi cerca.
+        if searchAllSubfolders, !rawNeedle.isEmpty, subtreeLoadedForPath != (selectedFolderURL?.path ?? "") {
+            Task {
+                await loadSubtree()
+                guard searchToken == token else { return }
+                rebuildMetadataIndex()          // ricostruisce l'indice sulla nuova base
+                applySearch(rawNeedle: rawNeedle, token: token)
+            }
+            return
+        }
+        applySearch(rawNeedle: rawNeedle, token: token)
+    }
+
+    /// Applica la ricerca corrente sulla `searchSource`. Per "Contenuto" calcola l'ibrida RRF in
+    /// modo asincrono; per "Nome" aggiorna subito (il filtro per nome è in `refreshDisplayCache`).
+    private func applySearch(rawNeedle: String, token: UUID) {
+        guard searchScope == .content, !rawNeedle.isEmpty else {
+            relevanceRank = nil
+            refreshDisplayCache()
+            return
+        }
+
+        let candidates = Set(searchSource.map { $0.id })
+        // Elenco full-text (sincrono), limitato alla base di ricerca (cartella o sottoalbero).
+        let ftsRanked = metadataStore.searchFileContentRanked(rawNeedle).filter { candidates.contains($0) }
+
+        Task {
+            let embedder = EmbeddingEngine.active()
+            let embedding = await embedder.embed(rawNeedle)
+            guard searchToken == token else { return }   // superata da una ricerca più recente
+
+            // Elenco semantico (se l'embedding è disponibile: Ollama/OpenAI raggiungibili o Apple).
+            var semanticRanked: [String] = []
+            if let embedding {
+                semanticRanked = metadataStore
+                    .semanticSearch(queryVector: embedding.vector, providerID: embedding.providerID, candidates: candidates, limit: 300)
+                    .map { $0.identity }
+            }
+
+            // Fusione: se manca uno dei due elenchi (es. Ollama spento → niente semantica) la
+            // ricerca ripiega automaticamente sull'altro, quindi non fa mai peggio dell'FTS.
+            let lists = [ftsRanked, semanticRanked].filter { !$0.isEmpty }
+            relevanceRank = lists.isEmpty ? [:] : Self.reciprocalRankFusion(lists)
+            refreshDisplayCache()
+        }
+    }
+
+    /// Reciprocal Rank Fusion: combina più elenchi ordinati per rilevanza in un unico ranking.
+    /// Il punteggio di un documento è la somma di 1/(k + posizione) su tutti gli elenchi in cui
+    /// compare (k=60, valore standard). Ritorna identità→posizione finale (0-based, migliori prima).
+    private static func reciprocalRankFusion(_ lists: [[String]], k: Double = 60) -> [String: Int] {
+        var scores: [String: Double] = [:]
+        for list in lists {
+            for (index, identity) in list.enumerated() {
+                scores[identity, default: 0] += 1.0 / (k + Double(index + 1))
+            }
+        }
+        let ordered = scores.sorted { $0.value > $1.value }.map { $0.key }
+        return Dictionary(uniqueKeysWithValues: ordered.enumerated().map { ($0.element, $0.offset) })
+    }
+
+    /// Configura l'ambito della chat (candidati + etichetta) e la apre.
+    private func startChat(candidates: Set<String>, scopeLabel: String) {
+        chatService.configure(candidates: candidates, scopeLabel: scopeLabel)
+        chatRequest = ChatRequest()
+    }
+
+    /// Identità dei file indicizzabili sotto una cartella (ricorsivo), da usare come ambito chat.
+    private func folderChatCandidates(_ folder: FileItem) -> Set<String> {
+        Set(IndexingService.fileItems(under: folder.url, limit: 20000).map { $0.identity })
+    }
+
+    /// "Trova simili a questo": ordina la cartella corrente per similarità semantica al file dato
+    /// (centroide dei suoi vettori). Esce da un'eventuale ricerca testuale e mostra un chip.
+    private func findSimilar(to file: FileItem) {
+        let prefix = IndexingService.activeProviderPrefix()
+        let pool = Set(items.map { $0.id })
+        let ranked = metadataStore.similarFiles(to: file.identity, providerPrefix: prefix, candidates: pool, limit: 300)
+        searchText = ""
+        similarRank = Dictionary(uniqueKeysWithValues: ranked.enumerated().map { ($0.element.identity, $0.offset) })
+        similarToName = file.name
+        refreshDisplayCache()
+    }
+
+    /// Azzera la modalità "Trova simili".
+    private func clearSimilar() {
+        similarRank = nil
+        similarToName = nil
+        refreshDisplayCache()
     }
 
     private var emptyState: some View {
@@ -222,13 +433,48 @@ struct FileTableView: View {
         .border(Color(nsColor: .separatorColor), width: 0.5)
     }
 
+    /// Box di ricerca unico, stile barra di ricerca macOS: a sinistra la lente e il selettore
+    /// del tipo di ricerca (Nome / Contenuto ibrido), poi il campo di testo. Tutto in una capsula.
     private var searchField: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "magnifyingglass")
+        HStack(spacing: 6) {
+            Menu {
+                // La scelta Nome/Contenuto ha senso solo con l'AI attiva: la ricerca "Contenuto"
+                // è ibrida FTS+semantica. Con AI disattiva resta il solo nome.
+                if aiEnabled {
+                    Picker(L("search.scope.help"), selection: $searchScope) {
+                        Text(L("search.scope.name")).tag(SearchScope.name)
+                        Text(L("search.scope.content")).tag(SearchScope.content)
+                    }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+
+                    Divider()
+                }
+
+                Toggle(isOn: $searchAllSubfolders) {
+                    Text(L("search.subfolders"))
+                }
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "magnifyingglass")
+                    Text(searchScopeLabel)
+                        .font(.caption)
+                    Image(systemName: "chevron.down")
+                        .font(.caption2)
+                }
                 .foregroundStyle(.secondary)
-            TextField(L("table.search"), text: $searchText)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .hoverDescription(L("search.scope.help"))
+
+            Divider().frame(height: 14)
+
+            TextField(searchPlaceholder, text: $searchText)
                 .textFieldStyle(.plain)
-                .frame(width: 160)
+                .frame(width: 170)
+
             if !searchText.isEmpty {
                 Button {
                     searchText = ""
@@ -244,9 +490,33 @@ struct FileTableView: View {
         .background(Color(nsColor: .controlBackgroundColor), in: Capsule())
     }
 
+    private var searchScopeLabel: String {
+        switch searchScope {
+        case .name: return L("search.scope.name")
+        case .content: return L("search.scope.content")
+        }
+    }
+
+    private var searchPlaceholder: String {
+        switch searchScope {
+        case .name: return "\(L("table.search")) · \(L("search.scope.name"))"
+        case .content: return "\(L("table.search")) · \(L("search.scope.content"))"
+        }
+    }
+
     @ViewBuilder
     private var toolbarButtons: some View {
         HStack(spacing: 8) {
+            if aiEnabled {
+                Button {
+                    startChat(candidates: [], scopeLabel: L("chat.scope.all"))
+                } label: {
+                    Label(L("toolbar.chat"), systemImage: "bubble.left.and.bubble.right")
+                }
+                .labelStyle(.iconOnly)
+                .hoverDescription(L("toolbar.chatHelp"))
+            }
+
             if hasKanbanField {
                 Picker(L("toolbar.view"), selection: $viewMode) {
                     Image(systemName: "tablecells").tag(ViewMode.table)
@@ -376,6 +646,12 @@ struct FileTableView: View {
     private var activeFiltersBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
+                if let similarToName {
+                    filterChip(text: "\(L("similar.chip")): \(similarToName)", systemImage: "sparkles") {
+                        clearSimilar()
+                    }
+                }
+
                 if !searchText.isEmpty {
                     filterChip(text: "“\(searchText)”", systemImage: "magnifyingglass") {
                         searchText = ""
@@ -472,32 +748,62 @@ struct FileTableView: View {
     /// Chiamata dai vari `onChange` in `body`: filtro e ordinamento (costosi, soprattutto
     /// `localizedStandardCompare`) vengono così eseguiti una sola volta per cambiamento
     /// reale invece che a ogni invalidazione di SwiftUI.
-    private func refreshDisplayCache() {
+    /// Ricostruisce SOLO l'indice metadata [fieldID: [itemID: value]], poi aggiorna la vista.
+    /// Costoso (O(campi × item)), quindi va chiamata solo quando cambiano i DATI (items, campi,
+    /// valori metadata) — NON a ogni tasto di ricerca o cambio ordinamento, che riusano l'indice.
+    private func rebuildMetadataIndex() {
+        let source = searchSource
         var index: [String: [String: String]] = [:]
         for field in metadataFields {
             var perItem: [String: String] = [:]
-            for item in items {
+            for item in source {
                 let value = metadataStore.value(for: item, field: field)
                 if !value.isEmpty { perItem[item.id] = value }
             }
             index[field.id] = perItem
         }
         cachedIndex = index
+        refreshDisplayCache()
+    }
 
-        let needle = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    /// Ricalcola SOLO la lista filtrata+ordinata riusando `cachedIndex` (non lo ricostruisce).
+    private func refreshDisplayCache() {
+        let index = cachedIndex
+        let rawNeedle = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let needle = rawNeedle.lowercased()
         var result: [FileItem]
 
-        if optionFilters.isEmpty, needle.isEmpty {
-            result = items
+        // Ricerca "Contenuto" (ibrida FTS+semantica): il ranking di rilevanza è calcolato in modo
+        // asincrono in `onSearchChanged` e conservato in `relevanceRank`; qui filtra i risultati
+        // (appartenenza al ranking) e ne sostituisce l'ordinamento. Finché il calcolo è in corso
+        // `relevanceRank` è nil → si usa una mappa vuota (nessun match) invece di ricadere sul nome.
+        let activeRank: [String: Int]? = (searchScope == .content && !rawNeedle.isEmpty) ? (relevanceRank ?? [:]) : nil
+
+        // Base: cartella corrente, o tutto il sottoalbero se la ricerca estesa è attiva.
+        let source = searchSource
+
+        if optionFilters.isEmpty, needle.isEmpty, similarRank == nil {
+            result = source
         } else {
-            result = items.filter { item in
+            result = source.filter { item in
                 // Filtri per opzione (AND tra campi, OR tra valori dello stesso campo).
                 for (fieldID, labels) in optionFilters where !labels.isEmpty {
                     let value = index[fieldID]?[item.id] ?? ""
                     if !labels.contains(value) { return false }
                 }
 
+                // "Trova simili" prevale su ricerca testo/scope.
+                if let similarRank {
+                    return similarRank[item.id] != nil
+                }
+
                 guard !needle.isEmpty else { return true }
+
+                if let activeRank {
+                    return activeRank[item.id] != nil
+                }
+
+                // Modalità "nome": nome file o valori metadata.
                 if item.name.lowercased().contains(needle) { return true }
                 for (_, perItem) in index {
                     if let value = perItem[item.id], value.lowercased().contains(needle) { return true }
@@ -506,14 +812,20 @@ struct FileTableView: View {
             }
         }
 
-        if let comparator = tableSortOrder.first {
+        if let similarRank {
+            // Ordina per similarità al file di riferimento (i più simili in alto).
+            result.sort { (similarRank[$0.id] ?? .max) < (similarRank[$1.id] ?? .max) }
+        } else if let activeRank {
+            // Ordina per rilevanza ibrida (i più pertinenti in alto).
+            result.sort { (activeRank[$0.id] ?? .max) < (activeRank[$1.id] ?? .max) }
+        } else if let comparator = tableSortOrder.first {
             result.sort { comparator.compare($0, $1) == .orderedAscending }
         }
         cachedVisibleItems = result
     }
 
     private var selectedItems: [FileItem] {
-        items.filter { selection.contains($0.id) }
+        visibleItems.filter { selection.contains($0.id) }
     }
 
     /// Punto unico da cui passano tutte le cancellazioni: mostra il popup di conferma
@@ -587,13 +899,22 @@ struct FileTableView: View {
                 // così il menù di sistema sull'header non mostra più "Nascondi/Mostra".
                 .disabledCustomizationBehavior(.visibility)
             }
+
+            // Colonna vuota finale: fa da spaziatore e, soprattutto, offre una maniglia a destra
+            // per ridimensionare l'ultima colonna dati (SwiftUI non dà un handle sul bordo estremo).
+            TableColumn("") { _ in
+                Color.clear
+            }
+            .width(min: 16, ideal: 60)
+            .customizationID("__trailing_spacer__")
+            .disabledCustomizationBehavior(.all)
         }
         .font(.system(size: contentFontSize))
         .contextMenu(forSelectionType: FileItem.ID.self) { ids in
             rowContextMenu(for: ids)
         } primaryAction: { ids in
             // Doppio clic: apre l'elemento.
-            if let id = ids.first, let item = items.first(where: { $0.id == id }) {
+            if let id = ids.first, let item = visibleItems.first(where: { $0.id == id }) {
                 openItem(item)
             }
         }
@@ -613,7 +934,7 @@ struct FileTableView: View {
             guard editingItemID == nil,
                   selection.count == 1,
                   let id = selection.first,
-                  let item = items.first(where: { $0.id == id }) else { return .ignored }
+                  let item = visibleItems.first(where: { $0.id == id }) else { return .ignored }
             beginRename(item)
             return .handled
         }
@@ -644,7 +965,7 @@ struct FileTableView: View {
 
     @ViewBuilder
     private func rowContextMenu(for ids: Set<FileItem.ID>) -> some View {
-        let targets = items.filter { ids.contains($0.id) }
+        let targets = visibleItems.filter { ids.contains($0.id) }
 
         if let single = targets.first, targets.count == 1 {
             Button {
@@ -663,6 +984,32 @@ struct FileTableView: View {
                 revealInFinder([single])
             } label: {
                 Label(L("ctx.revealFinder"), systemImage: "magnifyingglass")
+            }
+
+            if aiEnabled {
+                Divider()
+
+                if single.isFolder {
+                    Button {
+                        startChat(candidates: folderChatCandidates(single),
+                                  scopeLabel: "\(L("chat.scope.folder")): \(single.name)")
+                    } label: {
+                        Label(L("ctx.chatFolder"), systemImage: "bubble.left.and.bubble.right")
+                    }
+                } else {
+                    Button {
+                        startChat(candidates: [single.identity],
+                                  scopeLabel: "\(L("chat.scope.file")): \(single.name)")
+                    } label: {
+                        Label(L("ctx.chatFile"), systemImage: "bubble.left.and.bubble.right")
+                    }
+
+                    Button {
+                        findSimilar(to: single)
+                    } label: {
+                        Label(L("ctx.findSimilar"), systemImage: "sparkles")
+                    }
+                }
             }
 
             Divider()
@@ -870,7 +1217,7 @@ struct FileTableView: View {
     /// altrimenti solo `item`.
     private func dragURLs(for item: FileItem) -> [URL] {
         if selection.contains(item.id) && selection.count > 1 {
-            return items.filter { selection.contains($0.id) }.map(\.url)
+            return visibleItems.filter { selection.contains($0.id) }.map(\.url)
         }
         return [item.url]
     }
@@ -920,7 +1267,9 @@ struct FileTableView: View {
     private func metadataCell(for item: FileItem, field: MetadataField) -> some View {
         switch field.kind {
         case .text:
-            EditableTextCell(text: valueBinding(for: item, field: field), showsHoverPreview: true)
+            // Niente popover in hover: la nota della riga selezionata è mostrata nel
+            // pannello dedicato in fondo alla sidebar.
+            EditableTextCell(text: valueBinding(for: item, field: field))
         case .number:
             EditableTextCell(text: valueBinding(for: item, field: field), alignment: .trailing, monospacedDigits: true)
         case .date:
@@ -1090,8 +1439,10 @@ struct FileTableView: View {
         case .number:
             return 100
         case .date:
-            return 140
-        case .kanban, .select:
+            return 90
+        case .kanban:
+            return 50
+        case .select:
             return 150
         case .link:
             return 260
@@ -1108,7 +1459,9 @@ struct FileTableView: View {
             return 50
         case .date:
             return 60
-        case .kanban, .select:
+        case .kanban:
+            return 40
+        case .select:
             return 60
         case .link:
             return 70
@@ -1541,6 +1894,8 @@ extension FileDragSourceView: NSDraggingSource {
 private struct DateMetadataCell: View {
     @Binding var text: String
     @State private var isEditing = false
+    @State private var isHovering = false
+    @FocusState private var focused: Bool
 
     private var date: Date? {
         MetadataValueFormatter.date(from: text)
@@ -1563,30 +1918,54 @@ private struct DateMetadataCell: View {
 
     var body: some View {
         Group {
-            if text.isEmpty {
-                // Cella vuota appena creata: non mostra nulla. Un clic imposta la data odierna.
+            if isEditing {
+                // In editing: campo con giorno/mese/anno che scorrono con le frecce. Cliccando
+                // fuori (perdita di focus) l'editing termina e resta la sola data.
+                DatePicker("", selection: dateBinding, displayedComponents: .date)
+                    .datePickerStyle(.stepperField)
+                    .labelsHidden()
+                    .focused($focused)
+                    .onChange(of: focused) { _, isFocused in
+                        if !isFocused { isEditing = false }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else if text.isEmpty {
+                // Cella vuota: un clic imposta la data odierna ed entra in editing.
                 Color.clear
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .contentShape(Rectangle())
-                    .onTapGesture {
-                        text = MetadataValueFormatter.string(from: Date())
-                    }
+                    .onTapGesture { beginEditing() }
             } else {
-                // Mostra solo la data (niente frecce né pulsante di rimozione). Rossa se futura.
-                // Un clic apre un calendario in popover per modificarla.
-                Text(MetadataValueFormatter.displayDate(from: text))
-                    .foregroundStyle(isExpired ? Color.red : Color.primary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .onTapGesture { isEditing = true }
-                    .popover(isPresented: $isEditing) {
-                        DatePicker("", selection: dateBinding, displayedComponents: .date)
-                            .datePickerStyle(.graphical)
-                            .labelsHidden()
-                            .padding()
+                // A riposo mostra solo la data. Un clic entra in editing. La X per cancellare
+                // compare al passaggio del mouse (così a riposo la cella resta pulita).
+                HStack(spacing: 4) {
+                    Text(MetadataValueFormatter.displayDate(from: text))
+                        .foregroundStyle(isExpired ? Color.red : Color.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture { beginEditing() }
+
+                    if isHovering {
+                        Button {
+                            text = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.secondary)
+                        .help(L("common.empty"))
                     }
+                }
+                .onHover { isHovering = $0 }
             }
         }
+    }
+
+    private func beginEditing() {
+        if text.isEmpty { text = MetadataValueFormatter.string(from: Date()) }
+        isEditing = true
+        // Il focus va assegnato dopo che il DatePicker è montato nella gerarchia.
+        DispatchQueue.main.async { focused = true }
     }
 }
 
