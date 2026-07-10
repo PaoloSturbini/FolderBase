@@ -319,6 +319,7 @@ final class IndexingService: ObservableObject {
     /// URL dei file indicizzabili sotto `root` (ricorsivo). Salta i file nascosti e non discende
     /// nei pacchetti (i .app ecc. sono ignorati; i pacchetti iWork sono trattati come singolo file).
     nonisolated static func indexableURLs(under root: URL, limit: Int) -> [URL] {
+        guard !FileSystemPolicy.isInTrash(root) else { return [] }
         let fileManager = FileManager.default
         guard let enumerator = fileManager.enumerator(
             at: root,
@@ -329,6 +330,10 @@ final class IndexingService: ObservableObject {
 
         var urls: [URL] = []
         for case let url as URL in enumerator {
+            if FileSystemPolicy.isInTrash(url) {
+                enumerator.skipDescendants()
+                continue
+            }
             let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isPackageKey])
             if values?.isPackage == true {
                 enumerator.skipDescendants()

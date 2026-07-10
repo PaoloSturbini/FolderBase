@@ -496,6 +496,11 @@ enum LocalizedStrings {
         // MARK: Pannelli di sistema (NSOpenPanel/NSSavePanel)
         "panel.choose": ("Scegli", "Choose"),
         "panel.move": ("Sposta", "Move"),
+        "collision.title": ("Un elemento con questo nome esiste già", "An item with this name already exists"),
+        "collision.message": ("Scegli se sostituire l’elemento esistente oppure mantenere entrambi creando una copia con un nuovo nome.", "Choose whether to replace the existing item or keep both by creating a copy with a new name."),
+        "collision.replace": ("Sostituisci", "Replace"),
+        "collision.keepBoth": ("Mantieni entrambi", "Keep Both"),
+        "collision.copySuffix": ("copia", "copy"),
         "panel.link": ("Collega", "Link"),
         "panel.linkNote": ("Collega nota", "Link note"),
 

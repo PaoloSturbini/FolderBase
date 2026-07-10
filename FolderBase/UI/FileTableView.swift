@@ -185,6 +185,10 @@ struct FileTableView: View {
             // Cambiando cartella il riferimento di "Trova simili" non è più valido.
             similarRank = nil
             similarToName = nil
+            // Qualunque operazione filesystem invalida anche la cache ricorsiva: una ricerca
+            // "tutte le sottocartelle" deve riflettere subito cancellazioni e spostamenti.
+            subtreeItems = []
+            subtreeLoadedForPath = nil
             // Dati cambiati → ricostruisci l'indice, poi riapplica l'eventuale ricerca.
             rebuildMetadataIndex()
             onSearchChanged()
@@ -1602,6 +1606,7 @@ struct FileTableView: View {
     }
 
     nonisolated private static func findNote(named name: String, under folderURL: URL) -> URL? {
+        guard !FileSystemPolicy.isInTrash(folderURL) else { return nil }
         guard let enumerator = FileManager.default.enumerator(
             at: folderURL,
             includingPropertiesForKeys: [.isDirectoryKey],
@@ -1609,6 +1614,10 @@ struct FileTableView: View {
         ) else { return nil }
 
         for case let url as URL in enumerator {
+            if FileSystemPolicy.isInTrash(url) {
+                enumerator.skipDescendants()
+                continue
+            }
             let stem = url.deletingPathExtension().lastPathComponent
             if stem == name || url.lastPathComponent == name {
                 return url

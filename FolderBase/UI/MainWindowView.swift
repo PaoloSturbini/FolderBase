@@ -427,9 +427,9 @@ struct MainWindowView: View {
 
         let destinationURL = destinationFolderURL.appendingPathComponent(item.name, isDirectory: item.isFolder)
         guard destinationURL.standardizedFileURL.path != item.url.standardizedFileURL.path,
-              !FileManager.default.fileExists(atPath: destinationURL.path) else { return }
+              let resolvedDestination = resolveCollision(sourceURL: item.url, proposedDestination: destinationURL, isDirectory: item.isFolder) else { return }
 
-        moveItemOnDisk(item, to: destinationURL)
+        moveItemOnDisk(item, to: resolvedDestination)
     }
 
     private func destinationURLForRename(item: FileItem, newName: String) -> URL? {
@@ -460,7 +460,8 @@ struct MainWindowView: View {
     /// Sposta sul disco i file trascinati (per path) dentro `destinationFolder`,
     /// riconciliando i metadata e saltando spostamenti non validi.
     private func moveItemsByPath(_ paths: [String], to destinationFolder: URL) {
-        var didMove = false
+        let shouldCopy = NSEvent.modifierFlags.contains(.option)
+        var didTransfer = false
 
         for path in paths {
             let sourceURL = URL(fileURLWithPath: path).standardizedFileURL
@@ -470,23 +471,80 @@ struct MainWindowView: View {
             let alreadyThere = sourceURL.deletingLastPathComponent().standardizedFileURL.path == destinationFolder.standardizedFileURL.path
             let intoItself = destinationFolder.standardizedFileURL.path == sourceURL.path
                 || destinationFolder.standardizedFileURL.path.hasPrefix(sourceURL.path + "/")
-            let collision = FileManager.default.fileExists(atPath: destinationURL.path)
-
-            guard !alreadyThere, !intoItself, !collision else { continue }
+            guard !intoItself, !alreadyThere || shouldCopy else { continue }
+            let resolvedDestination: URL?
+            if alreadyThere && shouldCopy {
+                resolvedDestination = uniqueCopyURL(for: sourceURL, in: destinationFolder, isDirectory: isDirectory)
+            } else {
+                resolvedDestination = resolveCollision(sourceURL: sourceURL, proposedDestination: destinationURL, isDirectory: isDirectory)
+            }
+            guard let resolvedDestination else { continue }
 
             let previousIdentity = metadataStore.identity(for: sourceURL)
             do {
-                try FileManager.default.moveItem(at: sourceURL, to: destinationURL)
-                if let previousIdentity {
-                    _ = try? metadataStore.reconcileMovedItem(previousIdentity: previousIdentity, newURL: destinationURL)
+                if shouldCopy {
+                    try FileManager.default.copyItem(at: sourceURL, to: resolvedDestination)
+                } else {
+                    try FileManager.default.moveItem(at: sourceURL, to: resolvedDestination)
                 }
-                didMove = true
+                if !shouldCopy, let previousIdentity {
+                    _ = try? metadataStore.reconcileMovedItem(previousIdentity: previousIdentity, newURL: resolvedDestination)
+                }
+                didTransfer = true
             } catch {
                 errorMessage = error.localizedDescription
             }
         }
 
-        if didMove { reloadCurrentFolder() }
+        if didTransfer { reloadCurrentFolder() }
+    }
+
+    /// Risolve una collisione come Finder. "Sostituisci" elimina l'elemento di destinazione;
+    /// "Mantieni entrambi" genera un nome libero (`nome copia`, `nome copia 2`, …).
+    private func resolveCollision(sourceURL: URL, proposedDestination: URL, isDirectory: Bool) -> URL? {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: proposedDestination.path) else { return proposedDestination }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = L("collision.title")
+        alert.informativeText = "\(proposedDestination.lastPathComponent)\n\n\(L("collision.message"))"
+        alert.addButton(withTitle: L("collision.replace"))
+        alert.addButton(withTitle: L("collision.keepBoth"))
+        alert.addButton(withTitle: L("common.cancel"))
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            let replacedIdentity = metadataStore.identity(for: proposedDestination)
+            do {
+                try fm.removeItem(at: proposedDestination)
+                if let replacedIdentity { _ = metadataStore.purge(identities: [replacedIdentity]) }
+                return proposedDestination
+            } catch {
+                errorMessage = error.localizedDescription
+                return nil
+            }
+        case .alertSecondButtonReturn:
+            return uniqueCopyURL(for: sourceURL, in: proposedDestination.deletingLastPathComponent(), isDirectory: isDirectory)
+        default:
+            return nil
+        }
+    }
+
+    private func uniqueCopyURL(for sourceURL: URL, in folderURL: URL, isDirectory: Bool) -> URL {
+        let fm = FileManager.default
+        let suffix = L("collision.copySuffix")
+        let ext = isDirectory ? "" : sourceURL.pathExtension
+        let base = (!isDirectory && !ext.isEmpty) ? sourceURL.deletingPathExtension().lastPathComponent : sourceURL.lastPathComponent
+        var number = 1
+        while true {
+            let numberedSuffix = number == 1 ? suffix : "\(suffix) \(number)"
+            var name = "\(base) \(numberedSuffix)"
+            if !ext.isEmpty { name += ".\(ext)" }
+            let candidate = folderURL.appendingPathComponent(name, isDirectory: isDirectory)
+            if !fm.fileExists(atPath: candidate.path) { return candidate }
+            number += 1
+        }
     }
 
     private func moveItemOnDisk(_ item: FileItem, to destinationURL: URL) {

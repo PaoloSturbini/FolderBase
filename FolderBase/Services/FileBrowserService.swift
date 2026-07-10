@@ -18,7 +18,7 @@ final class FileBrowserService {
 
         var items: [FileItem] = []
         items.reserveCapacity(urls.count)
-        for fileURL in urls {
+        for fileURL in urls where !FileSystemPolicy.isInTrash(fileURL) {
             if Task.isCancelled { return [] }
             let values = try fileURL.resourceValues(forKeys: Self.resourceKeys)
             let isFolder = values.isDirectory ?? false
