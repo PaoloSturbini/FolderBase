@@ -16,13 +16,14 @@ final class FileBrowserService {
             options: options
         )
 
-        return try urls
-            .map { fileURL in
-                let values = try fileURL.resourceValues(forKeys: Self.resourceKeys)
-                let isFolder = values.isDirectory ?? false
-                let identity = MetadataStore.identity(for: fileURL, resourceValues: values)
-
-                return FileItem(
+        var items: [FileItem] = []
+        items.reserveCapacity(urls.count)
+        for fileURL in urls {
+            if Task.isCancelled { return [] }
+            let values = try fileURL.resourceValues(forKeys: Self.resourceKeys)
+            let isFolder = values.isDirectory ?? false
+            let identity = MetadataStore.identity(for: fileURL, resourceValues: values)
+            items.append(FileItem(
                     identity: identity,
                     url: fileURL,
                     name: fileURL.lastPathComponent,
@@ -30,14 +31,14 @@ final class FileBrowserService {
                     created: values.creationDate ?? .distantPast,
                     size: isFolder ? nil : Int64(values.fileSize ?? 0),
                     isFolder: isFolder
-                )
-            }
-            .sorted { lhs, rhs in
+            ))
+        }
+        return items.sorted { lhs, rhs in
                 if lhs.isFolder != rhs.isFolder {
                     return lhs.isFolder && !rhs.isFolder
                 }
 
                 return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
-            }
+        }
     }
 }

@@ -62,6 +62,7 @@ struct FileTableView: View {
     @State private var relevanceRank: [String: Int]?
     /// Token anti-race: scarta i risultati di una ricerca superata da una più recente.
     @State private var searchToken = UUID()
+    @State private var searchTask: Task<Void, Never>?
     /// "Trova simili a questo": ranking di similarità (identità→posizione) rispetto a un file, e
     /// nome del file di riferimento (per il chip). Quando attivo prevale su ricerca testo/scope.
     @State private var similarRank: [String: Int]?
@@ -86,6 +87,8 @@ struct FileTableView: View {
     /// non a ogni render della view come accadeva con le computed property.
     @State private var cachedIndex: [String: [String: String]] = [:]
     @State private var cachedVisibleItems: [FileItem] = []
+    @State private var noteLinkCache: [String: URL] = [:]
+    @State private var missingNoteLinks: Set<String> = []
 
     private enum ViewMode: String, CaseIterable, Identifiable {
         case table
@@ -185,6 +188,8 @@ struct FileTableView: View {
             // Dati cambiati → ricostruisci l'indice, poi riapplica l'eventuale ricerca.
             rebuildMetadataIndex()
             onSearchChanged()
+            noteLinkCache.removeAll()
+            missingNoteLinks.removeAll()
         }
         // Ricerca/filtri/ordinamento riusano l'indice esistente (nessuna ricostruzione).
         .onChange(of: searchText) { onSearchChanged() }
@@ -198,7 +203,9 @@ struct FileTableView: View {
         .onChange(of: tableSortOrder) { refreshDisplayCache() }
         // Cambi di DATI → ricostruzione indice.
         .onChange(of: metadataFields) { rebuildMetadataIndex() }
-        .onChange(of: metadataStore.metadataByFileIdentity) { rebuildMetadataIndex() }
+        .onChange(of: metadataStore.metadataByFileIdentity) { oldValue, newValue in
+            updateMetadataIndex(from: oldValue, to: newValue)
+        }
         // Selezione → riporta l'item singolo al pannello note (o nil).
         .onChange(of: selection) { reportSelectedItem() }
         // Cambiando cartella gli item si rinnovano: riallinea il pannello note.
@@ -234,10 +241,12 @@ struct FileTableView: View {
             IndexingService.fileItems(under: root, limit: 20000)
         }.value
         subtreeItems = loaded
+        metadataStore.loadMetadata(for: loaded)
         subtreeLoadedForPath = root.path
     }
 
     private func onSearchChanged() {
+        searchTask?.cancel()
         let rawNeedle = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         // Digitare una ricerca esce dalla modalità "Trova simili".
         if !rawNeedle.isEmpty, similarRank != nil {
@@ -250,9 +259,9 @@ struct FileTableView: View {
 
         // Ricerca estesa: assicura il sottoalbero caricato per il percorso corrente, poi cerca.
         if searchAllSubfolders, !rawNeedle.isEmpty, subtreeLoadedForPath != (selectedFolderURL?.path ?? "") {
-            Task {
+            searchTask = Task {
                 await loadSubtree()
-                guard searchToken == token else { return }
+                guard !Task.isCancelled, searchToken == token else { return }
                 rebuildMetadataIndex()          // ricostruisce l'indice sulla nuova base
                 applySearch(rawNeedle: rawNeedle, token: token)
             }
@@ -270,14 +279,15 @@ struct FileTableView: View {
             return
         }
 
-        let candidates = Set(searchSource.map { $0.id })
-        // Elenco full-text (sincrono), limitato alla base di ricerca (cartella o sottoalbero).
-        let ftsRanked = metadataStore.searchFileContentRanked(rawNeedle).filter { candidates.contains($0) }
-
-        Task {
+        // Debounce: non inviare una richiesta embedding per ogni carattere digitato.
+        searchTask = Task {
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled, searchToken == token else { return }
+            let candidates = Set(searchSource.map { $0.id })
+            let ftsRanked = metadataStore.searchFileContentRanked(rawNeedle).filter { candidates.contains($0) }
             let embedder = EmbeddingEngine.active()
             let embedding = await embedder.embed(rawNeedle)
-            guard searchToken == token else { return }   // superata da una ricerca più recente
+            guard !Task.isCancelled, searchToken == token else { return }
 
             // Elenco semantico (se l'embedding è disponibile: Ollama/OpenAI raggiungibili o Apple).
             var semanticRanked: [String] = []
@@ -759,6 +769,28 @@ struct FileTableView: View {
             for item in source {
                 let value = metadataStore.value(for: item, field: field)
                 if !value.isEmpty { perItem[item.id] = value }
+            }
+            index[field.id] = perItem
+        }
+        cachedIndex = index
+        refreshDisplayCache()
+    }
+
+    /// Aggiorna solo le righe metadata realmente cambiate. Durante modifiche bulk o digitazione
+    /// evita di rifare O(campi × file) quando è cambiato un solo file.
+    private func updateMetadataIndex(from oldValue: [String: FileMetadata], to newValue: [String: FileMetadata]) {
+        let sourceIDs = Set(searchSource.map(\.id))
+        let changedIDs = Set(oldValue.keys).union(newValue.keys).filter {
+            sourceIDs.contains($0) && oldValue[$0] != newValue[$0]
+        }
+        guard !changedIDs.isEmpty else { return }
+
+        var index = cachedIndex
+        for field in metadataFields {
+            var perItem = index[field.id] ?? [:]
+            for identity in changedIDs {
+                let value = newValue[identity]?.values[field.id] ?? ""
+                if value.isEmpty { perItem[identity] = nil } else { perItem[identity] = value }
             }
             index[field.id] = perItem
         }
@@ -1506,10 +1538,28 @@ struct FileTableView: View {
 
         if let url = URL(string: destination), url.scheme != nil {
             NSWorkspace.shared.open(url)
-        } else if let resolvedURL = resolveLocalLink(destination) {
+        } else if let resolvedURL = resolveLocalLinkFast(destination) {
             NSWorkspace.shared.open(resolvedURL)
         } else {
-            NSWorkspace.shared.open(URL(fileURLWithPath: destination))
+            guard let root = selectedFolderURL else { return }
+            let key = root.path + "\u{0}" + destination
+            if let cached = noteLinkCache[key] {
+                NSWorkspace.shared.open(cached)
+                return
+            }
+            guard !missingNoteLinks.contains(key) else { return }
+
+            Task {
+                let resolved = await Task.detached(priority: .userInitiated) {
+                    Self.findNote(named: destination, under: root)
+                }.value
+                if let resolved {
+                    noteLinkCache[key] = resolved
+                    NSWorkspace.shared.open(resolved)
+                } else {
+                    missingNoteLinks.insert(key)
+                }
+            }
         }
     }
 
@@ -1530,7 +1580,7 @@ struct FileTableView: View {
         return trimmed
     }
 
-    private func resolveLocalLink(_ destination: String) -> URL? {
+    private func resolveLocalLinkFast(_ destination: String) -> URL? {
         if destination.hasPrefix("/") {
             let url = URL(fileURLWithPath: destination)
             return FileManager.default.fileExists(atPath: url.path) ? url : nil
@@ -1548,10 +1598,10 @@ struct FileTableView: View {
             return markdownURL
         }
 
-        return findNote(named: destination, under: selectedFolderURL)
+        return nil
     }
 
-    private func findNote(named name: String, under folderURL: URL) -> URL? {
+    nonisolated private static func findNote(named name: String, under folderURL: URL) -> URL? {
         guard let enumerator = FileManager.default.enumerator(
             at: folderURL,
             includingPropertiesForKeys: [.isDirectoryKey],

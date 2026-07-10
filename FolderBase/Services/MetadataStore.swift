@@ -1,6 +1,7 @@
 import Foundation
 import SQLite3
 import Accelerate
+import OSLog
 
 struct FileMetadata: Codable, Equatable {
     var values: [String: String]
@@ -13,7 +14,12 @@ private struct LegacyMetadataDocument: Codable {
     var metadataByPath: [String: FileMetadata]
 }
 
+/// La connessione SQLite e tutte le cache collegate appartengono al main actor.
+/// Le operazioni filesystem/AI costose producono risultati in background e consegnano qui
+/// solo gli aggiornamenti da applicare, evitando accessi concorrenti alla stessa connessione.
+@MainActor
 final class MetadataStore: ObservableObject {
+    private static let performanceLog = Logger(subsystem: "com.paolosturbini.folderbase", category: "Performance")
     @Published private(set) var fieldsByFolder: [String: [MetadataField]] = [:]
 
     /// Non-@Published: la notifica a SwiftUI è gestita manualmente (vedi
@@ -45,6 +51,9 @@ final class MetadataStore: ObservableObject {
     /// riconfigurare FSEvents) ma il suo contenuto cambia solo quando si registrano,
     /// spostano o eliminano file gestiti.
     private var managedDirectoriesCache: [String]?
+    /// Identità richieste dalla vista corrente. I valori metadata vengono caricati solo per
+    /// questo working set, invece di materializzare l'intero archivio a ogni refresh.
+    private var activeMetadataIdentities: Set<String> = []
 
     init(fileManager: FileManager = .default) {
         let supportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -68,7 +77,8 @@ final class MetadataStore: ObservableObject {
     }
 
     deinit {
-        flushPendingWrites()
+        // I DispatchWorkItem pendenti trattengono lo store fino all'esecuzione; a questo punto
+        // non possono più esistere scritture da scaricare. La chiusura resta sincrona e sicura.
         sqlite3_close(db)
     }
 
@@ -155,6 +165,14 @@ final class MetadataStore: ObservableObject {
 
     func metadata(for item: FileItem) -> FileMetadata {
         metadataByFileIdentity[item.identity] ?? .empty
+    }
+
+    func loadMetadata(for items: [FileItem]) {
+        let identities = Set(items.map(\.identity))
+        guard identities != activeMetadataIdentities else { return }
+        activeMetadataIdentities = identities
+        metadataByFileIdentity = (try? loadMetadata(identities: identities)) ?? [:]
+        notifyMetadataChanged(immediate: true)
     }
 
     func value(for item: FileItem, field: MetadataField) -> String {
@@ -479,10 +497,11 @@ final class MetadataStore: ObservableObject {
         case present(URL)    // stesso file (eventuale rinomina/spostamento sullo stesso volume)
         case relocated(URL)  // file ritrovato ma con identità cambiata → serve ri-aggancio
         case missing         // non più trovabile → orfano
+        case volumeUnavailable // volume esterno/NAS non montato: non è un orfano
     }
 
     /// Ritrova la posizione attuale del file di una riga, con salvaguardia anti riuso-inode.
-    private func resolve(_ row: FileRow) -> RowResolution {
+    nonisolated private static func resolve(_ row: FileRow) -> RowResolution {
         let fm = FileManager.default
 
         // 1) Bookmark: àncora autorevole (segue spostamenti/rinomini, anche tra volumi).
@@ -490,7 +509,7 @@ final class MetadataStore: ObservableObject {
             var stale = false
             if let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale),
                fm.fileExists(atPath: url.path) {
-                let newIdentity = Self.computeIdentity(for: url)
+                let newIdentity = computeIdentity(for: url)
                 if let newIdentity, newIdentity != row.identity {
                     return .relocated(url)
                 }
@@ -501,11 +520,11 @@ final class MetadataStore: ObservableObject {
         // 2) Fallback sull'ultimo percorso noto.
         if fm.fileExists(atPath: row.lastKnownPath) {
             let url = URL(fileURLWithPath: row.lastKnownPath)
-            let newIdentity = Self.computeIdentity(for: url)
+            let newIdentity = computeIdentity(for: url)
             if let newIdentity, newIdentity != row.identity {
                 // Stesso percorso ma inode diverso: potrebbe essere un altro file (inode riusato).
                 // Riaggancio solo se nome E dimensione coincidono con quanto memorizzato.
-                let current = Self.nameAndSize(for: url)
+                let current = nameAndSize(for: url)
                 if current.name == row.name, current.size == row.size {
                     return .relocated(url)
                 }
@@ -514,7 +533,20 @@ final class MetadataStore: ObservableObject {
             return .present(url)
         }
 
+        if !Self.isContainingVolumeAvailable(path: row.lastKnownPath) {
+            return .volumeUnavailable
+        }
+
         return .missing
+    }
+
+    /// Per i percorsi sotto /Volumes distingue un file cancellato da un volume non montato.
+    /// I percorsi sul disco di avvio sono sempre considerati disponibili.
+    nonisolated private static func isContainingVolumeAvailable(path: String) -> Bool {
+        let components = URL(fileURLWithPath: path).standardizedFileURL.pathComponents
+        guard components.count >= 3, components[1] == "Volumes" else { return true }
+        let mount = URL(fileURLWithPath: "/Volumes").appendingPathComponent(components[2]).path
+        return FileManager.default.fileExists(atPath: mount)
     }
 
     /// Evita riconciliazioni sovrapposte (es. raffiche di eventi FSEvents).
@@ -542,30 +574,39 @@ final class MetadataStore: ObservableObject {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             // `resolve` è puro filesystem (bookmark, stat): nessuno stato del DB toccato.
-            let resolutions = rows.map { row in (row, self.resolve(row)) }
+            let resolutions = rows.map { row in (row, Self.resolve(row)) }
 
             DispatchQueue.main.async {
                 var relocated = 0
                 var missingIdentities: [String] = []
+                var requiresMetadataReload = false
 
-                for (row, resolution) in resolutions {
-                    switch resolution {
-                    case .present(let url):
-                        if url.path != row.lastKnownPath {
+                do {
+                    try self.execute("BEGIN IMMEDIATE TRANSACTION")
+                    for (row, resolution) in resolutions {
+                        switch resolution {
+                        case .present(let url):
+                            if url.path != row.lastKnownPath { relocated += 1 }
+                            self.updateTracking(row, to: url)
+                        case .relocated(let url):
+                            _ = try? self.reconcileMovedItem(previousIdentity: row.identity, newURL: url, refreshingState: false)
                             relocated += 1
+                            requiresMetadataReload = true
+                        case .missing:
+                            missingIdentities.append(row.identity)
+                        case .volumeUnavailable:
+                            break
                         }
-                        self.updateTracking(row, to: url)
-                    case .relocated(let url):
-                        // La refresh completa avviene una sola volta a fine ciclo.
-                        _ = try? self.reconcileMovedItem(previousIdentity: row.identity, newURL: url, refreshingState: false)
-                        relocated += 1
-                    case .missing:
-                        missingIdentities.append(row.identity)
                     }
+                    try self.execute("COMMIT")
+                } catch {
+                    try? self.execute("ROLLBACK")
                 }
 
                 self.identityCacheByPath.removeAll()
-                self.refreshPublishedState()
+                // I semplici aggiornamenti di path/bookmark non cambiano campi o valori in
+                // memoria. Ricarica l'intero metadata store solo quando è cambiata un'identità.
+                if requiresMetadataReload { self.refreshPublishedState() }
                 self.isReconciling = false
                 completion(relocated, missingIdentities)
             }
@@ -576,7 +617,7 @@ final class MetadataStore: ObservableObject {
     func orphanedIdentities() -> [String] {
         let rows = (try? loadFileRows()) ?? []
         return rows.compactMap { row in
-            if case .missing = resolve(row) { return row.identity }
+            if case .missing = Self.resolve(row) { return row.identity }
             return nil
         }
     }
@@ -678,14 +719,14 @@ final class MetadataStore: ObservableObject {
         return rows
     }
 
-    private static func computeIdentity(for url: URL) -> String? {
+    nonisolated private static func computeIdentity(for url: URL) -> String? {
         guard let values = try? url.resourceValues(forKeys: [.fileResourceIdentifierKey, .volumeIdentifierKey]) else {
             return nil
         }
         return identity(for: url, resourceValues: values)
     }
 
-    private static func nameAndSize(for url: URL) -> (name: String, size: Int64?) {
+    nonisolated private static func nameAndSize(for url: URL) -> (name: String, size: Int64?) {
         let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
         return (url.lastPathComponent, size)
     }
@@ -702,13 +743,25 @@ final class MetadataStore: ObservableObject {
     func backup(to destinationURL: URL) throws {
         flushPendingWrites()
 
-        // Un file preesistente verrebbe aperto e "unito": lo rimuoviamo per ripartire pulito
-        // (rimuovo anche eventuali sidecar WAL/SHM di un backup interrotto in passato).
         let fm = FileManager.default
-        try? fm.removeItem(at: destinationURL)
-        try? fm.removeItem(at: URL(fileURLWithPath: destinationURL.path + "-wal"))
-        try? fm.removeItem(at: URL(fileURLWithPath: destinationURL.path + "-shm"))
+        let temporaryURL = destinationURL
+            .deletingLastPathComponent()
+            .appendingPathComponent(".\(destinationURL.lastPathComponent).\(UUID().uuidString).tmp")
+        defer { try? fm.removeItem(at: temporaryURL) }
 
+        try writeSQLiteBackup(to: temporaryURL)
+        try validateBackup(at: temporaryURL)
+
+        // Pubblicazione atomica: un crash durante la copia non può lasciare al posto del backup
+        // precedente un file troncato. Il rename sullo stesso volume è atomico.
+        if fm.fileExists(atPath: destinationURL.path) {
+            _ = try fm.replaceItemAt(destinationURL, withItemAt: temporaryURL)
+        } else {
+            try fm.moveItem(at: temporaryURL, to: destinationURL)
+        }
+    }
+
+    private func writeSQLiteBackup(to destinationURL: URL) throws {
         var destDB: OpaquePointer?
         guard sqlite3_open(destinationURL.path, &destDB) == SQLITE_OK else {
             let message = destDB.map { String(cString: sqlite3_errmsg($0)) } ?? "Impossibile aprire il file di destinazione"
@@ -997,7 +1050,7 @@ final class MetadataStore: ObservableObject {
     private func refreshPublishedState() {
         notifyMetadataChanged(immediate: true)
         fieldsByFolder = (try? loadFields()) ?? [:]
-        metadataByFileIdentity = (try? loadMetadata()) ?? [:]
+        metadataByFileIdentity = (try? loadMetadata(identities: activeMetadataIdentities)) ?? [:]
     }
 
     private func loadFields() throws -> [String: [MetadataField]] {
@@ -1032,10 +1085,16 @@ final class MetadataStore: ObservableObject {
         return result
     }
 
-    private func loadMetadata() throws -> [String: FileMetadata] {
+    private func loadMetadata(identities: Set<String>) throws -> [String: FileMetadata] {
+        guard !identities.isEmpty else { return [:] }
+        try prepareIdentityTable(name: "active_metadata_identities", identities: identities)
         var result: [String: FileMetadata] = [:]
         var statement: OpaquePointer?
-        let sql = "SELECT file_identity, field_id, value FROM metadata_values"
+        let sql = """
+            SELECT mv.file_identity, mv.field_id, mv.value
+            FROM metadata_values mv
+            JOIN temp.active_metadata_identities active ON active.identity = mv.file_identity
+            """
         try prepare(sql, statement: &statement)
         defer { sqlite3_finalize(statement) }
 
@@ -1075,7 +1134,7 @@ final class MetadataStore: ObservableObject {
 
     /// Funzioni pure (statiche, thread-safe) per calcolare l'identità: usabili anche
     /// fuori dal main thread da `FileBrowserService` senza toccare lo stato del DB.
-    static func fileIdentity(fileIdentifier: String, volumeIdentifier: String, path: String) -> String {
+    nonisolated static func fileIdentity(fileIdentifier: String, volumeIdentifier: String, path: String) -> String {
         if !fileIdentifier.isEmpty, !volumeIdentifier.isEmpty {
             return "\(volumeIdentifier):\(fileIdentifier)"
         }
@@ -1083,12 +1142,12 @@ final class MetadataStore: ObservableObject {
         return "path:\(path)"
     }
 
-    static func stableDescription(_ value: Any?) -> String {
+    nonisolated static func stableDescription(_ value: Any?) -> String {
         guard let value else { return "" }
         return String(describing: value)
     }
 
-    static func identity(for fileURL: URL, resourceValues: URLResourceValues) -> String {
+    nonisolated static func identity(for fileURL: URL, resourceValues: URLResourceValues) -> String {
         fileIdentity(
             fileIdentifier: stableDescription(resourceValues.fileResourceIdentifier),
             volumeIdentifier: stableDescription(resourceValues.volumeIdentifier),
@@ -1183,6 +1242,10 @@ final class MetadataStore: ObservableObject {
     /// preserva la varietà di documenti: la selezione finale (diversità, recency, conflitti tra
     /// versioni) è compito del `SourceSelector`.
     func semanticChunks(query: String, queries: [EmbeddingResult], candidates: Set<String>, limit: Int) -> [RetrievedChunk] {
+        let startedAt = CFAbsoluteTimeGetCurrent()
+        defer {
+            Self.performanceLog.debug("semanticChunks candidati=\(candidates.count) durata_ms=\((CFAbsoluteTimeGetCurrent() - startedAt) * 1000, format: .fixed(precision: 1))")
+        }
         // Vettori della query indicizzati per spazio (provider_id → vettore + norma).
         var queryBySpace: [String: (vector: [Float], norm: Float)] = [:]
         for q in queries where !q.vector.isEmpty {
@@ -1193,6 +1256,7 @@ final class MetadataStore: ObservableObject {
         // Senza né vettori-query né parole chiave non c'è nulla da recuperare.
         guard !queryBySpace.isEmpty || !terms.isEmpty else { return [] }
 
+        if !candidates.isEmpty, !prepareSemanticCandidates(candidates) { return [] }
         var statement: OpaquePointer?
         // Nessun prefiltro su provider/dimensione: si caricano i chunk di TUTTI gli spazi, così i
         // documenti in una lingua diversa dalla domanda restano raggiungibili (semantica se possibile,
@@ -1202,6 +1266,7 @@ final class MetadataStore: ObservableObject {
             FROM chunk_vectors v
             JOIN content_chunks c ON c.id = v.chunk_id
             JOIN files f ON f.identity = c.file_identity
+            \(candidates.isEmpty ? "" : "JOIN temp.semantic_candidates sc ON sc.identity = c.file_identity")
             """
         guard (try? prepare(sql, statement: &statement)) != nil else { return [] }
         defer { sqlite3_finalize(statement) }
@@ -1218,7 +1283,6 @@ final class MetadataStore: ObservableObject {
         var totalChunks = 0
         while sqlite3_step(statement) == SQLITE_ROW {
             let identity = columnText(statement, 0)
-            if !candidates.isEmpty, !candidates.contains(identity) { continue }
             let name = columnText(statement, 2)
             let text = columnText(statement, 3)
             let providerID = columnText(statement, 4)
@@ -1376,8 +1440,10 @@ final class MetadataStore: ObservableObject {
     /// file nella tabella `files` (necessario per la foreign key) senza toccare il percorso
     /// caldo di navigazione.
     func storeExtractedText(for item: FileItem, text: String, ocrUsed: Bool, hash: String) {
-        _ = try? registerFile(at: item.url)
-        try? execute(
+        do {
+            _ = try registerFile(at: item.url)
+            try execute("BEGIN IMMEDIATE TRANSACTION")
+            try execute(
             """
             INSERT INTO file_content (file_identity, extracted_text, ocr_used, content_hash, extracted_at, index_state)
             VALUES (?, ?, ?, ?, ?, 'indexed')
@@ -1396,11 +1462,60 @@ final class MetadataStore: ObservableObject {
                 .real(Date().timeIntervalSince1970)
             ]
         )
-        try? execute("DELETE FROM content_fts WHERE file_identity = ?", bindings: [.text(item.identity)])
-        try? execute(
-            "INSERT INTO content_fts (file_identity, name, body) VALUES (?, ?, ?)",
-            bindings: [.text(item.identity), .text(item.name), .text(text)]
-        )
+            try execute("DELETE FROM content_fts WHERE file_identity = ?", bindings: [.text(item.identity)])
+            try execute(
+                "INSERT INTO content_fts (file_identity, name, body) VALUES (?, ?, ?)",
+                bindings: [.text(item.identity), .text(item.name), .text(text)]
+            )
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+        }
+    }
+
+    /// Commit atomico dell'intero risultato di indicizzazione. Testo, FTS, chunk e vettori
+    /// diventano visibili insieme; un errore non lascia un indice misto tra vecchia e nuova versione.
+    func storeIndexedContent(
+        for item: FileItem,
+        text: String,
+        ocrUsed: Bool,
+        hash: String,
+        chunks: [(ordinal: Int, text: String, providerID: String, vector: [Float])]
+    ) {
+        do {
+            _ = try registerFile(at: item.url)
+            try execute("BEGIN IMMEDIATE TRANSACTION")
+            try execute(
+                """
+                INSERT INTO file_content (file_identity, extracted_text, ocr_used, content_hash, extracted_at, index_state)
+                VALUES (?, ?, ?, ?, ?, 'indexed')
+                ON CONFLICT(file_identity) DO UPDATE SET
+                    extracted_text = excluded.extracted_text,
+                    ocr_used = excluded.ocr_used,
+                    content_hash = excluded.content_hash,
+                    extracted_at = excluded.extracted_at,
+                    index_state = 'indexed'
+                """,
+                bindings: [.text(item.identity), .text(text), .int(ocrUsed ? 1 : 0), .text(hash), .real(Date().timeIntervalSince1970)]
+            )
+            try execute("DELETE FROM content_fts WHERE file_identity = ?", bindings: [.text(item.identity)])
+            try execute("INSERT INTO content_fts (file_identity, name, body) VALUES (?, ?, ?)", bindings: [.text(item.identity), .text(item.name), .text(text)])
+            try execute("DELETE FROM content_chunks WHERE file_identity = ?", bindings: [.text(item.identity)])
+            for chunk in chunks {
+                try execute(
+                    "INSERT INTO content_chunks (file_identity, ordinal, text) VALUES (?, ?, ?)",
+                    bindings: [.text(item.identity), .int(chunk.ordinal), .text(chunk.text)]
+                )
+                let chunkID = sqlite3_last_insert_rowid(db)
+                try execute(
+                    "INSERT INTO chunk_vectors (chunk_id, provider_id, dimension, vector, norm) VALUES (?, ?, ?, ?, ?)",
+                    bindings: [.int(Int(chunkID)), .text(chunk.providerID), .int(chunk.vector.count), .blob(Self.data(from: chunk.vector)), .real(Double(Self.norm(chunk.vector)))]
+                )
+            }
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+        }
     }
 
     /// Marca un file come non supportato (nessun testo estraibile) salvando comunque l'hash,
@@ -1472,7 +1587,7 @@ final class MetadataStore: ObservableObject {
     /// Parole "vuote" (articoli, preposizioni, congiunzioni, ausiliari e parole interrogative) in
     /// italiano e inglese: vengono scartate dai termini significativi così la domanda in linguaggio
     /// naturale non pesa il retrieval su parole senza contenuto ("quali sono i…", "what is the…").
-    private static let queryStopwords: Set<String> = [
+    nonisolated private static let queryStopwords: Set<String> = [
         // Italiano — articoli, preposizioni (semplici e articolate), congiunzioni
         "il", "lo", "la", "gli", "le", "un", "uno", "una", "di", "del", "dello", "della", "dei",
         "degli", "delle", "al", "allo", "alla", "ai", "agli", "alle", "da", "dal", "dallo", "dalla",
@@ -1495,7 +1610,7 @@ final class MetadataStore: ObservableObject {
     /// Estrae i termini "significativi" da una domanda: token alfanumerici, minuscoli, distinti,
     /// lunghi almeno 2 caratteri e non presenti tra le stopword. Serve a capire di cosa parla la
     /// domanda per pesare la pertinenza lessicale del retrieval (non solo la vicinanza vettoriale).
-    static func meaningfulTerms(from raw: String) -> [String] {
+    nonisolated static func meaningfulTerms(from raw: String) -> [String] {
         var seen = Set<String>()
         var terms: [String] = []
         for token in raw.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted) {
@@ -1556,17 +1671,23 @@ final class MetadataStore: ObservableObject {
 
     /// Sostituisce i chunk e i vettori di un file (elimina i precedenti in cascata, poi inserisce).
     func replaceChunks(for identity: String, chunks: [(ordinal: Int, text: String, providerID: String, vector: [Float])]) {
-        try? execute("DELETE FROM content_chunks WHERE file_identity = ?", bindings: [.text(identity)])
-        for chunk in chunks {
-            try? execute(
+        do {
+            try execute("BEGIN IMMEDIATE TRANSACTION")
+            try execute("DELETE FROM content_chunks WHERE file_identity = ?", bindings: [.text(identity)])
+            for chunk in chunks {
+                try execute(
                 "INSERT INTO content_chunks (file_identity, ordinal, text) VALUES (?, ?, ?)",
                 bindings: [.text(identity), .int(chunk.ordinal), .text(chunk.text)]
-            )
-            let chunkID = sqlite3_last_insert_rowid(db)
-            try? execute(
+                )
+                let chunkID = sqlite3_last_insert_rowid(db)
+                try execute(
                 "INSERT INTO chunk_vectors (chunk_id, provider_id, dimension, vector, norm) VALUES (?, ?, ?, ?, ?)",
                 bindings: [.int(Int(chunkID)), .text(chunk.providerID), .int(chunk.vector.count), .blob(Self.data(from: chunk.vector)), .real(Double(Self.norm(chunk.vector)))]
-            )
+                )
+            }
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
         }
     }
 
@@ -1574,13 +1695,19 @@ final class MetadataStore: ObservableObject {
     /// stesso `providerID`, limitando ai file candidati. Ritorna un punteggio per file (il migliore
     /// tra i suoi chunk), ordinato dal più simile, con `limit` risultati.
     func semanticSearch(queryVector: [Float], providerID: String, candidates: Set<String>, limit: Int) -> [(identity: String, score: Float)] {
+        let startedAt = CFAbsoluteTimeGetCurrent()
+        defer {
+            Self.performanceLog.debug("semanticSearch candidati=\(candidates.count) durata_ms=\((CFAbsoluteTimeGetCurrent() - startedAt) * 1000, format: .fixed(precision: 1))")
+        }
         guard !queryVector.isEmpty, !candidates.isEmpty else { return [] }
 
         var statement: OpaquePointer?
+        guard prepareSemanticCandidates(candidates) else { return [] }
         let sql = """
             SELECT c.file_identity, v.vector, v.norm
             FROM chunk_vectors v
             JOIN content_chunks c ON c.id = v.chunk_id
+            JOIN temp.semantic_candidates sc ON sc.identity = c.file_identity
             WHERE v.provider_id = ? AND v.dimension = ?
             """
         guard (try? prepare(sql, statement: &statement)) != nil else { return [] }
@@ -1593,7 +1720,7 @@ final class MetadataStore: ObservableObject {
         var bestByFile: [String: Float] = [:]
         while sqlite3_step(statement) == SQLITE_ROW {
             let identity = columnText(statement, 0)
-            guard candidates.contains(identity), let blob = columnBlob(statement, 1) else { continue }
+            guard let blob = columnBlob(statement, 1) else { continue }
             let vector = Self.floats(from: blob)
             guard vector.count == queryVector.count else { continue }
             let storedNorm = Float(sqlite3_column_double(statement, 2))
@@ -1700,6 +1827,34 @@ private enum StoreError: Error {
 }
 
 private extension MetadataStore {
+    /// Popola una tabella temporanea indicizzata per spostare il filtro dei candidati dentro
+    /// SQLite. Evita di leggere e deserializzare vettori appartenenti ad altre cartelle.
+    func prepareSemanticCandidates(_ identities: Set<String>) -> Bool {
+        do {
+            try prepareIdentityTable(name: "semantic_candidates", identities: identities)
+            return true
+        } catch {
+            try? execute("ROLLBACK")
+            return false
+        }
+    }
+
+    func prepareIdentityTable(name: String, identities: Set<String>) throws {
+        // `name` proviene esclusivamente da costanti interne, mai da input utente.
+        try execute("CREATE TEMP TABLE IF NOT EXISTS \(name) (identity TEXT PRIMARY KEY) WITHOUT ROWID")
+        try execute("DELETE FROM temp.\(name)")
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            for identity in identities {
+                try execute("INSERT INTO temp.\(name)(identity) VALUES (?)", bindings: [.text(identity)])
+            }
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
     var lastErrorMessage: String {
         if let db, let message = sqlite3_errmsg(db) {
             return String(cString: message)

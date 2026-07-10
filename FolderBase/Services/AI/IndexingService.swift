@@ -231,14 +231,21 @@ final class IndexingService: ObservableObject {
                     }.value
 
                     if let (extracted, build) = result {
-                        // Salva sempre il testo (indice full-text) anche se l'embedding fallisce.
-                        store.storeExtractedText(for: item, text: extracted.text, ocrUsed: extracted.ocrUsed, hash: effectiveHash)
                         // I vettori si scrivono solo se l'embedder ha risposto: così un errore
                         // transitorio (rate-limit, rete) non cancella eventuali vettori esistenti
                         // e il file verrà riprovato al prossimo reindex.
                         if !build.embedderFailed {
-                            store.replaceChunks(for: item.identity, chunks: build.vectors)
+                            store.storeIndexedContent(
+                                for: item,
+                                text: extracted.text,
+                                ocrUsed: extracted.ocrUsed,
+                                hash: effectiveHash,
+                                chunks: build.vectors
+                            )
                         } else {
+                            // Il testo/FTS resta comunque disponibile; i vettori precedenti non
+                            // vengono cancellati in caso di errore transitorio del provider.
+                            store.storeExtractedText(for: item, text: extracted.text, ocrUsed: extracted.ocrUsed, hash: effectiveHash)
                             recordEmbeddingFailure(fileName: item.name)
                         }
                     } else {

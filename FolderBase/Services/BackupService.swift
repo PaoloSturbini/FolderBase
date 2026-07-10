@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import OSLog
 
 /// Coordina i backup del database SQLite di [MetadataStore]: backup manuale su richiesta,
 /// backup automatico a intervalli configurabili con rotazione dei file più vecchi, e
@@ -8,7 +9,9 @@ import Combine
 /// Le impostazioni sono persistite in `UserDefaults` (l'app non è sandboxed, quindi il
 /// percorso della cartella di destinazione è sufficiente, senza security-scoped bookmark).
 /// Il riferimento a [MetadataStore] è debole e viene impostato all'avvio da MainWindowView.
+@MainActor
 final class BackupService: ObservableObject {
+    private static let log = Logger(subsystem: "com.paolosturbini.folderbase", category: "Backup")
     private enum Keys {
         static let destination = "backupDestinationPath"
         static let autoEnabled = "autoBackupEnabled"
@@ -64,6 +67,7 @@ final class BackupService: ObservableObject {
 
     private weak var store: MetadataStore?
     private var timer: Timer?
+    private var backupInProgress = false
 
     init() {
         let defaults = UserDefaults.standard
@@ -93,7 +97,7 @@ final class BackupService: ObservableObject {
         timer?.invalidate()
         // Controllo periodico leggero: il backup parte solo se è trascorso l'intervallo.
         let checkTimer = Timer(timeInterval: 15 * 60, repeats: true) { [weak self] _ in
-            self?.performAutoBackupIfDue()
+            Task { @MainActor in self?.performAutoBackupIfDue() }
         }
         RunLoop.main.add(checkTimer, forMode: .common)
         timer = checkTimer
@@ -106,7 +110,11 @@ final class BackupService: ObservableObject {
            Date().timeIntervalSince(last) < Double(intervalHours) * 3600 {
             return
         }
-        _ = try? runBackup(auto: true)
+        do {
+            _ = try runBackup(auto: true)
+        } catch {
+            Self.log.error("Backup automatico fallito: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Esegue un backup del database nella cartella configurata.
@@ -116,6 +124,9 @@ final class BackupService: ObservableObject {
     func runBackup(auto: Bool) throws -> URL {
         guard let store else { throw BackupError.notReady }
         guard !destinationPath.isEmpty else { throw BackupError.noDestination }
+        guard !backupInProgress else { throw BackupError.notReady }
+        backupInProgress = true
+        defer { backupInProgress = false }
 
         let folder = URL(fileURLWithPath: destinationPath)
         var isDirectory: ObjCBool = false

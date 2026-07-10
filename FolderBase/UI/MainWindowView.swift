@@ -33,6 +33,9 @@ struct MainWindowView: View {
     @State private var managedWatcher: FSEventsWatcher?
     @State private var treeRefreshID = UUID()
     @State private var isLoading = false
+    /// Lettura della cartella corrente: cancellata quando l'utente naviga altrove, così una
+    /// directory lenta non continua a consumare I/O dopo essere diventata irrilevante.
+    @State private var folderLoadTask: Task<Void, Never>?
     /// Popolato all'avvio (se il controllo automatico è attivo) quando GitHub segnala una
     /// versione più recente: pilota l'alert che propone di scaricarla.
     @State private var availableUpdate: AvailableUpdate?
@@ -316,36 +319,41 @@ struct MainWindowView: View {
     /// filesystem può essere lenta) e aggiorna la UI sul main thread. Un guard scarta
     /// i risultati arrivati in ritardo se nel frattempo si è navigato altrove.
     private func fetchItems(at url: URL, refreshTree: Bool) {
+        folderLoadTask?.cancel()
         isLoading = true
         let includeHidden = showHiddenFiles
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            let outcome: (items: [FileItem]?, error: String?)
-            do {
-                outcome = (try FileBrowserService().contentsOfDirectory(at: url, showHiddenFiles: includeHidden), nil)
-            } catch {
-                outcome = (nil, error.localizedDescription)
-            }
-
-            DispatchQueue.main.async {
-                guard self.selectedFolderURL == url else { return }
-
-                // Aggiornamento senza animazioni: evita artefatti di transizione del
-                // NavigationSplitView (sovrapposizioni) durante la navigazione/back.
-                var transaction = Transaction()
-                transaction.disablesAnimations = true
-                withTransaction(transaction) {
-                    if let loaded = outcome.items {
-                        self.items = loaded
-                        self.errorMessage = nil
-                    } else {
-                        self.items = []
-                        self.errorMessage = outcome.error
-                    }
-
-                    if refreshTree { self.treeRefreshID = UUID() }
-                    self.isLoading = false
+        folderLoadTask = Task {
+            let worker = Task.detached(priority: .userInitiated) { () -> (items: [FileItem]?, error: String?) in
+                guard !Task.isCancelled else { return (nil, nil) }
+                do {
+                    return (try FileBrowserService().contentsOfDirectory(at: url, showHiddenFiles: includeHidden), nil)
+                } catch {
+                    return (nil, error.localizedDescription)
                 }
+            }
+            let outcome = await withTaskCancellationHandler {
+                await worker.value
+            } onCancel: {
+                worker.cancel()
+            }
+            guard !Task.isCancelled, selectedFolderURL == url else { return }
+
+            // Aggiornamento senza animazioni: evita artefatti di transizione durante la navigazione.
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                if let loaded = outcome.items {
+                    items = loaded
+                    metadataStore.loadMetadata(for: loaded)
+                    errorMessage = nil
+                } else if let error = outcome.error {
+                    items = []
+                    errorMessage = error
+                }
+
+                if refreshTree { treeRefreshID = UUID() }
+                isLoading = false
             }
         }
     }
