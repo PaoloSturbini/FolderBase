@@ -1,0 +1,38 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Resolve dependencies
+        run: swift package resolve
+
+      - name: Build release configuration
+        run: swift build -c release --build-path /tmp/folderbase-ci-build
+
+      - name: Run tests when a test target exists
+        shell: bash
+        run: |
+          if swift package describe --type json | grep -q '"type" : "test"'; then
+            swift test --build-path /tmp/folderbase-ci-tests
+          else
+            echo "No Swift test target is currently defined; build validation completed."
+          fi
