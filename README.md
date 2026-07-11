@@ -1,5 +1,9 @@
 # FolderBase
 
+<p align="center">
+  <img src="AppIcon.png" alt="FolderBase app icon" width="128">
+</p>
+
 **A local-first, metadata-first document manager for macOS.**
 
 [![Build](https://github.com/PaoloSturbini/FolderBase/actions/workflows/ci.yml/badge.svg)](https://github.com/PaoloSturbini/FolderBase/actions/workflows/ci.yml)
@@ -8,9 +12,11 @@
 [![macOS 14.4+](https://img.shields.io/badge/macOS-14.4%2B-black)](https://www.apple.com/macos/)
 [![Swift 5.9+](https://img.shields.io/badge/Swift-5.9%2B-orange)](https://www.swift.org/)
 
-FolderBase enriches the real files and folders already stored on your Mac with custom metadata, Kanban views, OCR, hybrid search and optional AI document chat—without importing, moving or modifying the originals.
+FolderBase enriches the real files and folders already stored on your Mac with custom metadata, Kanban views, OCR, hybrid search and optional AI document chat. Its metadata layer works without importing your documents into a proprietary library or modifying their contents.
 
 The interface is available in **English and Italian**. FolderBase is MIT licensed and can be used, inspected, forked and built freely.
+
+**[Visit the website and watch the demo](https://folderbase.pst.my)** · **[Download the latest release](https://github.com/PaoloSturbini/FolderBase/releases/latest)**
 
 > 🇮🇹 Per la documentazione italiana completa, consulta [MANUALE.md](MANUALE.md).
 
@@ -72,9 +78,9 @@ FolderBase takes a different approach:
 
 When OpenAI is selected, prompts and relevant document excerpts are sent to OpenAI. For more detail, read [docs/PRIVACY.md](docs/PRIVACY.md).
 
-## Screenshots and demo
+## See FolderBase in action
 
-Screenshots and a short demonstration GIF are being prepared. Contributions that improve the visual documentation are welcome.
+The [FolderBase website](https://folderbase.pst.my) includes a short product demo showing the native macOS interface, metadata columns and document workflow.
 
 ## Download
 
