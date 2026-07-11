@@ -11,7 +11,7 @@ body:
     id: version
     attributes:
       label: FolderBase version
-      placeholder: "1.5.1"
+      placeholder: "1.5.2"
     validations:
       required: true
   - type: input

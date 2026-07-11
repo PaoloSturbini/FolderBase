@@ -39,8 +39,8 @@ cat > "${APP}/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key>         <string>${BUNDLE_ID}</string>
     <key>CFBundleExecutable</key>         <string>${APP_NAME}</string>
     <key>CFBundlePackageType</key>        <string>APPL</string>
-    <key>CFBundleShortVersionString</key> <string>1.5.1</string>
-    <key>CFBundleVersion</key>            <string>8</string>
+    <key>CFBundleShortVersionString</key> <string>1.5.2</string>
+    <key>CFBundleVersion</key>            <string>9</string>
     <key>CFBundleIconFile</key>           <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>     <string>14.4</string>
     <key>NSHighResolutionCapable</key>    <true/>
