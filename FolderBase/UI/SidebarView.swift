@@ -1344,13 +1344,15 @@ struct SidebarView: View {
     }
 
     private func runManualBackup() {
-        do {
-            let url = try backupService.runBackup(auto: false)
-            backupFailed = false
-            backupMessage = "\(L("backup.donePrefix")) \(url.lastPathComponent)"
-        } catch {
-            backupFailed = true
-            backupMessage = "\(L("backup.errorPrefix")) \(error.localizedDescription)"
+        Task {
+            do {
+                let url = try await backupService.runBackup(auto: false)
+                backupFailed = false
+                backupMessage = "\(L("backup.donePrefix")) \(url.lastPathComponent)"
+            } catch {
+                backupFailed = true
+                backupMessage = "\(L("backup.errorPrefix")) \(error.localizedDescription)"
+            }
         }
     }
 
@@ -1368,13 +1370,15 @@ struct SidebarView: View {
     }
 
     private func performRestore(from url: URL) {
-        do {
-            try backupService.restore(from: url)
-            backupFailed = false
-            backupMessage = L("backup.restore.done")
-        } catch {
-            backupFailed = true
-            backupMessage = "\(L("backup.errorPrefix")) \(error.localizedDescription)"
+        Task {
+            do {
+                try await backupService.restore(from: url)
+                backupFailed = false
+                backupMessage = L("backup.restore.done")
+            } catch {
+                backupFailed = true
+                backupMessage = "\(L("backup.errorPrefix")) \(error.localizedDescription)"
+            }
         }
     }
 

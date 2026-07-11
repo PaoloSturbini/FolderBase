@@ -132,15 +132,15 @@ final class IndexingService: ObservableObject {
         }.value
         guard !fingerprints.isEmpty else { return .notIndexed }
 
-        let indexed = store.indexedHashes()
+        let indexed = await store.indexedHashes()
         // File senza testo estraibile (es. .xls legacy, .html vuoti, immagini senza testo): sono
         // stati processati, non c'è altro da fare → vanno contati come "coperti", altrimenti
         // tengono la cartella arancione per sempre pur essendo a posto.
-        let unsupported = store.unsupportedHashes()
+        let unsupported = await store.unsupportedHashes()
         // Un file è "aggiornato" se il testo è indicizzato (hash combacia) E ha embedding per il
         // MOTORE ATTUALE: cambiando provider i vettori non sono compatibili → arancione finché non
         // si reindicizza.
-        let vectorized = store.identitiesWithVectors(providerPrefix: Self.activeProviderPrefix())
+        let vectorized = await store.identitiesWithVectors(providerPrefix: Self.activeProviderPrefix())
         var textIndexed = 0
         var upToDate = 0
         for fingerprint in fingerprints {
@@ -198,15 +198,16 @@ final class IndexingService: ObservableObject {
             let url = item.url
             let hash = Self.changeHash(for: url)
             let effectiveHash = hash ?? UUID().uuidString
-            let upToDate = (hash != nil && store.contentHash(for: item.identity) == hash)
+            let storedHash = hash == nil ? nil : await store.contentHash(for: item.identity)
+            let upToDate = hash != nil && storedHash == hash
 
-            if upToDate, store.hasVectors(for: item.identity, providerPrefix: providerPrefix) {
+            if upToDate, await store.hasVectors(for: item.identity, providerPrefix: providerPrefix) {
                 processed += 1
                 progress = Progress(processed: processed, total: total)
                 continue
             }
 
-            if upToDate, let existingText = store.extractedText(for: item.identity) {
+            if upToDate, let existingText = await store.extractedText(for: item.identity) {
                 // Testo già estratto: rigenera solo gli embedding, senza ri-estrarre né ri-OCR.
                 let build = await Task.detached(priority: .utility) {
                     await Self.buildChunkVectors(from: existingText, embedder: embedder)
@@ -215,14 +216,14 @@ final class IndexingService: ObservableObject {
                 // vettori già salvati: il file resterà da reindicizzare e verrà riprovato, invece
                 // di perdere il lavoro fatto.
                 if !build.embedderFailed {
-                    store.replaceChunks(for: item.identity, chunks: build.vectors)
+                    await store.replaceChunks(for: item.identity, chunks: build.vectors)
                 } else {
                     recordEmbeddingFailure(fileName: item.name)
                 }
             } else {
                 let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
                 if size > maxFileSize {
-                    store.markContentUnsupported(for: item, hash: effectiveHash)
+                    await store.markContentUnsupported(for: item, hash: effectiveHash)
                 } else {
                     let result = await Task.detached(priority: .utility) { () -> (ExtractedText, ChunkBuild)? in
                         guard let extracted = TextExtractor.extractText(from: url),
@@ -235,7 +236,7 @@ final class IndexingService: ObservableObject {
                         // transitorio (rate-limit, rete) non cancella eventuali vettori esistenti
                         // e il file verrà riprovato al prossimo reindex.
                         if !build.embedderFailed {
-                            store.storeIndexedContent(
+                            await store.storeIndexedContent(
                                 for: item,
                                 text: extracted.text,
                                 ocrUsed: extracted.ocrUsed,
@@ -245,11 +246,11 @@ final class IndexingService: ObservableObject {
                         } else {
                             // Il testo/FTS resta comunque disponibile; i vettori precedenti non
                             // vengono cancellati in caso di errore transitorio del provider.
-                            store.storeExtractedText(for: item, text: extracted.text, ocrUsed: extracted.ocrUsed, hash: effectiveHash)
+                            await store.storeExtractedText(for: item, text: extracted.text, ocrUsed: extracted.ocrUsed, hash: effectiveHash)
                             recordEmbeddingFailure(fileName: item.name)
                         }
                     } else {
-                        store.markContentUnsupported(for: item, hash: effectiveHash)
+                        await store.markContentUnsupported(for: item, hash: effectiveHash)
                     }
                 }
             }

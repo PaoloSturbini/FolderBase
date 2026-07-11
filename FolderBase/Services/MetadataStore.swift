@@ -1,6 +1,7 @@
 import Foundation
 import SQLite3
 import Accelerate
+import Combine
 import OSLog
 
 struct FileMetadata: Codable, Equatable {
@@ -26,10 +27,12 @@ final class MetadataStore: ObservableObject {
     /// `notifyMetadataChanged`) così le modifiche "per tasto" vengono coalizzate invece
     /// di invalidare l'intera tabella a ogni carattere digitato.
     private(set) var metadataByFileIdentity: [String: FileMetadata] = [:]
+    let metadataChanges = PassthroughSubject<Set<String>, Never>()
 
     private let dbURL: URL
     private let legacyMetadataURL: URL
     private var db: OpaquePointer?
+    private var databaseActor: SQLiteDatabaseActor?
 
     /// Cache path → identity per evitare di calcolare/registrare l'identità sul disco
     /// nei percorsi di sola lettura (chiamati ad ogni render di SwiftUI).
@@ -42,6 +45,7 @@ final class MetadataStore: ObservableObject {
 
     /// Notifica posticipata a SwiftUI per i cambi metadata (vedi `notifyMetadataChanged`).
     private var pendingChangeNotification: DispatchWorkItem?
+    private var pendingChangedIdentities: Set<String> = []
     private let notifyDebounce: TimeInterval = 0.2
 
     /// Identità già presenti nella tabella `files`: evita di registrare di nuovo file noti.
@@ -69,6 +73,7 @@ final class MetadataStore: ObservableObject {
             try migrateLegacyJSONIfNeeded()
             registeredIdentities = (try? loadRegisteredIdentities()) ?? []
             refreshPublishedState()
+            databaseActor = try SQLiteDatabaseActor(url: dbURL)
         } catch {
             assertionFailure("Failed to initialize metadata store: \(error)")
             fieldsByFolder = [:]
@@ -171,8 +176,13 @@ final class MetadataStore: ObservableObject {
         let identities = Set(items.map(\.identity))
         guard identities != activeMetadataIdentities else { return }
         activeMetadataIdentities = identities
-        metadataByFileIdentity = (try? loadMetadata(identities: identities)) ?? [:]
-        notifyMetadataChanged(immediate: true)
+        guard let databaseActor else { return }
+        Task { [weak self] in
+            let loaded = (try? await databaseActor.loadMetadata(identities: identities)) ?? [:]
+            guard let self, self.activeMetadataIdentities == identities else { return }
+            self.metadataByFileIdentity = loaded
+            self.notifyMetadataChanged(immediate: true)
+        }
     }
 
     func value(for item: FileItem, field: MetadataField) -> String {
@@ -185,6 +195,7 @@ final class MetadataStore: ObservableObject {
     func update(item: FileItem, field: MetadataField, value: String) {
         ensureRegistered(item)
         setInMemoryValue(identity: item.identity, fieldID: field.id, value: value)
+        pendingChangedIdentities.insert(item.identity)
         scheduleWrite(identity: item.identity, fieldID: field.id, value: value)
         notifyMetadataChanged()
     }
@@ -197,14 +208,20 @@ final class MetadataStore: ObservableObject {
         pendingChangeNotification = nil
 
         if immediate {
+            let changed = pendingChangedIdentities
+            pendingChangedIdentities.removeAll()
             objectWillChange.send()
+            if !changed.isEmpty { metadataChanges.send(changed) }
             return
         }
 
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.pendingChangeNotification = nil
+            let changed = self.pendingChangedIdentities
+            self.pendingChangedIdentities.removeAll()
             self.objectWillChange.send()
+            if !changed.isEmpty { self.metadataChanges.send(changed) }
         }
         pendingChangeNotification = work
         DispatchQueue.main.asyncAfter(deadline: .now() + notifyDebounce, execute: work)
@@ -213,6 +230,7 @@ final class MetadataStore: ObservableObject {
     /// Assegna lo stesso valore a più elementi in un'unica transazione (modifica in blocco).
     func updateBulk(items: [FileItem], field: MetadataField, value: String) {
         guard !items.isEmpty else { return }
+        pendingChangedIdentities.formUnion(items.map(\.identity))
 
         notifyMetadataChanged(immediate: true)
         for item in items {
@@ -551,6 +569,7 @@ final class MetadataStore: ObservableObject {
 
     /// Evita riconciliazioni sovrapposte (es. raffiche di eventi FSEvents).
     private var isReconciling = false
+    private var reconcileRequestedWhileRunning = false
 
     /// Riallinea il DB al filesystem: aggiorna percorsi/nomi/bookmark dei file spostati o
     /// rinominati altrove, e raccoglie quelli non più trovabili (orfani). Non cancella nulla.
@@ -560,6 +579,7 @@ final class MetadataStore: ObservableObject {
     /// evento FSEvents. Le letture/scritture del DB restano sul main thread.
     func reconcileManagedFiles(completion: @escaping (_ relocated: Int, _ missingIdentities: [String]) -> Void) {
         guard !isReconciling else {
+            reconcileRequestedWhileRunning = true
             completion(0, [])
             return
         }
@@ -609,6 +629,10 @@ final class MetadataStore: ObservableObject {
                 if requiresMetadataReload { self.refreshPublishedState() }
                 self.isReconciling = false
                 completion(relocated, missingIdentities)
+                if self.reconcileRequestedWhileRunning {
+                    self.reconcileRequestedWhileRunning = false
+                    self.reconcileManagedFiles(completion: completion)
+                }
             }
         }
     }
@@ -740,7 +764,7 @@ final class MetadataStore: ObservableObject {
     /// SQLite: cattura anche il contenuto del WAL non ancora messo in checkpoint, quindi
     /// produce un file autonomo e valido anche mentre l'app è in uso. Prima svuota le
     /// scritture posticipate così il backup include l'ultimo stato in memoria.
-    func backup(to destinationURL: URL) throws {
+    func backup(to destinationURL: URL) async throws {
         flushPendingWrites()
 
         let fm = FileManager.default
@@ -749,7 +773,7 @@ final class MetadataStore: ObservableObject {
             .appendingPathComponent(".\(destinationURL.lastPathComponent).\(UUID().uuidString).tmp")
         defer { try? fm.removeItem(at: temporaryURL) }
 
-        try writeSQLiteBackup(to: temporaryURL)
+        try await writeSQLiteBackup(to: temporaryURL)
         try validateBackup(at: temporaryURL)
 
         // Pubblicazione atomica: un crash durante la copia non può lasciare al posto del backup
@@ -761,7 +785,7 @@ final class MetadataStore: ObservableObject {
         }
     }
 
-    private func writeSQLiteBackup(to destinationURL: URL) throws {
+    private func writeSQLiteBackup(to destinationURL: URL) async throws {
         var destDB: OpaquePointer?
         guard sqlite3_open(destinationURL.path, &destDB) == SQLITE_OK else {
             let message = destDB.map { String(cString: sqlite3_errmsg($0)) } ?? "Impossibile aprire il file di destinazione"
@@ -773,10 +797,16 @@ final class MetadataStore: ObservableObject {
         guard let backup = sqlite3_backup_init(destDB, "main", db, "main") else {
             throw StoreError.sqlite(message: String(cString: sqlite3_errmsg(destDB)))
         }
-        let stepResult = sqlite3_backup_step(backup, -1)
-        sqlite3_backup_finish(backup)
+        var stepResult: Int32 = SQLITE_OK
+        repeat {
+            stepResult = sqlite3_backup_step(backup, 128)
+            if stepResult == SQLITE_OK || stepResult == SQLITE_BUSY || stepResult == SQLITE_LOCKED {
+                await Task.yield()
+            }
+        } while stepResult == SQLITE_OK || stepResult == SQLITE_BUSY || stepResult == SQLITE_LOCKED
+        let finishResult = sqlite3_backup_finish(backup)
 
-        guard stepResult == SQLITE_DONE else {
+        guard stepResult == SQLITE_DONE, finishResult == SQLITE_OK else {
             throw StoreError.sqlite(message: String(cString: sqlite3_errmsg(destDB)))
         }
     }
@@ -1161,7 +1191,8 @@ final class MetadataStore: ObservableObject {
     /// Usato dall'`IndexingService` per saltare i file immutati; i file marcati "unsupported"
     /// ritornano nil di proposito, così vengono riprovati (utile quando l'estrattore impara
     /// nuovi formati) senza doverli modificare.
-    func contentHash(for identity: String) -> String? {
+    func contentHash(for identity: String) async -> String? {
+        if let databaseActor { return await databaseActor.contentHash(identity: identity) }
         var statement: OpaquePointer?
         guard (try? prepare("SELECT content_hash FROM file_content WHERE file_identity = ? AND index_state = 'indexed'", statement: &statement)) != nil else { return nil }
         defer { sqlite3_finalize(statement) }
@@ -1208,7 +1239,8 @@ final class MetadataStore: ObservableObject {
 
     /// Identità dei file che hanno almeno un embedding con provider che inizia per `providerPrefix`
     /// (es. "apple-nl-", "ollama-<model>", "openai-<model>"). Serve a legare lo stato al motore AI.
-    func identitiesWithVectors(providerPrefix: String) -> Set<String> {
+    func identitiesWithVectors(providerPrefix: String) async -> Set<String> {
+        if let databaseActor { return await databaseActor.identitiesWithVectors(providerPrefix: providerPrefix) }
         var result: Set<String> = []
         var statement: OpaquePointer?
         let sql = "SELECT DISTINCT c.file_identity FROM chunk_vectors v JOIN content_chunks c ON c.id = v.chunk_id WHERE v.provider_id LIKE ?"
@@ -1410,7 +1442,8 @@ final class MetadataStore: ObservableObject {
 
     /// Mappa identità→hash di TUTTI i file indicizzati con successo. Usata per calcolare la
     /// copertura di indicizzazione di una cartella (stato verde/arancione).
-    func indexedHashes() -> [String: String] {
+    func indexedHashes() async -> [String: String] {
+        if let databaseActor { return await databaseActor.indexedHashes(state: "indexed") }
         var result: [String: String] = [:]
         var statement: OpaquePointer?
         let sql = "SELECT file_identity, content_hash FROM file_content WHERE index_state = 'indexed' AND content_hash IS NOT NULL"
@@ -1424,7 +1457,8 @@ final class MetadataStore: ObservableObject {
 
     /// Mappa identità→hash dei file processati ma SENZA contenuto indicizzabile (index_state
     /// = 'unsupported': testo non estraibile). Usata dallo stato per contarli come "coperti".
-    func unsupportedHashes() -> [String: String] {
+    func unsupportedHashes() async -> [String: String] {
+        if let databaseActor { return await databaseActor.indexedHashes(state: "unsupported") }
         var result: [String: String] = [:]
         var statement: OpaquePointer?
         let sql = "SELECT file_identity, content_hash FROM file_content WHERE index_state = 'unsupported' AND content_hash IS NOT NULL"
@@ -1439,7 +1473,12 @@ final class MetadataStore: ObservableObject {
     /// Salva il testo estratto da un file e aggiorna l'indice full-text. Registra prima il
     /// file nella tabella `files` (necessario per la foreign key) senza toccare il percorso
     /// caldo di navigazione.
-    func storeExtractedText(for item: FileItem, text: String, ocrUsed: Bool, hash: String) {
+    func storeExtractedText(for item: FileItem, text: String, ocrUsed: Bool, hash: String) async {
+        _ = try? registerFile(at: item.url)
+        if let databaseActor {
+            try? await databaseActor.storeContent(identity: item.identity, name: item.name, text: text, ocrUsed: ocrUsed, hash: hash, state: "indexed", chunks: nil)
+            return
+        }
         do {
             _ = try registerFile(at: item.url)
             try execute("BEGIN IMMEDIATE TRANSACTION")
@@ -1481,7 +1520,12 @@ final class MetadataStore: ObservableObject {
         ocrUsed: Bool,
         hash: String,
         chunks: [(ordinal: Int, text: String, providerID: String, vector: [Float])]
-    ) {
+    ) async {
+        _ = try? registerFile(at: item.url)
+        if let databaseActor {
+            try? await databaseActor.storeContent(identity: item.identity, name: item.name, text: text, ocrUsed: ocrUsed, hash: hash, state: "indexed", chunks: chunks)
+            return
+        }
         do {
             _ = try registerFile(at: item.url)
             try execute("BEGIN IMMEDIATE TRANSACTION")
@@ -1520,7 +1564,12 @@ final class MetadataStore: ObservableObject {
 
     /// Marca un file come non supportato (nessun testo estraibile) salvando comunque l'hash,
     /// così l'indicizzazione non lo riprova finché il file non cambia.
-    func markContentUnsupported(for item: FileItem, hash: String) {
+    func markContentUnsupported(for item: FileItem, hash: String) async {
+        _ = try? registerFile(at: item.url)
+        if let databaseActor {
+            try? await databaseActor.storeContent(identity: item.identity, name: item.name, text: nil, ocrUsed: false, hash: hash, state: "unsupported", chunks: nil)
+            return
+        }
         _ = try? registerFile(at: item.url)
         try? execute(
             """
@@ -1556,20 +1605,10 @@ final class MetadataStore: ObservableObject {
     /// Come `searchFileContent`, ma ritorna le identità ORDINATE per rilevanza testuale (bm25:
     /// più rilevante prima). Serve alla ricerca ibrida per costruire il ranking FTS da fondere
     /// con quello semantico via Reciprocal Rank Fusion.
-    func searchFileContentRanked(_ rawQuery: String) -> [String] {
+    func searchFileContentRanked(_ rawQuery: String) async -> [String] {
         guard let matchQuery = Self.ftsMatchQuery(from: rawQuery) else { return [] }
-        var statement: OpaquePointer?
-        // bm25() ritorna valori più bassi (più negativi) per i match più rilevanti → ASC = migliori prima.
-        let sql = "SELECT file_identity FROM content_fts WHERE content_fts MATCH ? ORDER BY bm25(content_fts) ASC"
-        guard (try? prepare(sql, statement: &statement)) != nil else { return [] }
-        defer { sqlite3_finalize(statement) }
-        try? bind([.text(matchQuery)], to: statement)
-
-        var result: [String] = []
-        while sqlite3_step(statement) == SQLITE_ROW {
-            result.append(columnText(statement, 0))
-        }
-        return result
+        guard let databaseActor else { return [] }
+        return (try? await databaseActor.searchFileContentRanked(matchQuery: matchQuery)) ?? []
     }
 
     /// Costruisce una query MATCH FTS5 sicura: estrae solo token alfanumerici (così eventuali
@@ -1638,7 +1677,8 @@ final class MetadataStore: ObservableObject {
     // MARK: - Ricerca semantica (Fase 1: embedding vettoriali)
 
     /// Testo estratto già salvato per un file (usato per rigenerare i vettori senza ri-estrarre).
-    func extractedText(for identity: String) -> String? {
+    func extractedText(for identity: String) async -> String? {
+        if let databaseActor { return await databaseActor.extractedText(identity: identity) }
         var statement: OpaquePointer?
         guard (try? prepare("SELECT extracted_text FROM file_content WHERE file_identity = ?", statement: &statement)) != nil else { return nil }
         defer { sqlite3_finalize(statement) }
@@ -1660,7 +1700,8 @@ final class MetadataStore: ObservableObject {
 
     /// Vero se il file ha già embedding del MOTORE indicato (provider_id che inizia per prefisso).
     /// Serve a evitare di saltare file che hanno vettori di un altro motore quando si cambia provider.
-    func hasVectors(for identity: String, providerPrefix: String) -> Bool {
+    func hasVectors(for identity: String, providerPrefix: String) async -> Bool {
+        if let databaseActor { return await databaseActor.hasVectors(identity: identity, providerPrefix: providerPrefix) }
         var statement: OpaquePointer?
         let sql = "SELECT 1 FROM content_chunks c JOIN chunk_vectors v ON v.chunk_id = c.id WHERE c.file_identity = ? AND v.provider_id LIKE ? LIMIT 1"
         guard (try? prepare(sql, statement: &statement)) != nil else { return false }
@@ -1670,7 +1711,11 @@ final class MetadataStore: ObservableObject {
     }
 
     /// Sostituisce i chunk e i vettori di un file (elimina i precedenti in cascata, poi inserisce).
-    func replaceChunks(for identity: String, chunks: [(ordinal: Int, text: String, providerID: String, vector: [Float])]) {
+    func replaceChunks(for identity: String, chunks: [(ordinal: Int, text: String, providerID: String, vector: [Float])]) async {
+        if let databaseActor {
+            try? await databaseActor.replaceChunks(identity: identity, chunks: chunks)
+            return
+        }
         do {
             try execute("BEGIN IMMEDIATE TRANSACTION")
             try execute("DELETE FROM content_chunks WHERE file_identity = ?", bindings: [.text(identity)])

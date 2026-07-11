@@ -86,6 +86,7 @@ struct FileTableView: View {
     /// quando cambiano dati, ricerca, filtri o ordinamento (vedi `refreshDisplayCache`),
     /// non a ogni render della view come accadeva con le computed property.
     @State private var cachedIndex: [String: [String: String]] = [:]
+    @State private var cachedSearchText: [String: String] = [:]
     @State private var cachedVisibleItems: [FileItem] = []
     @State private var noteLinkCache: [String: URL] = [:]
     @State private var missingNoteLinks: Set<String> = []
@@ -207,8 +208,8 @@ struct FileTableView: View {
         .onChange(of: tableSortOrder) { refreshDisplayCache() }
         // Cambi di DATI → ricostruzione indice.
         .onChange(of: metadataFields) { rebuildMetadataIndex() }
-        .onChange(of: metadataStore.metadataByFileIdentity) { oldValue, newValue in
-            updateMetadataIndex(from: oldValue, to: newValue)
+        .onReceive(metadataStore.metadataChanges) { identities in
+            updateMetadataIndex(changedIDs: identities)
         }
         // Selezione → riporta l'item singolo al pannello note (o nil).
         .onChange(of: selection) { reportSelectedItem() }
@@ -271,7 +272,13 @@ struct FileTableView: View {
             }
             return
         }
-        applySearch(rawNeedle: rawNeedle, token: token)
+        searchTask = Task {
+            if !rawNeedle.isEmpty {
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled, searchToken == token else { return }
+            }
+            applySearch(rawNeedle: rawNeedle, token: token)
+        }
     }
 
     /// Applica la ricerca corrente sulla `searchSource`. Per "Contenuto" calcola l'ibrida RRF in
@@ -288,7 +295,7 @@ struct FileTableView: View {
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled, searchToken == token else { return }
             let candidates = Set(searchSource.map { $0.id })
-            let ftsRanked = metadataStore.searchFileContentRanked(rawNeedle).filter { candidates.contains($0) }
+            let ftsRanked = await metadataStore.searchFileContentRanked(rawNeedle).filter { candidates.contains($0) }
             let embedder = EmbeddingEngine.active()
             let embedding = await embedder.embed(rawNeedle)
             guard !Task.isCancelled, searchToken == token else { return }
@@ -776,29 +783,46 @@ struct FileTableView: View {
             }
             index[field.id] = perItem
         }
+        var searchIndex: [String: String] = [:]
+        for item in source {
+            var components = [item.name]
+            for perItem in index.values {
+                if let value = perItem[item.id], !value.isEmpty { components.append(value) }
+            }
+            searchIndex[item.id] = components.joined(separator: "\u{1F}").localizedLowercase
+        }
         cachedIndex = index
+        cachedSearchText = searchIndex
         refreshDisplayCache()
     }
 
     /// Aggiorna solo le righe metadata realmente cambiate. Durante modifiche bulk o digitazione
     /// evita di rifare O(campi × file) quando è cambiato un solo file.
-    private func updateMetadataIndex(from oldValue: [String: FileMetadata], to newValue: [String: FileMetadata]) {
+    private func updateMetadataIndex(changedIDs requestedIDs: Set<String>) {
         let sourceIDs = Set(searchSource.map(\.id))
-        let changedIDs = Set(oldValue.keys).union(newValue.keys).filter {
-            sourceIDs.contains($0) && oldValue[$0] != newValue[$0]
-        }
+        let changedIDs = requestedIDs.intersection(sourceIDs)
         guard !changedIDs.isEmpty else { return }
 
         var index = cachedIndex
         for field in metadataFields {
             var perItem = index[field.id] ?? [:]
             for identity in changedIDs {
-                let value = newValue[identity]?.values[field.id] ?? ""
+                let value = metadataStore.metadataByFileIdentity[identity]?.values[field.id] ?? ""
                 if value.isEmpty { perItem[identity] = nil } else { perItem[identity] = value }
             }
             index[field.id] = perItem
         }
         cachedIndex = index
+        var searchIndex = cachedSearchText
+        for identity in changedIDs {
+            var components: [String] = []
+            if let item = searchSource.first(where: { $0.id == identity }) { components.append(item.name) }
+            for perItem in index.values {
+                if let value = perItem[identity], !value.isEmpty { components.append(value) }
+            }
+            searchIndex[identity] = components.joined(separator: "\u{1F}").localizedLowercase
+        }
+        cachedSearchText = searchIndex
         refreshDisplayCache()
     }
 
@@ -840,11 +864,7 @@ struct FileTableView: View {
                 }
 
                 // Modalità "nome": nome file o valori metadata.
-                if item.name.lowercased().contains(needle) { return true }
-                for (_, perItem) in index {
-                    if let value = perItem[item.id], value.lowercased().contains(needle) { return true }
-                }
-                return false
+                return cachedSearchText[item.id]?.contains(needle) == true
             }
         }
 

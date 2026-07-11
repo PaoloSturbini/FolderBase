@@ -90,28 +90,28 @@ final class BackupService: ObservableObject {
         self.store = store
         startScheduler()
         // Un backup potrebbe essere già scaduto mentre l'app era chiusa.
-        performAutoBackupIfDue()
+        Task { await performAutoBackupIfDue() }
     }
 
     private func startScheduler() {
         timer?.invalidate()
         // Controllo periodico leggero: il backup parte solo se è trascorso l'intervallo.
         let checkTimer = Timer(timeInterval: 15 * 60, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.performAutoBackupIfDue() }
+            Task { @MainActor in await self?.performAutoBackupIfDue() }
         }
         RunLoop.main.add(checkTimer, forMode: .common)
         timer = checkTimer
     }
 
     /// Esegue un backup automatico se abilitato e se è trascorso l'intervallo configurato.
-    func performAutoBackupIfDue() {
+    func performAutoBackupIfDue() async {
         guard autoEnabled, !destinationPath.isEmpty else { return }
         if let last = lastBackupDate,
            Date().timeIntervalSince(last) < Double(intervalHours) * 3600 {
             return
         }
         do {
-            _ = try runBackup(auto: true)
+            _ = try await runBackup(auto: true)
         } catch {
             Self.log.error("Backup automatico fallito: \(error.localizedDescription, privacy: .public)")
         }
@@ -121,7 +121,7 @@ final class BackupService: ObservableObject {
     /// - Parameter auto: se `true` usa il prefisso automatico, aggiorna il timestamp e
     ///   applica la rotazione; se `false` è un backup manuale (nessuna cancellazione).
     @discardableResult
-    func runBackup(auto: Bool) throws -> URL {
+    func runBackup(auto: Bool) async throws -> URL {
         guard let store else { throw BackupError.notReady }
         guard !destinationPath.isEmpty else { throw BackupError.noDestination }
         guard !backupInProgress else { throw BackupError.notReady }
@@ -137,7 +137,7 @@ final class BackupService: ObservableObject {
 
         let name = (auto ? Prefix.auto : Prefix.manual) + Self.timestamp() + ".sqlite"
         let destination = folder.appendingPathComponent(name)
-        try store.backup(to: destination)
+        try await store.backup(to: destination)
 
         lastBackupDate = Date()
         UserDefaults.standard.set(lastBackupDate!.timeIntervalSince1970, forKey: Keys.lastTimestamp)
@@ -150,13 +150,13 @@ final class BackupService: ObservableObject {
 
     /// Ripristina il database da `sourceURL`, salvando prima una copia di sicurezza del
     /// database attuale (accanto al DB gestito) così l'operazione resta annullabile.
-    func restore(from sourceURL: URL) throws {
+    func restore(from sourceURL: URL) async throws {
         guard let store else { throw BackupError.notReady }
 
         let safetyURL = store.databaseURL
             .deletingLastPathComponent()
             .appendingPathComponent(Prefix.preRestore + Self.timestamp() + ".sqlite")
-        try? store.backup(to: safetyURL)
+        try? await store.backup(to: safetyURL)
 
         try store.restore(from: sourceURL)
     }
