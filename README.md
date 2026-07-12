@@ -36,8 +36,10 @@ FolderBase takes a different approach:
 
 ### Metadata and organization
 
-- Custom columns for notes, numbers, dates, Kanban states, colored selects/tags and links.
-- Reusable column templates for new folders.
+- Hierarchical custom columns for notes, numbers, dates, Kanban states, colored selects/tags and links: parent-folder configuration is inherited by every subfolder.
+- Reusable column templates that can be applied from any selected folder and inherited through its subtree.
+- Persistent inherited column order and visibility, with parent-folder configuration taking precedence on conflicts.
+- Faster folder navigation with a shared LRU snapshot cache, instant Back/Forward display and selective FSEvents invalidation.
 - Native table and Kanban board views.
 - Filtering, sorting, multi-selection, bulk editing and CSV export.
 - Metadata persistence across supported file rename and move operations.

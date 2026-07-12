@@ -7,6 +7,7 @@ struct MainWindowView: View {
     @StateObject private var templateStore = TemplateStore()
     @StateObject private var backupService = BackupService()
     @StateObject private var indexingService = IndexingService()
+    @StateObject private var directoryCache = DirectorySnapshotCache()
     // @State (non @StateObject): MainWindowView possiede chatService in modo stabile ma NON si
     // ri-renderizza ai suoi cambi (streaming chat). Solo ChatView lo osserva. Evita che ogni token
     // della risposta rigeneri l'intera finestra/tabella (causa del blocco a 99% CPU).
@@ -31,7 +32,6 @@ struct MainWindowView: View {
     @AppStorage(AppAccentColor.storageKey) private var appAccentRaw = AppAccentColor.blue.rawValue
     @AppStorage(AppAccentColor.customHexKey) private var appAccentCustomHex = ""
     @State private var managedWatcher: FSEventsWatcher?
-    @State private var treeRefreshID = UUID()
     @State private var isLoading = false
     /// Lettura della cartella corrente: cancellata quando l'utente naviga altrove, così una
     /// directory lenta non continua a consumare I/O dopo essere diventata irrilevante.
@@ -48,7 +48,6 @@ struct MainWindowView: View {
                 selectedFolderURL: selectedFolderURL,
                 recentFolderURLs: recentFoldersStore.folderURLs,
                 treeRootURL: treeRootURL,
-                treeRefreshID: treeRefreshID,
                 sidebarFontSize: $sidebarFontSize,
                 contentFontSize: $contentFontSize,
                 appearanceMode: $appearanceMode,
@@ -63,6 +62,7 @@ struct MainWindowView: View {
                 metadataStore: metadataStore,
                 backupService: backupService,
                 indexingService: indexingService,
+                directoryCache: directoryCache,
                 selectedNoteItem: selectedNoteItem
             )
             .frame(minWidth: 220, idealWidth: 260, maxWidth: 380, maxHeight: .infinity)
@@ -71,6 +71,7 @@ struct MainWindowView: View {
                 items: $items,
                 metadataStore: metadataStore,
                 selectedFolderURL: selectedFolderURL,
+                configurationRootURL: treeRootURL,
                 errorMessage: errorMessage,
                 canGoBack: !backStack.isEmpty,
                 canGoForward: !forwardStack.isEmpty,
@@ -161,21 +162,27 @@ struct MainWindowView: View {
     /// Riconfigura l'osservatore FSEvents sull'insieme delle cartelle gestite più quella aperta.
     private func refreshManagedWatcher() {
         if managedWatcher == nil {
-            managedWatcher = FSEventsWatcher {
+            managedWatcher = FSEventsWatcher { changedPaths in
+                directoryCache.invalidate(paths: changedPaths)
                 metadataStore.reconcileManagedFiles { _, missingIdentities in
                     if autoPurgeOrphans, !missingIdentities.isEmpty {
                         _ = metadataStore.purge(identities: missingIdentities)
                     }
-                    reloadCurrentFolder()
+                    guard let selectedFolderURL else { return }
+                    let selectedPath = selectedFolderURL.standardizedFileURL.path
+                    if changedPaths.isEmpty || changedPaths.contains(where: {
+                        let changed = URL(fileURLWithPath: $0).standardizedFileURL.path
+                        return changed == selectedPath || changed.hasPrefix(selectedPath + "/") || selectedPath.hasPrefix(changed + "/")
+                    }) {
+                        reloadCurrentFolder()
+                    }
                 }
             }
         }
 
-        var dirs = Set(metadataStore.managedDirectories())
-        if let selectedFolderURL {
-            dirs.insert(selectedFolderURL.path)
-        }
-        managedWatcher?.watch(paths: Array(dirs))
+        // FSEvents osserva ricorsivamente: bastano le radici scelte dall'utente. Aggiungere ogni
+        // sottocartella costringeva a ricreare lo stream durante la navigazione.
+        managedWatcher?.watch(paths: recentFoldersStore.folderURLs.map(\.path))
     }
 
     private func loadInitialFolderIfNeeded() {
@@ -207,6 +214,7 @@ struct MainWindowView: View {
         selectedFolderURL = url
         treeRootURL = url
         recentFoldersStore.add(url)
+        refreshManagedWatcher()
         backStack = []
         forwardStack = []
         loadFolder(url)
@@ -216,6 +224,7 @@ struct MainWindowView: View {
         selectedFolderURL = url
         treeRootURL = url
         recentFoldersStore.add(url)
+        refreshManagedWatcher()
         backStack = []
         forwardStack = []
         loadFolder(url)
@@ -304,23 +313,28 @@ struct MainWindowView: View {
     }
 
     private func loadFolder(_ url: URL) {
-        // Registra la cartella (cheap, serve per agganciarvi le colonne metadata).
-        _ = try? metadataStore.registerFile(at: url)
-        refreshManagedWatcher()
-        fetchItems(at: url, refreshTree: false)
+        fetchItems(at: url, useCachedSnapshot: true)
     }
 
     private func reloadCurrentFolder() {
         guard let selectedFolderURL else { return }
-        fetchItems(at: selectedFolderURL, refreshTree: true)
+        directoryCache.invalidate(paths: [selectedFolderURL.path])
+        fetchItems(at: selectedFolderURL, useCachedSnapshot: false)
     }
 
     /// Legge il contenuto della cartella su un thread di background (la lettura del
     /// filesystem può essere lenta) e aggiorna la UI sul main thread. Un guard scarta
     /// i risultati arrivati in ritardo se nel frattempo si è navigato altrove.
-    private func fetchItems(at url: URL, refreshTree: Bool) {
+    private func fetchItems(at url: URL, useCachedSnapshot: Bool) {
         folderLoadTask?.cancel()
-        isLoading = true
+        if useCachedSnapshot, let cached = directoryCache.snapshot(for: url) {
+            items = cached.items
+            metadataStore.loadMetadata(for: cached.items)
+            errorMessage = nil
+            isLoading = false
+        } else {
+            isLoading = true
+        }
         let includeHidden = showHiddenFiles
 
         folderLoadTask = Task {
@@ -344,6 +358,7 @@ struct MainWindowView: View {
             transaction.disablesAnimations = true
             withTransaction(transaction) {
                 if let loaded = outcome.items {
+                    directoryCache.store(loaded, for: url)
                     items = loaded
                     metadataStore.loadMetadata(for: loaded)
                     errorMessage = nil
@@ -352,7 +367,6 @@ struct MainWindowView: View {
                     errorMessage = error
                 }
 
-                if refreshTree { treeRefreshID = UUID() }
                 isLoading = false
             }
         }
@@ -427,9 +441,9 @@ struct MainWindowView: View {
 
         let destinationURL = destinationFolderURL.appendingPathComponent(item.name, isDirectory: item.isFolder)
         guard destinationURL.standardizedFileURL.path != item.url.standardizedFileURL.path,
-              let resolvedDestination = resolveCollision(sourceURL: item.url, proposedDestination: destinationURL, isDirectory: item.isFolder) else { return }
+              let resolution = resolveCollision(sourceURL: item.url, proposedDestination: destinationURL, isDirectory: item.isFolder) else { return }
 
-        moveItemOnDisk(item, to: resolvedDestination)
+        moveItemOnDisk(item, resolution: resolution)
     }
 
     private func destinationURLForRename(item: FileItem, newName: String) -> URL? {
@@ -472,24 +486,25 @@ struct MainWindowView: View {
             let intoItself = destinationFolder.standardizedFileURL.path == sourceURL.path
                 || destinationFolder.standardizedFileURL.path.hasPrefix(sourceURL.path + "/")
             guard !intoItself, !alreadyThere || shouldCopy else { continue }
-            let resolvedDestination: URL?
+            let resolution: CollisionResolution?
             if alreadyThere && shouldCopy {
-                resolvedDestination = uniqueCopyURL(for: sourceURL, in: destinationFolder, isDirectory: isDirectory)
+                resolution = CollisionResolution(destination: uniqueCopyURL(for: sourceURL, in: destinationFolder, isDirectory: isDirectory), replacedIdentity: nil)
             } else {
-                resolvedDestination = resolveCollision(sourceURL: sourceURL, proposedDestination: destinationURL, isDirectory: isDirectory)
+                resolution = resolveCollision(sourceURL: sourceURL, proposedDestination: destinationURL, isDirectory: isDirectory)
             }
-            guard let resolvedDestination else { continue }
+            guard let resolution else { continue }
 
             let previousIdentity = metadataStore.identity(for: sourceURL)
             do {
-                if shouldCopy {
-                    try FileManager.default.copyItem(at: sourceURL, to: resolvedDestination)
-                } else {
-                    try FileManager.default.moveItem(at: sourceURL, to: resolvedDestination)
-                }
+                try performTransfer(from: sourceURL, resolution: resolution, copy: shouldCopy)
                 if !shouldCopy, let previousIdentity {
-                    _ = try? metadataStore.reconcileMovedItem(previousIdentity: previousIdentity, newURL: resolvedDestination)
+                    do {
+                        try metadataStore.reconcileMovedItem(previousIdentity: previousIdentity, newURL: resolution.destination)
+                    } catch {
+                        errorMessage = error.localizedDescription
+                    }
                 }
+                if let replacedIdentity = resolution.replacedIdentity { _ = metadataStore.purge(identities: [replacedIdentity]) }
                 didTransfer = true
             } catch {
                 errorMessage = error.localizedDescription
@@ -499,11 +514,17 @@ struct MainWindowView: View {
         if didTransfer { reloadCurrentFolder() }
     }
 
-    /// Risolve una collisione come Finder. "Sostituisci" elimina l'elemento di destinazione;
-    /// "Mantieni entrambi" genera un nome libero (`nome copia`, `nome copia 2`, …).
-    private func resolveCollision(sourceURL: URL, proposedDestination: URL, isDirectory: Bool) -> URL? {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: proposedDestination.path) else { return proposedDestination }
+    /// Risolve una collisione come Finder. "Sostituisci" conserva l'identità dell'elemento
+    /// precedente; "Mantieni entrambi" genera un nome libero (`nome copia`, `nome copia 2`, …).
+    private struct CollisionResolution {
+        let destination: URL
+        let replacedIdentity: String?
+    }
+
+    private func resolveCollision(sourceURL: URL, proposedDestination: URL, isDirectory: Bool) -> CollisionResolution? {
+        guard FileManager.default.fileExists(atPath: proposedDestination.path) else {
+            return CollisionResolution(destination: proposedDestination, replacedIdentity: nil)
+        }
 
         let alert = NSAlert()
         alert.alertStyle = .warning
@@ -515,20 +536,36 @@ struct MainWindowView: View {
 
         switch alert.runModal() {
         case .alertFirstButtonReturn:
-            let replacedIdentity = metadataStore.identity(for: proposedDestination)
-            do {
-                try fm.removeItem(at: proposedDestination)
-                if let replacedIdentity { _ = metadataStore.purge(identities: [replacedIdentity]) }
-                return proposedDestination
-            } catch {
-                errorMessage = error.localizedDescription
-                return nil
-            }
+            return CollisionResolution(destination: proposedDestination, replacedIdentity: metadataStore.identity(for: proposedDestination))
         case .alertSecondButtonReturn:
-            return uniqueCopyURL(for: sourceURL, in: proposedDestination.deletingLastPathComponent(), isDirectory: isDirectory)
+            return CollisionResolution(destination: uniqueCopyURL(for: sourceURL, in: proposedDestination.deletingLastPathComponent(), isDirectory: isDirectory), replacedIdentity: nil)
         default:
             return nil
         }
+    }
+
+    /// Conserva la destinazione esistente finché il trasferimento non è terminato. In caso di
+    /// errore la ripristina, evitando che "Sostituisci" distrugga il file precedente.
+    private func performTransfer(from sourceURL: URL, resolution: CollisionResolution, copy: Bool) throws {
+        let fm = FileManager.default
+        let destination = resolution.destination
+        var backupURL: URL?
+        if fm.fileExists(atPath: destination.path) {
+            let backup = destination.deletingLastPathComponent()
+                .appendingPathComponent(".folderbase-replaced-\(UUID().uuidString)", isDirectory: false)
+            try fm.moveItem(at: destination, to: backup)
+            backupURL = backup
+        }
+
+        do {
+            if copy { try fm.copyItem(at: sourceURL, to: destination) }
+            else { try fm.moveItem(at: sourceURL, to: destination) }
+        } catch {
+            if fm.fileExists(atPath: destination.path) { try? fm.removeItem(at: destination) }
+            if let backupURL { try? fm.moveItem(at: backupURL, to: destination) }
+            throw error
+        }
+        if let backupURL { try? fm.removeItem(at: backupURL) }
     }
 
     private func uniqueCopyURL(for sourceURL: URL, in folderURL: URL, isDirectory: Bool) -> URL {
@@ -548,12 +585,21 @@ struct MainWindowView: View {
     }
 
     private func moveItemOnDisk(_ item: FileItem, to destinationURL: URL) {
+        moveItemOnDisk(item, resolution: CollisionResolution(destination: destinationURL, replacedIdentity: nil))
+    }
+
+    private func moveItemOnDisk(_ item: FileItem, resolution: CollisionResolution) {
         do {
-            try FileManager.default.moveItem(at: item.url, to: destinationURL)
-            try metadataStore.reconcileMovedItem(previousIdentity: item.identity, newURL: destinationURL)
+            try performTransfer(from: item.url, resolution: resolution, copy: false)
+            do {
+                try metadataStore.reconcileMovedItem(previousIdentity: item.identity, newURL: resolution.destination)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            if let replacedIdentity = resolution.replacedIdentity { _ = metadataStore.purge(identities: [replacedIdentity]) }
 
             if selectedFolderURL?.standardizedFileURL.path == item.url.standardizedFileURL.path {
-                selectedFolderURL = destinationURL
+                selectedFolderURL = resolution.destination
             }
 
             reloadCurrentFolder()

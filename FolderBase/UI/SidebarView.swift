@@ -137,7 +137,6 @@ struct SidebarView: View {
     let selectedFolderURL: URL?
     let recentFolderURLs: [URL]
     let treeRootURL: URL?
-    let treeRefreshID: UUID
     @Binding var sidebarFontSize: Double
     @Binding var contentFontSize: Double
     @Binding var appearanceMode: String
@@ -157,6 +156,7 @@ struct SidebarView: View {
     @ObservedObject var metadataStore: MetadataStore
     @ObservedObject var backupService: BackupService
     @ObservedObject var indexingService: IndexingService
+    @ObservedObject var directoryCache: DirectorySnapshotCache
     /// Item selezionato nella tabella: ne mostriamo la nota nel pannello in fondo alla sidebar.
     let selectedNoteItem: FileItem?
     @ObservedObject private var loc = LocalizationManager.shared
@@ -257,9 +257,9 @@ struct SidebarView: View {
                                 rootURL: treeRootURL,
                                 selectedFolderURL: selectedFolderURL,
                                 fontSize: sidebarFontSize,
-                                refreshToken: treeRefreshID,
                                 onSelect: navigateTo,
-                                onMoveItems: moveItems
+                                onMoveItems: moveItems,
+                                directoryCache: directoryCache
                             )
                             .id(treeRootURL.path)
                         }
@@ -485,7 +485,7 @@ struct SidebarView: View {
 
     /// Tutti i campi configurati per la cartella corrente.
     private var allFields: [MetadataField] {
-        metadataStore.fields(for: selectedFolderURL)
+        metadataStore.fields(for: selectedFolderURL, configurationRootURL: treeRootURL)
     }
 
     /// Campi di tipo testo ("Nota libera") della cartella corrente.

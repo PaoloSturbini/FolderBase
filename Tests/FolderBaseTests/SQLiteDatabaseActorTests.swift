@@ -69,6 +69,29 @@ final class SQLiteDatabaseActorTests: XCTestCase {
         }
     }
 
+    func testVectorCoverageRequiresEveryChunkFromSelectedProvider() async throws {
+        let actor = try SQLiteDatabaseActor(url: databaseURL)
+        try await actor.storeContent(
+            identity: "file-complete", name: "Complete", text: "body", ocrUsed: false,
+            hash: "hash", state: "indexed", chunks: [
+                ChunkVector(ordinal: 0, text: "one", providerID: "test-v1", vector: [1, 0]),
+                ChunkVector(ordinal: 1, text: "two", providerID: "test-v1", vector: [0, 1])
+            ]
+        )
+        let complete = await actor.hasVectors(identity: "file-complete", providerPrefix: "test-v1")
+        let wrongProvider = await actor.hasVectors(identity: "file-complete", providerPrefix: "other")
+        XCTAssertTrue(complete)
+        XCTAssertFalse(wrongProvider)
+
+        try withDatabase(at: databaseURL) { db in
+            try execute(db, "DELETE FROM chunk_vectors WHERE chunk_id = (SELECT id FROM content_chunks WHERE file_identity='file-complete' AND ordinal=1)")
+        }
+        let partial = await actor.hasVectors(identity: "file-complete", providerPrefix: "test-v1")
+        let coveredIdentities = await actor.identitiesWithVectors(providerPrefix: "test-v1")
+        XCTAssertFalse(partial)
+        XCTAssertFalse(coveredIdentities.contains("file-complete"))
+    }
+
     func testUpsertMetadataUpdatesExistingValuesAndCommitsBatchAtomically() async throws {
         let actor = try SQLiteDatabaseActor(url: databaseURL)
         try await actor.upsertMetadata([

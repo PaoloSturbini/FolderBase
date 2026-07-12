@@ -8,6 +8,7 @@ struct FileTableView: View {
     @ObservedObject private var loc = LocalizationManager.shared
 
     let selectedFolderURL: URL?
+    let configurationRootURL: URL?
     let errorMessage: String?
     let canGoBack: Bool
     let canGoForward: Bool
@@ -78,7 +79,10 @@ struct FileTableView: View {
     @State private var viewMode: ViewMode = .table
     @State private var boardFieldID: String?
     @State private var columnCustomization = TableColumnCustomization<FileItem>()
-    @AppStorage("columnCustomization") private var columnCustomizationData = Data()
+    @AppStorage("columnCustomization") private var legacyColumnCustomizationData = Data()
+    @State private var columnCustomizationByFolder: [String: Data] = [:]
+    @AppStorage("columnCustomizationByFolder") private var columnCustomizationByFolderData = Data()
+    @State private var isRestoringColumnConfiguration = false
     @State private var hiddenByFolder: [String: Set<String>] = [:]
     @AppStorage("hiddenColumnsByFolder") private var hiddenColumnsData = Data()
 
@@ -148,7 +152,8 @@ struct FileTableView: View {
         .sheet(item: $fieldPendingEdit) { field in
             MetadataFieldEditorView(title: L("field.edit"), field: field) { name, kind, options in
                 if let selectedFolderURL {
-                    metadataStore.updateField(folderURL: selectedFolderURL, field: field, name: name, kind: kind, options: options)
+                    let owner = metadataStore.ownerURL(of: field, folderURL: selectedFolderURL, configurationRootURL: configurationRootURL)
+                    metadataStore.updateField(folderURL: owner, field: field, name: name, kind: kind, options: options)
                 }
                 fieldPendingEdit = nil
             } cancel: {
@@ -197,9 +202,14 @@ struct FileTableView: View {
             subtreeLoadedForPath = nil
             // Dati cambiati → ricostruisci l'indice, poi riapplica l'eventuale ricerca.
             rebuildMetadataIndex()
-            onSearchChanged()
+            if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                relevanceRank = nil
+            } else {
+                onSearchChanged()
+            }
             noteLinkCache.removeAll()
             missingNoteLinks.removeAll()
+            reportSelectedItem()
         }
         // Ricerca/filtri/ordinamento riusano l'indice esistente (nessuna ricostruzione).
         .onChange(of: searchText) { onSearchChanged() }
@@ -218,8 +228,6 @@ struct FileTableView: View {
         }
         // Selezione → riporta l'item singolo al pannello note (o nil).
         .onChange(of: selection) { reportSelectedItem() }
-        // Cambiando cartella gli item si rinnovano: riallinea il pannello note.
-        .onChange(of: items) { reportSelectedItem() }
     }
 
     /// Riporta al contenitore l'item selezionato se e solo se la selezione è singola.
@@ -424,7 +432,7 @@ struct FileTableView: View {
             }
             .hoverDescription(L("nav.up"))
 
-            if metadataFields.isEmpty {
+            if isInsideSelectedConfigurationRoot {
                 templateMenu
             }
 
@@ -656,10 +664,11 @@ struct FileTableView: View {
 
                     Button(role: .destructive) {
                         if let selectedFolderURL {
-                            metadataStore.removeField(folderURL: selectedFolderURL, field: field)
+                            let owner = metadataStore.ownerURL(of: field, folderURL: selectedFolderURL, configurationRootURL: configurationRootURL)
+                            metadataStore.removeField(folderURL: owner, field: field)
                             var set = hiddenByFolder[folderKey] ?? []
                             set.remove(field.id)
-                            hiddenByFolder[folderKey] = set.isEmpty ? nil : set
+                            hiddenByFolder[folderKey] = set
                         }
                     } label: {
                         Label(L("column.delete"), systemImage: "trash")
@@ -723,8 +732,8 @@ struct FileTableView: View {
         }
     }
 
-    /// Pulsante (in alto a sinistra) per applicare un template a una cartella priva di
-    /// struttura FolderBase. Appare solo quando non ci sono ancora colonne metadata.
+    /// Disponibile nella cartella principale e in ogni sottocartella della radice selezionata,
+    /// anche quando sono già presenti colonne ereditate.
     private var templateMenu: some View {
         Menu {
             if templates.isEmpty {
@@ -747,10 +756,16 @@ struct FileTableView: View {
         .hoverDescription(L("templateMenu.help"))
     }
 
+    private var isInsideSelectedConfigurationRoot: Bool {
+        guard let selected = selectedFolderURL?.standardizedFileURL,
+              let root = configurationRootURL?.standardizedFileURL else { return false }
+        return selected.path == root.path || selected.path.hasPrefix(root.path + "/")
+    }
+
     // MARK: - Data shaping
 
     private var metadataFields: [MetadataField] {
-        metadataStore.fields(for: selectedFolderURL)
+        metadataStore.fields(for: selectedFolderURL, configurationRootURL: configurationRootURL)
     }
 
     private var hasKanbanField: Bool {
@@ -950,7 +965,29 @@ struct FileTableView: View {
 
     /// Colonne nascoste nella cartella corrente (lo stato è indipendente per ogni cartella).
     private var hiddenColumnIDs: Set<String> {
-        hiddenByFolder[folderKey] ?? []
+        for key in configurationAncestorKeys {
+            if let hidden = hiddenByFolder[key] { return hidden }
+        }
+        return []
+    }
+
+    private var configurationAncestorKeys: [String] {
+        guard let selectedFolderURL else { return [""] }
+        let folder = selectedFolderURL.standardizedFileURL
+        let candidate = configurationRootURL?.standardizedFileURL
+        let root = candidate.flatMap {
+            folder.path == $0.path || folder.path.hasPrefix($0.path + "/") ? $0 : nil
+        } ?? folder
+        var keys: [String] = []
+        var current = folder
+        while true {
+            keys.append(current.path)
+            if current.path == root.path { break }
+            let parent = current.deletingLastPathComponent().standardizedFileURL
+            guard parent.path != current.path else { break }
+            current = parent
+        }
+        return keys.reversed()
     }
 
     private var table: some View {
@@ -989,8 +1026,9 @@ struct FileTableView: View {
             restoreHiddenColumns()
         }
         .onChange(of: columnCustomization) {
-            persistColumnCustomization()
+            if !isRestoringColumnConfiguration { persistColumnCustomization() }
         }
+        .onChange(of: selectedFolderURL) { restoreColumnCustomization() }
         .onChange(of: hiddenByFolder) {
             persistHiddenColumns()
         }
@@ -1131,9 +1169,19 @@ struct FileTableView: View {
     }
 
     private func restoreColumnCustomization() {
-        if !columnCustomizationData.isEmpty,
-           let decoded = try? JSONDecoder().decode(TableColumnCustomization<FileItem>.self, from: columnCustomizationData) {
+        isRestoringColumnConfiguration = true
+        defer { isRestoringColumnConfiguration = false }
+        if columnCustomizationByFolder.isEmpty, !columnCustomizationByFolderData.isEmpty,
+           let decoded = try? JSONDecoder().decode([String: Data].self, from: columnCustomizationByFolderData) {
+            columnCustomizationByFolder = decoded
+        }
+        let inheritedData = configurationAncestorKeys.compactMap { columnCustomizationByFolder[$0] }.first
+            ?? (legacyColumnCustomizationData.isEmpty ? nil : legacyColumnCustomizationData)
+        if let inheritedData,
+           let decoded = try? JSONDecoder().decode(TableColumnCustomization<FileItem>.self, from: inheritedData) {
             columnCustomization = decoded
+        } else {
+            columnCustomization = TableColumnCustomization<FileItem>()
         }
 
         // La visibilità è ora gestita da noi (menù "Colonne"): forziamo visibili tutte le
@@ -1146,7 +1194,10 @@ struct FileTableView: View {
 
     private func persistColumnCustomization() {
         if let data = try? JSONEncoder().encode(columnCustomization) {
-            columnCustomizationData = data
+            columnCustomizationByFolder[folderKey] = data
+            if let encoded = try? JSONEncoder().encode(columnCustomizationByFolder) {
+                columnCustomizationByFolderData = encoded
+            }
         }
     }
 
@@ -1169,11 +1220,13 @@ struct FileTableView: View {
         } else {
             set.insert(id)
         }
-        hiddenByFolder[folderKey] = set.isEmpty ? nil : set
+        hiddenByFolder[folderKey] = set
     }
 
     private func showAllColumns() {
-        hiddenByFolder[folderKey] = nil
+        // Anche l'insieme vuoto è una configurazione esplicita: impedisce a una vecchia
+        // configurazione della sottocartella di prevalere sulla scelta del genitore.
+        hiddenByFolder[folderKey] = []
     }
 
     // MARK: - Cells

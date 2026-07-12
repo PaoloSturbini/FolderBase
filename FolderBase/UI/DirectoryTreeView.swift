@@ -8,9 +8,9 @@ struct DirectoryTreeView: View {
     let rootURL: URL
     let selectedFolderURL: URL?
     let fontSize: Double
-    let refreshToken: UUID
     let onSelect: (URL) -> Void
     let onMoveItems: ([String], URL) -> Void
+    @ObservedObject var directoryCache: DirectorySnapshotCache
 
     var body: some View {
         DirectoryNodeView(
@@ -18,9 +18,9 @@ struct DirectoryTreeView: View {
             depth: 0,
             selectedFolderURL: selectedFolderURL,
             fontSize: fontSize,
-            refreshToken: refreshToken,
             onSelect: onSelect,
-            onMoveItems: onMoveItems
+            onMoveItems: onMoveItems,
+            directoryCache: directoryCache
         )
         .id(rootURL.path)
     }
@@ -31,9 +31,9 @@ private struct DirectoryNodeView: View {
     let depth: Int
     let selectedFolderURL: URL?
     let fontSize: Double
-    let refreshToken: UUID
     let onSelect: (URL) -> Void
     let onMoveItems: ([String], URL) -> Void
+    @ObservedObject var directoryCache: DirectorySnapshotCache
 
     @State private var isExpanded = false
     @State private var children: [URL] = []
@@ -65,15 +65,21 @@ private struct DirectoryNodeView: View {
                         depth: depth + 1,
                         selectedFolderURL: selectedFolderURL,
                         fontSize: fontSize,
-                        refreshToken: refreshToken,
                         onSelect: onSelect,
-                        onMoveItems: onMoveItems
+                        onMoveItems: onMoveItems,
+                        directoryCache: directoryCache
                     )
                 }
             }
         }
         .onAppear { autoExpandIfNeeded() }
-        .onChange(of: refreshToken) { reload() }
+        .onChange(of: directoryCache.invalidationGeneration) {
+            let nodePath = url.standardizedFileURL.path
+            guard directoryCache.lastInvalidatedPaths.isEmpty || directoryCache.lastInvalidatedPaths.contains(where: {
+                $0 == nodePath || $0.hasPrefix(nodePath + "/") || nodePath.hasPrefix($0 + "/")
+            }) else { return }
+            reload()
+        }
         .onChange(of: selectedFolderURL) { autoExpandIfNeeded() }
     }
 
@@ -151,25 +157,22 @@ private struct DirectoryNodeView: View {
         guard !didLoad else { return }
         didLoad = true
 
+        if let cached = directoryCache.snapshot(for: url) {
+            children = cached.childDirectories
+            return
+        }
+
         let targetURL = url
-        DispatchQueue.global(qos: .userInitiated).async {
-            let contents = (try? FileManager.default.contentsOfDirectory(
-                at: targetURL,
-                includingPropertiesForKeys: [.isDirectoryKey],
-                options: [.skipsHiddenFiles]
-            )) ?? []
-
-            let loaded = contents
-                .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false }
-                .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-
-            DispatchQueue.main.async {
-                // Senza animazione, come il resto della navigazione dell'albero.
-                var transaction = Transaction()
-                transaction.disablesAnimations = true
-                withTransaction(transaction) {
-                    children = loaded
-                }
+        Task {
+            let loaded = await Task.detached(priority: .userInitiated) {
+                try? FileBrowserService().contentsOfDirectory(at: targetURL, showHiddenFiles: false)
+            }.value ?? []
+            guard url == targetURL else { return }
+            directoryCache.store(loaded, for: targetURL)
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                children = loaded.lazy.filter(\.isFolder).map(\.url)
             }
         }
     }

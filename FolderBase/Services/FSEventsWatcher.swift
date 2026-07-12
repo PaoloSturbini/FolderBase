@@ -9,17 +9,18 @@ import os.log
 final class FSEventsWatcher {
     private var stream: FSEventStreamRef?
     private let queue = DispatchQueue(label: "FolderBase.FSEvents")
-    private let onChange: () -> Void
+    private let onChange: ([String]) -> Void
     private var debounceWork: DispatchWorkItem?
     private let latency: CFTimeInterval = 0.3
     private var watchedPaths: [String] = []
     private var retryWork: DispatchWorkItem?
     private var retryAttempts = 0
+    private var pendingChangedPaths: Set<String> = []
     private let maxRetryAttempts = 3
 
     private static let log = Logger(subsystem: "com.paolosturbini.folderbase", category: "FSEvents")
 
-    init(onChange: @escaping () -> Void) {
+    init(onChange: @escaping ([String]) -> Void) {
         self.onChange = onChange
     }
 
@@ -57,7 +58,7 @@ final class FSEventsWatcher {
             copyDescription: nil
         )
 
-        let flags = UInt32(kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagWatchRoot)
+        let flags = UInt32(kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagWatchRoot | kFSEventStreamCreateFlagUseCFTypes)
 
         // Bug di FSEvents (macOS 26): se la creazione dello stream fallisce internamente, il suo
         // percorso di errore esegue close(0). Se fd 0 è il nostro tappo /dev/null (non protetto)
@@ -116,10 +117,14 @@ final class FSEventsWatcher {
     }
 
     /// Chiamato dal callback C: coalizza più eventi ravvicinati in un'unica notifica.
-    fileprivate func scheduleNotification() {
+    fileprivate func scheduleNotification(paths: [String]) {
+        pendingChangedPaths.formUnion(paths)
         debounceWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            self?.onChange()
+            guard let self else { return }
+            let paths = Array(self.pendingChangedPaths)
+            self.pendingChangedPaths.removeAll()
+            self.onChange(paths)
         }
         debounceWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
@@ -137,5 +142,6 @@ private func fsEventsCallback(
 ) {
     guard let info else { return }
     let watcher = Unmanaged<FSEventsWatcher>.fromOpaque(info).takeUnretainedValue()
-    watcher.scheduleNotification()
+    let paths = Unmanaged<CFArray>.fromOpaque(eventPaths).takeUnretainedValue() as? [String] ?? []
+    watcher.scheduleNotification(paths: paths)
 }
