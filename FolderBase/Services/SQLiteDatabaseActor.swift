@@ -188,8 +188,14 @@ actor SQLiteDatabaseActor {
     }
 
     func hasVectors(identity: String, providerPrefix: String) -> Bool {
-        let sql = "SELECT 1 FROM content_chunks c JOIN chunk_vectors v ON v.chunk_id = c.id WHERE c.file_identity = ? AND v.provider_id LIKE ? LIMIT 1"
-        return scalarText(sql, values: [identity, providerPrefix + "%"]) != nil
+        let sql = """
+            SELECT 1 FROM content_chunks c
+            LEFT JOIN chunk_vectors v ON v.chunk_id = c.id AND v.provider_id LIKE ?
+            WHERE c.file_identity = ?
+            GROUP BY c.file_identity
+            HAVING COUNT(c.id) > 0 AND COUNT(v.chunk_id) = COUNT(c.id)
+            """
+        return scalarText(sql, values: [providerPrefix + "%", identity]) != nil
     }
 
     func indexedHashes(state: String) -> [String: String] {
@@ -204,7 +210,12 @@ actor SQLiteDatabaseActor {
     }
 
     func identitiesWithVectors(providerPrefix: String) -> Set<String> {
-        let sql = "SELECT DISTINCT c.file_identity FROM chunk_vectors v JOIN content_chunks c ON c.id = v.chunk_id WHERE v.provider_id LIKE ?"
+        let sql = """
+            SELECT c.file_identity FROM content_chunks c
+            LEFT JOIN chunk_vectors v ON v.chunk_id = c.id AND v.provider_id LIKE ?
+            GROUP BY c.file_identity
+            HAVING COUNT(c.id) > 0 AND COUNT(v.chunk_id) = COUNT(c.id)
+            """
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(statement) }

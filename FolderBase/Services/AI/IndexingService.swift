@@ -303,12 +303,12 @@ final class IndexingService: ObservableObject {
     }
 
     /// Esito della costruzione dei vettori di un file: i vettori riusciti e quanti chunk c'erano.
-    /// `embedderFailed` = c'erano chunk ma NESSUNO è stato embeddato (embedder non disponibile /
-    /// errore) → i chiamanti evitano di sovrascrivere/cancellare i vettori esistenti.
+    /// `embedderFailed` = almeno un chunk non è stato embeddato. Un risultato parziale non deve
+    /// sostituire un indice completo né far apparire il file aggiornato.
     struct ChunkBuild: Sendable {
         let vectors: [ChunkVector]
         let chunkCount: Int
-        var embedderFailed: Bool { chunkCount > 0 && vectors.isEmpty }
+        var embedderFailed: Bool { vectors.count != chunkCount }
     }
 
     /// Chunk del testo + embedding (in BATCH: una richiesta sola per i provider di rete). Eseguita

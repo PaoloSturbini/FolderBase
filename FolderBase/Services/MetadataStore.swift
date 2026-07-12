@@ -230,14 +230,16 @@ final class MetadataStore: ObservableObject {
     /// Assegna lo stesso valore a più elementi in un'unica transazione (modifica in blocco).
     func updateBulk(items: [FileItem], field: MetadataField, value: String) {
         guard !items.isEmpty else { return }
-        pendingChangedIdentities.formUnion(items.map(\.identity))
-
-        notifyMetadataChanged(immediate: true)
+        let changedIdentities = Set(items.map(\.identity))
+        // SwiftUI deve sapere che la mutazione sta per avvenire; l'indice della tabella, invece,
+        // va aggiornato solo dopo che tutti i nuovi valori sono leggibili in memoria.
+        objectWillChange.send()
         for item in items {
             ensureRegistered(item)
             setInMemoryValue(identity: item.identity, fieldID: field.id, value: value)
             cancelPendingWrite(identity: item.identity, fieldID: field.id)
         }
+        metadataChanges.send(changedIdentities)
 
         let writes = items.map { (identity: $0.identity, fieldID: field.id, value: value) }
         if let databaseActor {
@@ -1686,15 +1688,21 @@ final class MetadataStore: ObservableObject {
         return sqlite3_step(statement) == SQLITE_ROW
     }
 
-    /// Vero se il file ha già embedding del MOTORE indicato (provider_id che inizia per prefisso).
+    /// Vero se tutti i chunk del file hanno embedding del MOTORE indicato.
     /// Serve a evitare di saltare file che hanno vettori di un altro motore quando si cambia provider.
     func hasVectors(for identity: String, providerPrefix: String) async -> Bool {
         if let databaseActor { return await databaseActor.hasVectors(identity: identity, providerPrefix: providerPrefix) }
         var statement: OpaquePointer?
-        let sql = "SELECT 1 FROM content_chunks c JOIN chunk_vectors v ON v.chunk_id = c.id WHERE c.file_identity = ? AND v.provider_id LIKE ? LIMIT 1"
+        let sql = """
+            SELECT 1 FROM content_chunks c
+            LEFT JOIN chunk_vectors v ON v.chunk_id = c.id AND v.provider_id LIKE ?
+            WHERE c.file_identity = ?
+            GROUP BY c.file_identity
+            HAVING COUNT(c.id) > 0 AND COUNT(v.chunk_id) = COUNT(c.id)
+            """
         guard (try? prepare(sql, statement: &statement)) != nil else { return false }
         defer { sqlite3_finalize(statement) }
-        try? bind([.text(identity), .text(providerPrefix + "%")], to: statement)
+        try? bind([.text(providerPrefix + "%"), .text(identity)], to: statement)
         return sqlite3_step(statement) == SQLITE_ROW
     }
 
