@@ -3,12 +3,20 @@ import SQLite3
 
 private let SQLITE_ACTOR_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-/// Connessione SQLite dedicata alle letture potenzialmente costose. L'actor garantisce che
+struct FileTrackingUpdate: Sendable {
+    let identity: String
+    let path: String
+    let name: String
+    let size: Int64?
+    let bookmark: Data?
+}
+
+/// Connessione SQLite dedicata al lavoro potenzialmente costoso. L'actor garantisce che
 /// statement e connessione non attraversino mai thread concorrenti e tiene il lavoro fuori dal
 /// MainActor. La connessione principale resta temporaneamente responsabile delle migrazioni e
 /// delle scritture; WAL rende le due connessioni cooperanti senza bloccare il rendering SwiftUI.
 actor SQLiteDatabaseActor {
-    enum DatabaseError: Error { case open(String), prepare(String) }
+    enum DatabaseError: Error { case open(String), prepare(String), busy, invalidBackup(String) }
 
     private var db: OpaquePointer?
 
@@ -28,6 +36,113 @@ actor SQLiteDatabaseActor {
     }
 
     deinit { sqlite3_close(db) }
+
+    func close() {
+        sqlite3_close(db)
+        db = nil
+    }
+
+    func upsertMetadata(_ writes: [(identity: String, fieldID: String, value: String)]) throws {
+        guard !writes.isEmpty else { return }
+        try transaction {
+            for write in writes {
+                try execute(
+                    """
+                    INSERT INTO metadata_values (file_identity, field_id, value)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(file_identity, field_id) DO UPDATE SET value = excluded.value
+                    """,
+                    texts: [write.identity, write.fieldID, write.value]
+                )
+            }
+        }
+    }
+
+    func purgeFiles(identities: [String]) throws {
+        guard !identities.isEmpty else { return }
+        try transaction {
+            for identity in identities {
+                try execute("DELETE FROM files WHERE identity = ?", texts: [identity])
+            }
+        }
+    }
+
+    func applyTrackingUpdates(_ updates: [FileTrackingUpdate]) throws {
+        guard !updates.isEmpty else { return }
+        try transaction {
+            for update in updates {
+                var statement: OpaquePointer?
+                try prepare("UPDATE files SET last_known_path=?, name=?, size=?, bookmark_data=?, updated_at=? WHERE identity=?", &statement)
+                defer { sqlite3_finalize(statement) }
+                bindText(statement, 1, update.path)
+                bindText(statement, 2, update.name)
+                if let size = update.size { sqlite3_bind_int64(statement, 3, size) } else { sqlite3_bind_null(statement, 3) }
+                if let bookmark = update.bookmark {
+                    _ = bookmark.withUnsafeBytes { sqlite3_bind_blob(statement, 4, $0.baseAddress, Int32(bookmark.count), SQLITE_ACTOR_TRANSIENT) }
+                } else { sqlite3_bind_null(statement, 4) }
+                sqlite3_bind_double(statement, 5, Date().timeIntervalSince1970)
+                bindText(statement, 6, update.identity)
+                try stepDone(statement)
+            }
+        }
+    }
+
+    func backup(to destinationURL: URL, maxBusyRetries: Int = 100) async throws {
+        var destination: OpaquePointer?
+        guard sqlite3_open(destinationURL.path, &destination) == SQLITE_OK else {
+            let message = destination.map { String(cString: sqlite3_errmsg($0)) } ?? "SQLite backup open failed"
+            sqlite3_close(destination)
+            throw DatabaseError.open(message)
+        }
+        defer { sqlite3_close(destination) }
+        guard let handle = sqlite3_backup_init(destination, "main", db, "main") else { throw prepareError() }
+        var retries = 0
+        var result: Int32 = SQLITE_OK
+        repeat {
+            result = sqlite3_backup_step(handle, 128)
+            if result == SQLITE_BUSY || result == SQLITE_LOCKED {
+                retries += 1
+                guard retries <= maxBusyRetries else {
+                    _ = sqlite3_backup_finish(handle)
+                    throw DatabaseError.busy
+                }
+                try await Task.sleep(for: .milliseconds(20))
+            } else if result == SQLITE_OK {
+                retries = 0
+                await Task.yield()
+            }
+        } while result == SQLITE_OK || result == SQLITE_BUSY || result == SQLITE_LOCKED
+        let finish = sqlite3_backup_finish(handle)
+        guard result == SQLITE_DONE, finish == SQLITE_OK else { throw prepareError() }
+    }
+
+    nonisolated static func validateBackup(at url: URL, thorough: Bool) throws {
+        var connection: OpaquePointer?
+        guard sqlite3_open_v2(url.path, &connection, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            sqlite3_close(connection)
+            throw DatabaseError.invalidBackup("Il file non è un database SQLite valido")
+        }
+        defer { sqlite3_close(connection) }
+        let check = thorough ? "PRAGMA integrity_check" : "PRAGMA quick_check"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(connection, check, -1, &statement, nil) == SQLITE_OK,
+              sqlite3_step(statement) == SQLITE_ROW,
+              sqlite3_column_text(statement, 0).map({ String(cString: $0) }) == "ok" else {
+            sqlite3_finalize(statement)
+            throw DatabaseError.invalidBackup("Controllo di integrità non superato")
+        }
+        sqlite3_finalize(statement)
+        let required = ["files", "metadata_fields", "metadata_values"]
+        for table in required {
+            guard sqlite3_prepare_v2(connection, "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.invalidBackup("Schema non leggibile")
+            }
+            sqlite3_bind_text(statement, 1, table, -1, SQLITE_ACTOR_TRANSIENT)
+            let exists = sqlite3_step(statement) == SQLITE_ROW
+            sqlite3_finalize(statement)
+            guard exists else { throw DatabaseError.invalidBackup("Schema FolderBase incompleto") }
+        }
+    }
 
     func loadMetadata(identities: Set<String>) throws -> [String: FileMetadata] {
         guard !identities.isEmpty else { return [:] }

@@ -48,6 +48,9 @@ final class IndexingService: ObservableObject {
     private let maxFileSize = 50 * 1024 * 1024
     /// Limite di sicurezza al numero di file enumerati in modo ricorsivo.
     private let maxRecursiveFiles = 20000
+    /// Limite intenzionalmente conservativo: OCR ed embedding possono entrambi essere onerosi.
+    /// Le scritture restano serializzate dal consumer sul `MainActor`/database actor.
+    private let maxConcurrentFiles = 3
 
     private var task: Task<Void, Never>?
 
@@ -192,71 +195,46 @@ final class IndexingService: ObservableObject {
         // (altrimenti va reindicizzato — es. dopo un cambio provider).
         let providerPrefix = Self.activeProviderPrefix()
 
-        for item in files {
-            if Task.isCancelled { break }
+        await withTaskGroup(of: PreparedFile.self) { group in
+            var nextIndex = 0
+            var inFlight = 0
 
-            let url = item.url
-            let hash = Self.changeHash(for: url)
-            let effectiveHash = hash ?? UUID().uuidString
-            let storedHash = hash == nil ? nil : await store.contentHash(for: item.identity)
-            let upToDate = hash != nil && storedHash == hash
-
-            if upToDate, await store.hasVectors(for: item.identity, providerPrefix: providerPrefix) {
-                processed += 1
-                progress = Progress(processed: processed, total: total)
-                continue
+            func enqueue(_ plan: FilePlan) {
+                group.addTask(priority: .utility) {
+                    await Self.prepare(plan, embedder: embedder)
+                }
+                inFlight += 1
             }
 
-            if upToDate, let existingText = await store.extractedText(for: item.identity) {
-                // Testo già estratto: rigenera solo gli embedding, senza ri-estrarre né ri-OCR.
-                let build = await Task.detached(priority: .utility) {
-                    await Self.buildChunkVectors(from: existingText, embedder: embedder)
-                }.value
-                // Se l'embedder ha fallito (nessun vettore da chunk esistenti), NON toccare i
-                // vettori già salvati: il file resterà da reindicizzare e verrà riprovato, invece
-                // di perdere il lavoro fatto.
-                if !build.embedderFailed {
-                    await store.replaceChunks(for: item.identity, chunks: build.vectors)
-                } else {
-                    recordEmbeddingFailure(fileName: item.name)
+            // Il producer consulta lo stato SQLite in modo seriale; solo estrazione/OCR/embedding
+            // entrano nel gruppo limitato. Il consumer effettua ugualmente un commit alla volta.
+            while nextIndex < files.count || inFlight > 0 {
+                if Task.isCancelled {
+                    group.cancelAll()
+                    break
                 }
-            } else {
-                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-                if size > maxFileSize {
-                    await store.markContentUnsupported(for: item, hash: effectiveHash)
-                } else {
-                    let result = await Task.detached(priority: .utility) { () -> (ExtractedText, ChunkBuild)? in
-                        guard let extracted = TextExtractor.extractText(from: url),
-                              !extracted.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-                        return (extracted, await Self.buildChunkVectors(from: extracted.text, embedder: embedder))
-                    }.value
-
-                    if let (extracted, build) = result {
-                        // I vettori si scrivono solo se l'embedder ha risposto: così un errore
-                        // transitorio (rate-limit, rete) non cancella eventuali vettori esistenti
-                        // e il file verrà riprovato al prossimo reindex.
-                        if !build.embedderFailed {
-                            await store.storeIndexedContent(
-                                for: item,
-                                text: extracted.text,
-                                ocrUsed: extracted.ocrUsed,
-                                hash: effectiveHash,
-                                chunks: build.vectors
-                            )
-                        } else {
-                            // Il testo/FTS resta comunque disponibile; i vettori precedenti non
-                            // vengono cancellati in caso di errore transitorio del provider.
-                            await store.storeExtractedText(for: item, text: extracted.text, ocrUsed: extracted.ocrUsed, hash: effectiveHash)
-                            recordEmbeddingFailure(fileName: item.name)
-                        }
+                while nextIndex < files.count && inFlight < maxConcurrentFiles {
+                    let item = files[nextIndex]
+                    nextIndex += 1
+                    let hash = Self.changeHash(for: item.url)
+                    let effectiveHash = hash ?? UUID().uuidString
+                    let storedHash = hash == nil ? nil : await store.contentHash(for: item.identity)
+                    let upToDate = hash != nil && storedHash == hash
+                    if upToDate, await store.hasVectors(for: item.identity, providerPrefix: providerPrefix) {
+                        processed += 1
+                        progress = Progress(processed: processed, total: total)
                     } else {
-                        await store.markContentUnsupported(for: item, hash: effectiveHash)
+                        let existingText = upToDate ? await store.extractedText(for: item.identity) : nil
+                        enqueue(FilePlan(item: item, hash: effectiveHash, existingText: existingText, maxFileSize: maxFileSize))
                     }
                 }
+                guard inFlight > 0, let prepared = await group.next() else { continue }
+                inFlight -= 1
+                if Task.isCancelled { group.cancelAll(); break }
+                await commit(prepared, store: store)
+                processed += 1
+                progress = Progress(processed: processed, total: total)
             }
-
-            processed += 1
-            progress = Progress(processed: processed, total: total)
         }
 
         // Con dei fallimenti, interroga il motore UNA volta per capire di chi è la colpa:
@@ -269,6 +247,51 @@ final class IndexingService: ObservableObject {
             case let .unreachable(detail):
                 embeddingFailureDiagnosis = .engineUnreachable(detail: detail)
             }
+        }
+    }
+
+    private struct FilePlan: Sendable {
+        let item: FileItem
+        let hash: String
+        let existingText: String?
+        let maxFileSize: Int
+    }
+
+    private enum PreparedFile: Sendable {
+        case vectorsOnly(item: FileItem, build: ChunkBuild)
+        case indexed(item: FileItem, hash: String, extracted: ExtractedText, build: ChunkBuild)
+        case unsupported(item: FileItem, hash: String)
+    }
+
+    nonisolated private static func prepare(_ plan: FilePlan, embedder: TextEmbedder) async -> PreparedFile {
+        if let text = plan.existingText {
+            return .vectorsOnly(item: plan.item, build: await buildChunkVectors(from: text, embedder: embedder))
+        }
+        if Task.isCancelled { return .unsupported(item: plan.item, hash: plan.hash) }
+        let size = (try? plan.item.url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        guard size <= plan.maxFileSize,
+              let extracted = TextExtractor.extractText(from: plan.item.url),
+              !extracted.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .unsupported(item: plan.item, hash: plan.hash)
+        }
+        let build = await buildChunkVectors(from: extracted.text, embedder: embedder)
+        return .indexed(item: plan.item, hash: plan.hash, extracted: extracted, build: build)
+    }
+
+    private func commit(_ prepared: PreparedFile, store: MetadataStore) async {
+        switch prepared {
+        case let .vectorsOnly(item, build):
+            if !build.embedderFailed { await store.replaceChunks(for: item.identity, chunks: build.vectors) }
+            else { recordEmbeddingFailure(fileName: item.name) }
+        case let .indexed(item, hash, extracted, build):
+            if !build.embedderFailed {
+                await store.storeIndexedContent(for: item, text: extracted.text, ocrUsed: extracted.ocrUsed, hash: hash, chunks: build.vectors)
+            } else {
+                await store.storeExtractedText(for: item, text: extracted.text, ocrUsed: extracted.ocrUsed, hash: hash)
+                recordEmbeddingFailure(fileName: item.name)
+            }
+        case let .unsupported(item, hash):
+            await store.markContentUnsupported(for: item, hash: hash)
         }
     }
 

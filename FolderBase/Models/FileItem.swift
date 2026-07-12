@@ -1,6 +1,6 @@
 import Foundation
 
-struct FileItem: Identifiable, Hashable {
+struct FileItem: Identifiable, Hashable, Sendable {
     var id: String { identity }
     var identity: String
     var url: URL

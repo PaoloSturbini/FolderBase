@@ -239,22 +239,12 @@ final class MetadataStore: ObservableObject {
             cancelPendingWrite(identity: item.identity, fieldID: field.id)
         }
 
-        do {
-            try execute("BEGIN IMMEDIATE TRANSACTION")
-            for item in items {
-                try execute(
-                    """
-                    INSERT INTO metadata_values (file_identity, field_id, value)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(file_identity, field_id) DO UPDATE SET value = excluded.value
-                    """,
-                    bindings: [.text(item.identity), .text(field.id), .text(value)]
-                )
+        let writes = items.map { (identity: $0.identity, fieldID: field.id, value: value) }
+        if let databaseActor {
+            Task {
+                do { try await databaseActor.upsertMetadata(writes) }
+                catch { assertionFailure("Failed bulk metadata update: \(error)") }
             }
-            try execute("COMMIT")
-        } catch {
-            try? execute("ROLLBACK")
-            assertionFailure("Failed bulk metadata update: \(error)")
         }
     }
 
@@ -597,17 +587,27 @@ final class MetadataStore: ObservableObject {
             let resolutions = rows.map { row in (row, Self.resolve(row)) }
 
             DispatchQueue.main.async {
+                Task { @MainActor in
                 var relocated = 0
                 var missingIdentities: [String] = []
                 var requiresMetadataReload = false
 
+                let trackingUpdates: [FileTrackingUpdate] = resolutions.compactMap { row, resolution in
+                    guard case .present(let url) = resolution else { return nil }
+                    let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
+                    let bookmark = row.bookmark ?? (try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil))
+                    return FileTrackingUpdate(identity: row.identity, path: url.path, name: url.lastPathComponent, size: size, bookmark: bookmark)
+                }
+
                 do {
+                    if let databaseActor = self.databaseActor {
+                        try await databaseActor.applyTrackingUpdates(trackingUpdates)
+                    }
                     try self.execute("BEGIN IMMEDIATE TRANSACTION")
                     for (row, resolution) in resolutions {
                         switch resolution {
                         case .present(let url):
                             if url.path != row.lastKnownPath { relocated += 1 }
-                            self.updateTracking(row, to: url)
                         case .relocated(let url):
                             _ = try? self.reconcileMovedItem(previousIdentity: row.identity, newURL: url, refreshingState: false)
                             relocated += 1
@@ -632,6 +632,7 @@ final class MetadataStore: ObservableObject {
                 if self.reconcileRequestedWhileRunning {
                     self.reconcileRequestedWhileRunning = false
                     self.reconcileManagedFiles(completion: completion)
+                }
                 }
             }
         }
@@ -773,8 +774,11 @@ final class MetadataStore: ObservableObject {
             .appendingPathComponent(".\(destinationURL.lastPathComponent).\(UUID().uuidString).tmp")
         defer { try? fm.removeItem(at: temporaryURL) }
 
-        try await writeSQLiteBackup(to: temporaryURL)
-        try validateBackup(at: temporaryURL)
+        guard let databaseActor else { throw StoreError.sqlite(message: "Database non disponibile") }
+        try await databaseActor.backup(to: temporaryURL)
+        try await Task.detached(priority: .utility) {
+            try SQLiteDatabaseActor.validateBackup(at: temporaryURL, thorough: false)
+        }.value
 
         // Pubblicazione atomica: un crash durante la copia non può lasciare al posto del backup
         // precedente un file troncato. Il rename sullo stesso volume è atomico.
@@ -785,39 +789,15 @@ final class MetadataStore: ObservableObject {
         }
     }
 
-    private func writeSQLiteBackup(to destinationURL: URL) async throws {
-        var destDB: OpaquePointer?
-        guard sqlite3_open(destinationURL.path, &destDB) == SQLITE_OK else {
-            let message = destDB.map { String(cString: sqlite3_errmsg($0)) } ?? "Impossibile aprire il file di destinazione"
-            sqlite3_close(destDB)
-            throw StoreError.sqlite(message: message)
-        }
-        defer { sqlite3_close(destDB) }
-
-        guard let backup = sqlite3_backup_init(destDB, "main", db, "main") else {
-            throw StoreError.sqlite(message: String(cString: sqlite3_errmsg(destDB)))
-        }
-        var stepResult: Int32 = SQLITE_OK
-        repeat {
-            stepResult = sqlite3_backup_step(backup, 128)
-            if stepResult == SQLITE_OK || stepResult == SQLITE_BUSY || stepResult == SQLITE_LOCKED {
-                await Task.yield()
-            }
-        } while stepResult == SQLITE_OK || stepResult == SQLITE_BUSY || stepResult == SQLITE_LOCKED
-        let finishResult = sqlite3_backup_finish(backup)
-
-        guard stepResult == SQLITE_DONE, finishResult == SQLITE_OK else {
-            throw StoreError.sqlite(message: String(cString: sqlite3_errmsg(destDB)))
-        }
-    }
-
     /// Sostituisce il database gestito con quello contenuto in `sourceURL`.
     /// Il file di origine viene prima validato (integrità + presenza dello schema
     /// FolderBase); solo se è valido il database corrente viene chiuso e rimpiazzato,
     /// poi riaperto e lo stato pubblicato ricaricato. In caso di file non valido lancia
     /// un errore SENZA toccare il database attuale.
-    func restore(from sourceURL: URL) throws {
-        try validateBackup(at: sourceURL)
+    func restore(from sourceURL: URL) async throws {
+        try await Task.detached(priority: .utility) {
+            try SQLiteDatabaseActor.validateBackup(at: sourceURL, thorough: true)
+        }.value
 
         // Le scritture posticipate riguardano il DB che stiamo per sostituire: annullale.
         for (_, work) in pendingWrites { work.cancel() }
@@ -826,21 +806,29 @@ final class MetadataStore: ObservableObject {
         pendingChangeNotification?.cancel()
         pendingChangeNotification = nil
 
+        if let databaseActor { await databaseActor.close() }
+        databaseActor = nil
         sqlite3_close(db)
         db = nil
 
         let fm = FileManager.default
+        let stagedURL = dbURL.deletingLastPathComponent()
+            .appendingPathComponent(".folderbase-restore-\(UUID().uuidString).sqlite")
+        defer { try? fm.removeItem(at: stagedURL) }
+        try fm.copyItem(at: sourceURL, to: stagedURL)
         let walURL = URL(fileURLWithPath: dbURL.path + "-wal")
         let shmURL = URL(fileURLWithPath: dbURL.path + "-shm")
         try? fm.removeItem(at: walURL)
         try? fm.removeItem(at: shmURL)
         if fm.fileExists(atPath: dbURL.path) {
-            try fm.removeItem(at: dbURL)
+            _ = try fm.replaceItemAt(dbURL, withItemAt: stagedURL)
+        } else {
+            try fm.moveItem(at: stagedURL, to: dbURL)
         }
-        try fm.copyItem(at: sourceURL, to: dbURL)
 
         try openDatabase()
         try migrateSchema()
+        databaseActor = try SQLiteDatabaseActor(url: dbURL)
         registeredIdentities = (try? loadRegisteredIdentities()) ?? []
         identityCacheByPath.removeAll()
         invalidateManagedDirectoriesCache()

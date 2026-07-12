@@ -18,6 +18,14 @@ let package = Package(
             linkerSettings: [
                 .linkedLibrary("sqlite3")
             ]
+        ),
+        .testTarget(
+            name: "FolderBaseTests",
+            dependencies: ["FolderBase"],
+            path: "Tests/FolderBaseTests",
+            linkerSettings: [
+                .linkedLibrary("sqlite3")
+            ]
         )
     ]
 )

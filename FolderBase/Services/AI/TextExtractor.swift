@@ -122,18 +122,28 @@ enum TextExtractor {
     // MARK: - Testo semplice
 
     private static func readPlainText(from url: URL) -> String? {
-        if let text = try? String(contentsOf: url, encoding: .utf8) {
+        // Carica il file una sola volta: i fallback cambiano soltanto la decodifica del buffer.
+        // Questo evita fino a tre letture dal filesystem per i testi non UTF-8.
+        guard let data = try? Data(contentsOf: url) else { return nil }
+
+        if let text = String(data: data, encoding: .utf8) {
             return text
         }
-        var usedEncoding: String.Encoding = .utf8
-        if let text = try? String(contentsOf: url, usedEncoding: &usedEncoding) {
+
+        var converted: NSString?
+        let detectedEncoding = NSString.stringEncoding(
+            for: data,
+            encodingOptions: nil,
+            convertedString: &converted,
+            usedLossyConversion: nil
+        )
+        if detectedEncoding != 0,
+           let text = converted as String? {
             return text
         }
+
         // Ultimo fallback: latin-1 (non fallisce quasi mai, interpreta byte per byte).
-        if let data = try? Data(contentsOf: url) {
-            return String(data: data, encoding: .isoLatin1)
-        }
-        return nil
+        return String(data: data, encoding: .isoLatin1)
     }
 
     // MARK: - PDF

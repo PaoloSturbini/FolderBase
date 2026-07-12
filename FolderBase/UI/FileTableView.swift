@@ -88,6 +88,11 @@ struct FileTableView: View {
     @State private var cachedIndex: [String: [String: String]] = [:]
     @State private var cachedSearchText: [String: String] = [:]
     @State private var cachedVisibleItems: [FileItem] = []
+    /// Indici della base corrente usati dagli aggiornamenti metadata incrementali. Vengono
+    /// ricostruiti insieme a `cachedIndex`, evitando una scansione di `searchSource` per ogni
+    /// notifica (e una seconda scansione per ogni identita modificata).
+    @State private var cachedItemsByID: [String: FileItem] = [:]
+    @State private var cachedSourceIDs: Set<String> = []
     @State private var noteLinkCache: [String: URL] = [:]
     @State private var missingNoteLinks: Set<String> = []
 
@@ -774,6 +779,10 @@ struct FileTableView: View {
     /// valori metadata) — NON a ogni tasto di ricerca o cambio ordinamento, che riusano l'indice.
     private func rebuildMetadataIndex() {
         let source = searchSource
+        var itemsByID: [String: FileItem] = [:]
+        itemsByID.reserveCapacity(source.count)
+        for item in source { itemsByID[item.id] = item }
+
         var index: [String: [String: String]] = [:]
         for field in metadataFields {
             var perItem: [String: String] = [:]
@@ -793,14 +802,15 @@ struct FileTableView: View {
         }
         cachedIndex = index
         cachedSearchText = searchIndex
+        cachedItemsByID = itemsByID
+        cachedSourceIDs = Set(itemsByID.keys)
         refreshDisplayCache()
     }
 
     /// Aggiorna solo le righe metadata realmente cambiate. Durante modifiche bulk o digitazione
     /// evita di rifare O(campi × file) quando è cambiato un solo file.
     private func updateMetadataIndex(changedIDs requestedIDs: Set<String>) {
-        let sourceIDs = Set(searchSource.map(\.id))
-        let changedIDs = requestedIDs.intersection(sourceIDs)
+        let changedIDs = requestedIDs.intersection(cachedSourceIDs)
         guard !changedIDs.isEmpty else { return }
 
         var index = cachedIndex
@@ -816,7 +826,7 @@ struct FileTableView: View {
         var searchIndex = cachedSearchText
         for identity in changedIDs {
             var components: [String] = []
-            if let item = searchSource.first(where: { $0.id == identity }) { components.append(item.name) }
+            if let item = cachedItemsByID[identity] { components.append(item.name) }
             for perItem in index.values {
                 if let value = perItem[identity], !value.isEmpty { components.append(value) }
             }

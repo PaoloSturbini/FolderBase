@@ -156,9 +156,9 @@ final class BackupService: ObservableObject {
         let safetyURL = store.databaseURL
             .deletingLastPathComponent()
             .appendingPathComponent(Prefix.preRestore + Self.timestamp() + ".sqlite")
-        try? await store.backup(to: safetyURL)
+        try await store.backup(to: safetyURL)
 
-        try store.restore(from: sourceURL)
+        try await store.restore(from: sourceURL)
     }
 
     /// Mantiene solo i `keepCount` backup automatici più recenti nella cartella.
