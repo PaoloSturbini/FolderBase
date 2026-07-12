@@ -20,9 +20,13 @@ SwiftUI provides the main application interface, with AppKit integration where m
 
 FileManager and macOS filesystem services are used to inspect and operate on real folders. FSEvents supports change detection. Metadata identity is designed to survive supported rename and move operations.
 
+Folder navigation uses a shared LRU `DirectorySnapshotCache`. The table and directory tree reuse the same snapshots, Back/Forward can render cached content immediately, and FSEvents watches only user-selected roots while invalidating affected branches.
+
 ### Database
 
 SQLite stores custom metadata, application state, content indexes and embeddings. FTS5 supports full-text search.
+
+Column definitions are owned by folders and resolved hierarchically from the selected root to the current directory. Parent definitions take precedence over same-name child definitions; ordering and visibility follow the same inheritance boundary.
 
 ### Document processing
 

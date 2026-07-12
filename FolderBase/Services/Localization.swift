@@ -407,7 +407,7 @@ enum LocalizedStrings {
         "templateMenu.empty": ("Nessun template — creane uno in Configurazione", "No templates — create one in Settings"),
         "templateMenu.apply": ("Applica template", "Apply template"),
         "templateMenu.columnsWord": ("colonne", "columns"),
-        "templateMenu.help": ("Genera le colonne di questa cartella da un template", "Generate this folder's columns from a template"),
+        "templateMenu.help": ("Applica un template a questa cartella e alle sue sottocartelle", "Apply a template to this folder and its subfolders"),
 
         // MARK: Menù contestuale righe
         "ctx.open": ("Apri", "Open"),

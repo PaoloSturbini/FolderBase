@@ -7,6 +7,7 @@ struct MainWindowView: View {
     @StateObject private var templateStore = TemplateStore()
     @StateObject private var backupService = BackupService()
     @StateObject private var indexingService = IndexingService()
+    @StateObject private var directoryCache = DirectorySnapshotCache()
     // @State (non @StateObject): MainWindowView possiede chatService in modo stabile ma NON si
     // ri-renderizza ai suoi cambi (streaming chat). Solo ChatView lo osserva. Evita che ogni token
     // della risposta rigeneri l'intera finestra/tabella (causa del blocco a 99% CPU).
@@ -31,7 +32,6 @@ struct MainWindowView: View {
     @AppStorage(AppAccentColor.storageKey) private var appAccentRaw = AppAccentColor.blue.rawValue
     @AppStorage(AppAccentColor.customHexKey) private var appAccentCustomHex = ""
     @State private var managedWatcher: FSEventsWatcher?
-    @State private var treeRefreshID = UUID()
     @State private var isLoading = false
     /// Lettura della cartella corrente: cancellata quando l'utente naviga altrove, così una
     /// directory lenta non continua a consumare I/O dopo essere diventata irrilevante.
@@ -48,7 +48,6 @@ struct MainWindowView: View {
                 selectedFolderURL: selectedFolderURL,
                 recentFolderURLs: recentFoldersStore.folderURLs,
                 treeRootURL: treeRootURL,
-                treeRefreshID: treeRefreshID,
                 sidebarFontSize: $sidebarFontSize,
                 contentFontSize: $contentFontSize,
                 appearanceMode: $appearanceMode,
@@ -63,6 +62,7 @@ struct MainWindowView: View {
                 metadataStore: metadataStore,
                 backupService: backupService,
                 indexingService: indexingService,
+                directoryCache: directoryCache,
                 selectedNoteItem: selectedNoteItem
             )
             .frame(minWidth: 220, idealWidth: 260, maxWidth: 380, maxHeight: .infinity)
@@ -71,6 +71,7 @@ struct MainWindowView: View {
                 items: $items,
                 metadataStore: metadataStore,
                 selectedFolderURL: selectedFolderURL,
+                configurationRootURL: treeRootURL,
                 errorMessage: errorMessage,
                 canGoBack: !backStack.isEmpty,
                 canGoForward: !forwardStack.isEmpty,
@@ -161,21 +162,27 @@ struct MainWindowView: View {
     /// Riconfigura l'osservatore FSEvents sull'insieme delle cartelle gestite più quella aperta.
     private func refreshManagedWatcher() {
         if managedWatcher == nil {
-            managedWatcher = FSEventsWatcher {
+            managedWatcher = FSEventsWatcher { changedPaths in
+                directoryCache.invalidate(paths: changedPaths)
                 metadataStore.reconcileManagedFiles { _, missingIdentities in
                     if autoPurgeOrphans, !missingIdentities.isEmpty {
                         _ = metadataStore.purge(identities: missingIdentities)
                     }
-                    reloadCurrentFolder()
+                    guard let selectedFolderURL else { return }
+                    let selectedPath = selectedFolderURL.standardizedFileURL.path
+                    if changedPaths.isEmpty || changedPaths.contains(where: {
+                        let changed = URL(fileURLWithPath: $0).standardizedFileURL.path
+                        return changed == selectedPath || changed.hasPrefix(selectedPath + "/") || selectedPath.hasPrefix(changed + "/")
+                    }) {
+                        reloadCurrentFolder()
+                    }
                 }
             }
         }
 
-        var dirs = Set(metadataStore.managedDirectories())
-        if let selectedFolderURL {
-            dirs.insert(selectedFolderURL.path)
-        }
-        managedWatcher?.watch(paths: Array(dirs))
+        // FSEvents osserva ricorsivamente: bastano le radici scelte dall'utente. Aggiungere ogni
+        // sottocartella costringeva a ricreare lo stream durante la navigazione.
+        managedWatcher?.watch(paths: recentFoldersStore.folderURLs.map(\.path))
     }
 
     private func loadInitialFolderIfNeeded() {
@@ -207,6 +214,7 @@ struct MainWindowView: View {
         selectedFolderURL = url
         treeRootURL = url
         recentFoldersStore.add(url)
+        refreshManagedWatcher()
         backStack = []
         forwardStack = []
         loadFolder(url)
@@ -216,6 +224,7 @@ struct MainWindowView: View {
         selectedFolderURL = url
         treeRootURL = url
         recentFoldersStore.add(url)
+        refreshManagedWatcher()
         backStack = []
         forwardStack = []
         loadFolder(url)
@@ -304,23 +313,28 @@ struct MainWindowView: View {
     }
 
     private func loadFolder(_ url: URL) {
-        // Registra la cartella (cheap, serve per agganciarvi le colonne metadata).
-        _ = try? metadataStore.registerFile(at: url)
-        refreshManagedWatcher()
-        fetchItems(at: url, refreshTree: false)
+        fetchItems(at: url, useCachedSnapshot: true)
     }
 
     private func reloadCurrentFolder() {
         guard let selectedFolderURL else { return }
-        fetchItems(at: selectedFolderURL, refreshTree: true)
+        directoryCache.invalidate(paths: [selectedFolderURL.path])
+        fetchItems(at: selectedFolderURL, useCachedSnapshot: false)
     }
 
     /// Legge il contenuto della cartella su un thread di background (la lettura del
     /// filesystem può essere lenta) e aggiorna la UI sul main thread. Un guard scarta
     /// i risultati arrivati in ritardo se nel frattempo si è navigato altrove.
-    private func fetchItems(at url: URL, refreshTree: Bool) {
+    private func fetchItems(at url: URL, useCachedSnapshot: Bool) {
         folderLoadTask?.cancel()
-        isLoading = true
+        if useCachedSnapshot, let cached = directoryCache.snapshot(for: url) {
+            items = cached.items
+            metadataStore.loadMetadata(for: cached.items)
+            errorMessage = nil
+            isLoading = false
+        } else {
+            isLoading = true
+        }
         let includeHidden = showHiddenFiles
 
         folderLoadTask = Task {
@@ -344,6 +358,7 @@ struct MainWindowView: View {
             transaction.disablesAnimations = true
             withTransaction(transaction) {
                 if let loaded = outcome.items {
+                    directoryCache.store(loaded, for: url)
                     items = loaded
                     metadataStore.loadMetadata(for: loaded)
                     errorMessage = nil
@@ -352,7 +367,6 @@ struct MainWindowView: View {
                     errorMessage = error
                 }
 
-                if refreshTree { treeRefreshID = UUID() }
                 isLoading = false
             }
         }

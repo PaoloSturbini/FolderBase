@@ -90,7 +90,7 @@ Ogni tabella mostra di base: **Name**, **Type**, **Created**, **Size**. Le carte
 
 ### 4.4 Aggiungere colonne metadata
 
-Pulsante **+ Colonna** in alto a destra. Le colonne valgono **solo per la cartella in cui le crei**. Tipi disponibili:
+Pulsante **+ Colonna** in alto a destra. Le colonne create in una cartella vengono **ereditate da tutte le sue sottocartelle**. Se una sottocartella contiene già una colonna con lo stesso nome, prevale la definizione della cartella superiore. Tipi disponibili:
 
 | Tipo | A cosa serve | Ordinamento |
 |------|--------------|-------------|
@@ -105,14 +105,14 @@ I tag colorati (Select e Kanban) possono usare 8 colori: grigio, rosso, arancio,
 
 ### 4.5 Template di colonne
 
-Un **template** è un insieme di colonne (nome + tipo) riutilizzabile. Quando apri una cartella *senza* colonne FolderBase, il pulsante con l'icona template in alto a sinistra le genera automaticamente da un template. I template si creano e si modificano da **Configurazione → Template**.
+Un **template** è un insieme di colonne (nome + tipo) riutilizzabile. Il pulsante con l'icona template in alto a sinistra è disponibile nella cartella radice selezionata e in ogni sua sottocartella, anche se esistono già colonne. Le colonne applicate vengono ereditate da tutto il sottoalbero. I template si creano e si modificano da **Configurazione → Template**.
 
 ### 4.6 Gestire le colonne
 
 - **Ridimensiona / riordina**: trascina bordi e intestazioni.
 - **Mostra / nascondi**: clic destro sull'intestazione.
 - **Elimina**: dal menù **Colonne**.
-- Larghezza, ordine e visibilità sono **persistenti** (salvati via `TableColumnCustomization` in `@AppStorage`).
+- Larghezza, ordine e visibilità sono **persistenti ed ereditati** dalle sottocartelle; nei conflitti prevale la configurazione dell'antenato più alto della radice selezionata.
 
 ### 4.7 Ordinare
 
@@ -234,7 +234,7 @@ Il cuore di FolderBase è il modo in cui lega i metadata ai file:
 - Ogni file/cartella ha un'**identità stabile** calcolata dagli identificatori filesystem di macOS (`fileResourceIdentifier` + `volumeIdentifier`), con fallback al path solo se l'identificatore non è disponibile.
 - I metadata sono legati a questa identità, **non al path**: il path è solo l'ultima posizione nota. Per questo le note "seguono" un file quando lo rinomini o lo sposti sullo stesso volume.
 - Se un'operazione fatta dall'app genera una nuova identità, FolderBase **migra** metadata e colonne sulla nuova identità (`reconcileMovedItem`).
-- Le colonne metadata sono **per-cartella**: la chiave è l'identità filesystem della cartella.
+- Le definizioni delle colonne appartengono a una cartella, ma la configurazione effettiva è **gerarchica**: ogni sottocartella eredita le colonne degli antenati e la definizione superiore prevale sui nomi in conflitto.
 
 ---
 
@@ -249,6 +249,7 @@ FolderBase/
     │               MetadataField.swift        # colonna metadata + tipi + tag colorati + formatter
     │               MetadataTemplate.swift      # template di colonne riutilizzabili
     ├── Services/   FileBrowserService.swift   # legge il contenuto di una cartella (puro, thread-safe)
+    │               DirectorySnapshotCache.swift # cache LRU condivisa da tabella/albero e Back/Forward
     │               MetadataStore.swift        # metadata e colonne per-cartella (SQLite, cache identità, scritture debounced)
     │               FSEventsWatcher.swift      # auto-refresh basato su FSEvents (con difese anti-crash fd 0)
     │               FolderWatcher.swift        # watcher legacy su vnode (DispatchSource)
@@ -298,6 +299,8 @@ Pragma attivi: `foreign_keys = ON`, `journal_mode = WAL`.
 - L'identità file è **in cache** per path e l'indice metadata è separato da filtro/sort, con norme dei vettori precalcolate: nessuna scrittura su disco durante il rendering di SwiftUI.
 - Le note di testo si salvano con **debounce**; le modifiche in blocco usano una **singola transazione**.
 - `FileBrowserService` è puro e senza stato, quindi le letture delle cartelle possono girare in background; il reconcile è asincrono.
+- Tabella e albero condividono una **cache LRU di snapshot**: Back/Forward mostra subito il contenuto noto e lo aggiorna in background.
+- FSEvents osserva solo le radici selezionate e invalida il ramo coinvolto, senza ricreare lo stream o ricaricare tutto l'albero a ogni navigazione.
 - L'estrazione testo usa un `runProcess` con timeout e SIGKILL per evitare blocchi dell'indicizzazione.
 
 ---

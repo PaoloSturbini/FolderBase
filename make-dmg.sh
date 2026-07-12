@@ -12,7 +12,7 @@ CONFIG="release"
 BUILD_PATH="/tmp/folderbase-run"
 ICON_PNG="AppIcon.png"
 BUNDLE_ID="com.paolosturbini.folderbase"
-VERSION="1.5.3"
+VERSION="1.5.4"
 DIST_DIR="dist"
 
 echo ">> Compilo in ${CONFIG}..."
@@ -42,7 +42,7 @@ cat > "${APP}/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key>         <string>${APP_NAME}</string>
     <key>CFBundlePackageType</key>        <string>APPL</string>
     <key>CFBundleShortVersionString</key> <string>${VERSION}</string>
-    <key>CFBundleVersion</key>            <string>10</string>
+    <key>CFBundleVersion</key>            <string>11</string>
     <key>CFBundleIconFile</key>           <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>     <string>14.4</string>
     <key>NSHighResolutionCapable</key>    <true/>

@@ -163,9 +163,53 @@ final class MetadataStore: ObservableObject {
 
     /// Lettura pura: nessuna scrittura su disco. La cartella viene registrata in fase di
     /// caricamento da `FileBrowserService`, quindi qui basta risolvere l'identità dalla cache.
-    func fields(for folderURL: URL?) -> [MetadataField] {
-        guard let folderURL, let identity = identity(for: folderURL) else { return [] }
-        return fieldsByFolder[identity] ?? []
+    func fields(for folderURL: URL?, configurationRootURL: URL? = nil) -> [MetadataField] {
+        guard let folderURL else { return [] }
+        var groups: [[MetadataField]] = []
+        for url in Self.ancestorURLs(from: configurationRootURL, through: folderURL) {
+            guard let folderIdentity = identity(for: url) else { continue }
+            groups.append(fieldsByFolder[folderIdentity] ?? [])
+        }
+        return Self.mergeInheritedFields(groups)
+    }
+
+    static func mergeInheritedFields(_ groups: [[MetadataField]]) -> [MetadataField] {
+        var result: [MetadataField] = []
+        var claimedNames: Set<String> = []
+        for fields in groups {
+            for field in fields {
+                let key = field.name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                guard claimedNames.insert(key).inserted else { continue }
+                result.append(field)
+            }
+        }
+        return result
+    }
+
+    func ownerURL(of field: MetadataField, folderURL: URL, configurationRootURL: URL?) -> URL {
+        for url in Self.ancestorURLs(from: configurationRootURL, through: folderURL) {
+            guard let folderIdentity = identity(for: url) else { continue }
+            if fieldsByFolder[folderIdentity]?.contains(where: { $0.id == field.id }) == true { return url }
+        }
+        return folderURL
+    }
+
+    private static func ancestorURLs(from rootURL: URL?, through folderURL: URL) -> [URL] {
+        let folder = folderURL.standardizedFileURL
+        let candidate = rootURL?.standardizedFileURL
+        let root = candidate.flatMap {
+            folder.path == $0.path || folder.path.hasPrefix($0.path + "/") ? $0 : nil
+        } ?? folder
+        var urls: [URL] = []
+        var current = folder
+        while true {
+            urls.append(current)
+            if current.path == root.path { break }
+            let parent = current.deletingLastPathComponent().standardizedFileURL
+            guard parent.path != current.path, parent.path.hasPrefix(root.path) else { break }
+            current = parent
+        }
+        return urls.reversed()
     }
 
     func metadata(for item: FileItem) -> FileMetadata {
