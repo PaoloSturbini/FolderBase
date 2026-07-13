@@ -37,6 +37,47 @@ enum TextExtractor {
 
     static let recognitionLanguages = ["it-IT", "en-US"]
 
+    /// Dimensione massima per un file di tipo sconosciuto (nessun UTType): oltre questa soglia non
+    /// si tenta la lettura come testo, per non caricare in memoria interi binari senza tipo.
+    static let unknownTypeMaxBytes = 2_000_000
+
+    /// Estensioni note come NON indicizzabili: media, archivi, immagini disco, binari/eseguibili,
+    /// database, font, formati grafici proprietari. Da questi file non si ricava testo utile, quindi
+    /// vanno esclusi PRIMA di tentare estrazione/OCR/anteprima (che sarebbero solo lavoro sprecato).
+    nonisolated static let nonIndexableExtensions: Set<String> = [
+        "mp4", "mov", "m4v", "avi", "mkv", "webm", "mpg", "mpeg", "wmv", "flv", "3gp", "m2ts", "ts",
+        "mp3", "wav", "aac", "flac", "ogg", "oga", "m4a", "aiff", "aif", "wma", "opus", "amr",
+        "zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar", "dmg", "iso", "pkg", "cpgz", "zst", "lz4",
+        "app", "exe", "dll", "so", "dylib", "o", "a", "bin", "class", "jar", "wasm", "msi", "deb", "rpm",
+        "sqlite", "sqlite3", "db", "db3", "mdb", "accdb", "realm", "pack", "idx",
+        "ttf", "otf", "ttc", "woff", "woff2",
+        "psd", "ai", "sketch", "fig", "blend", "fbx", "obj", "stl", "3ds", "dwg", "ico", "icns",
+        "crdownload", "part", "tmp"
+    ]
+
+    /// True se dal file è plausibile estrarre testo (direttamente o via OCR/anteprima). Usato per
+    /// filtrare la coda di indicizzazione: evita di tentare l'estrazione su file inutili. Rispecchia
+    /// esattamente i formati gestiti da `extractText`.
+    nonisolated static func isIndexableCandidate(_ url: URL) -> Bool {
+        let ext = url.pathExtension.lowercased()
+        if nonIndexableExtensions.contains(ext) { return false }
+        if textutilExtensions.contains(ext) { return true }
+        if ext == "pptx" || ext == "xlsx" { return true }
+        if quickLookExtensions.contains(ext) { return true }
+
+        if let type = fileType(for: url) {
+            if type.conforms(to: .pdf) || type.conforms(to: .image) { return true }
+            if isPlainTextType(type) { return true }
+            // Tipo noto ma non testuale (audio/video/archivio/eseguibile…): non indicizzabile.
+            return false
+        }
+
+        // Tipo sconosciuto (es. .pem, dotfile di configurazione): plausibilmente testo, ma solo se
+        // piccolo, per non leggere interi binari privi di tipo.
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        return size > 0 && size <= unknownTypeMaxBytes
+    }
+
     static func extractText(from url: URL) -> ExtractedText? {
         let ext = url.pathExtension.lowercased()
 

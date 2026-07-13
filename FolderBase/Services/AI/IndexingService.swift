@@ -85,7 +85,7 @@ final class IndexingService: ObservableObject {
         let embedder = EmbeddingEngine.active()
         task = Task { [weak self] in
             let files = await Task.detached(priority: .utility) {
-                Self.fileItems(under: root, limit: limit)
+                Self.fileItems(under: root, limit: limit, contentOnly: true)
             }.value
             guard let self, !Task.isCancelled else { self?.finish(); return }
             await self.runLoop(files: files, store: store, embedder: embedder)
@@ -131,7 +131,7 @@ final class IndexingService: ObservableObject {
     func status(root: URL, store: MetadataStore) async -> FolderIndexStatus {
         let limit = maxRecursiveFiles
         let fingerprints = await Task.detached(priority: .utility) {
-            Self.fingerprints(under: root, limit: limit)
+            Self.fingerprints(under: root, limit: limit, contentOnly: true)
         }.value
         guard !fingerprints.isEmpty else { return .notIndexed }
 
@@ -184,9 +184,14 @@ final class IndexingService: ObservableObject {
         task = nil
     }
 
-    private func runLoop(files: [FileItem], store: MetadataStore, embedder: TextEmbedder) async {
+    private func runLoop(files rawFiles: [FileItem], store: MetadataStore, embedder: TextEmbedder) async {
+        // Salta a monte i file da cui non si ricava testo (video, archivi, binari…): non ha senso
+        // tentarne l'estrazione. L'enumerazione ricorsiva li ha già filtrati; questo copre anche
+        // l'indicizzazione "flat" della cartella corrente, i cui item arrivano dalla tabella.
+        let files = rawFiles.filter { TextExtractor.isIndexableCandidate($0.url) }
         let total = files.count
         progress = Progress(processed: 0, total: total)
+        guard total > 0 else { return }
         embeddingFailures = 0
         embeddingFailedFiles = []
         embeddingFailureDiagnosis = nil
@@ -342,7 +347,11 @@ final class IndexingService: ObservableObject {
 
     /// URL dei file indicizzabili sotto `root` (ricorsivo). Salta i file nascosti e non discende
     /// nei pacchetti (i .app ecc. sono ignorati; i pacchetti iWork sono trattati come singolo file).
-    nonisolated static func indexableURLs(under root: URL, limit: Int) -> [URL] {
+    /// - Parameter contentOnly: se `true`, include solo i file da cui è plausibile estrarre testo
+    ///   (vedi `TextExtractor.isIndexableCandidate`). Usato dalla pipeline di indicizzazione per non
+    ///   accodare né contare file inutili (video, archivi, binari…). La ricerca per nome lascia il
+    ///   default `false`, così continua a trovare TUTTI i file del sottoalbero.
+    nonisolated static func indexableURLs(under root: URL, limit: Int, contentOnly: Bool = false) -> [URL] {
         guard !FileSystemPolicy.isInTrash(root) else { return [] }
         let fileManager = FileManager.default
         guard let enumerator = fileManager.enumerator(
@@ -362,18 +371,18 @@ final class IndexingService: ObservableObject {
             if values?.isPackage == true {
                 enumerator.skipDescendants()
                 if indexablePackageExtensions.contains(url.pathExtension.lowercased()) {
-                    urls.append(url)
+                    urls.append(url)   // pacchetti iWork: sempre candidati (gestiti via anteprima)
                 }
             } else if values?.isRegularFile == true {
-                urls.append(url)
+                if !contentOnly || TextExtractor.isIndexableCandidate(url) { urls.append(url) }
             }
             if urls.count >= limit { break }
         }
         return urls
     }
 
-    nonisolated static func fileItems(under root: URL, limit: Int) -> [FileItem] {
-        indexableURLs(under: root, limit: limit).compactMap { fileItem(for: $0) }
+    nonisolated static func fileItems(under root: URL, limit: Int, contentOnly: Bool = false) -> [FileItem] {
+        indexableURLs(under: root, limit: limit, contentOnly: contentOnly).compactMap { fileItem(for: $0) }
     }
 
     nonisolated static func fileItem(for url: URL) -> FileItem? {
@@ -391,8 +400,10 @@ final class IndexingService: ObservableObject {
     }
 
     /// (identità, hash) per ogni file del sottoalbero: usato per calcolare lo stato di copertura.
-    nonisolated static func fingerprints(under root: URL, limit: Int) -> [(identity: String, hash: String)] {
-        indexableURLs(under: root, limit: limit).compactMap { url in
+    /// `contentOnly` allinea il denominatore della copertura all'insieme che l'indicizzazione
+    /// processa davvero (solo file con contenuto estraibile).
+    nonisolated static func fingerprints(under root: URL, limit: Int, contentOnly: Bool = false) -> [(identity: String, hash: String)] {
+        indexableURLs(under: root, limit: limit, contentOnly: contentOnly).compactMap { url in
             guard let hash = changeHash(for: url),
                   let values = try? url.resourceValues(forKeys: [.fileResourceIdentifierKey, .volumeIdentifierKey]) else { return nil }
             return (MetadataStore.identity(for: url, resourceValues: values), hash)

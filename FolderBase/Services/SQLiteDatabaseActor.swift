@@ -11,6 +11,18 @@ struct FileTrackingUpdate: Sendable {
     let bookmark: Data?
 }
 
+/// Riga grezza per la ricerca semantica, prodotta dalla connessione di background. Contiene già il
+/// vettore decodificato: il costoso passaggio BLOB→[Float] avviene fuori dal main thread.
+struct SemanticRow: Sendable {
+    let identity: String
+    let path: String
+    let name: String
+    let text: String
+    let providerID: String
+    let vector: [Float]
+    let storedNorm: Float
+}
+
 /// Connessione SQLite dedicata al lavoro potenzialmente costoso. L'actor garantisce che
 /// statement e connessione non attraversino mai thread concorrenti e tiene il lavoro fuori dal
 /// MainActor. La connessione principale resta temporaneamente responsabile delle migrazioni e
@@ -19,6 +31,10 @@ actor SQLiteDatabaseActor {
     enum DatabaseError: Error { case open(String), prepare(String), busy, invalidBackup(String) }
 
     private var db: OpaquePointer?
+    /// Cache di prepared statement (chiave = SQL). Evita `sqlite3_prepare_v2`/`sqlite3_finalize`
+    /// ad ogni chiamata sui percorsi caldi (upsert, insert chunk/vettori, tracking updates):
+    /// gli statement vengono riusati con `sqlite3_reset` + `sqlite3_clear_bindings`.
+    private var statementCache: [String: OpaquePointer] = [:]
 
     init(url: URL) throws {
         var connection: OpaquePointer?
@@ -31,13 +47,22 @@ actor SQLiteDatabaseActor {
         sqlite3_busy_timeout(connection, 5_000)
         sqlite3_exec(connection, "PRAGMA foreign_keys = ON", nil, nil, nil)
         sqlite3_exec(connection, "PRAGMA journal_mode = WAL", nil, nil, nil)
+        // Sicuro sotto WAL: dimezza il costo dei COMMIT evitando l'fsync completo di ogni
+        // transazione. Questa connessione esegue le scritture più pesanti (testo estratto,
+        // chunk, vettori embedding) durante l'indicizzazione.
+        sqlite3_exec(connection, "PRAGMA synchronous = NORMAL", nil, nil, nil)
         sqlite3_exec(connection, "PRAGMA temp_store = MEMORY", nil, nil, nil)
         sqlite3_exec(connection, "PRAGMA cache_size = -16000", nil, nil, nil)
     }
 
-    deinit { sqlite3_close(db) }
+    deinit {
+        for statement in statementCache.values { sqlite3_finalize(statement) }
+        sqlite3_close(db)
+    }
 
     func close() {
+        for statement in statementCache.values { sqlite3_finalize(statement) }
+        statementCache.removeAll()
         sqlite3_close(db)
         db = nil
     }
@@ -70,10 +95,10 @@ actor SQLiteDatabaseActor {
     func applyTrackingUpdates(_ updates: [FileTrackingUpdate]) throws {
         guard !updates.isEmpty else { return }
         try transaction {
+            let sql = "UPDATE files SET last_known_path=?, name=?, size=?, bookmark_data=?, updated_at=? WHERE identity=?"
             for update in updates {
-                var statement: OpaquePointer?
-                try prepare("UPDATE files SET last_known_path=?, name=?, size=?, bookmark_data=?, updated_at=? WHERE identity=?", &statement)
-                defer { sqlite3_finalize(statement) }
+                let statement = try cachedStatement(sql)
+                defer { sqlite3_reset(statement) }
                 bindText(statement, 1, update.path)
                 bindText(statement, 2, update.name)
                 if let size = update.size { sqlite3_bind_int64(statement, 3, size) } else { sqlite3_bind_null(statement, 3) }
@@ -225,9 +250,76 @@ actor SQLiteDatabaseActor {
         return result
     }
 
+    /// Spazi (provider_id) presenti nell'indice. Eseguito sulla connessione di background.
+    func distinctProviderIDs() -> [String] {
+        guard let statement = try? cachedStatement("SELECT DISTINCT provider_id FROM chunk_vectors") else { return [] }
+        defer { sqlite3_reset(statement) }
+        var result: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW { result.append(text(statement, 0)) }
+        return result
+    }
+
+    /// Legge e decodifica i chunk (con vettori) per la ricerca semantica, filtrando per candidati
+    /// tramite una tabella temporanea indicizzata. Tutto il lavoro pesante (scansione, copia BLOB,
+    /// decodifica in `[Float]`) resta sulla connessione di background, fuori dal main thread.
+    /// Il vettore viene decodificato solo per gli spazi presenti in `querySpaces` (gli altri chunk
+    /// servono comunque al punteggio lessicale su testo/nome): evita di deserializzare BLOB inutili.
+    func semanticRows(candidates: Set<String>, querySpaces: Set<String>) -> [SemanticRow] {
+        if !candidates.isEmpty, !prepareCandidateTable(candidates) { return [] }
+        let sql = """
+            SELECT c.file_identity, f.last_known_path, f.name, c.text, v.provider_id, v.vector, v.norm
+            FROM chunk_vectors v
+            JOIN content_chunks c ON c.id = v.chunk_id
+            JOIN files f ON f.identity = c.file_identity
+            \(candidates.isEmpty ? "" : "JOIN temp.semantic_candidates sc ON sc.identity = c.file_identity")
+            """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(statement) }
+        var rows: [SemanticRow] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let providerID = text(statement, 4)
+            var vector: [Float] = []
+            if querySpaces.contains(providerID), let pointer = sqlite3_column_blob(statement, 5) {
+                let length = Int(sqlite3_column_bytes(statement, 5))
+                let count = length / MemoryLayout<Float>.stride
+                if count > 0 {
+                    vector = [Float](unsafeUninitializedCapacity: count) { buffer, initialized in
+                        memcpy(buffer.baseAddress, pointer, count * MemoryLayout<Float>.stride)
+                        initialized = count
+                    }
+                }
+            }
+            rows.append(SemanticRow(
+                identity: text(statement, 0),
+                path: text(statement, 1),
+                name: text(statement, 2),
+                text: text(statement, 3),
+                providerID: providerID,
+                vector: vector,
+                storedNorm: Float(sqlite3_column_double(statement, 6))
+            ))
+        }
+        return rows
+    }
+
+    private func prepareCandidateTable(_ identities: Set<String>) -> Bool {
+        do {
+            try execute("CREATE TEMP TABLE IF NOT EXISTS semantic_candidates (identity TEXT PRIMARY KEY) WITHOUT ROWID", texts: [])
+            try execute("DELETE FROM temp.semantic_candidates", texts: [])
+            try transaction {
+                for identity in identities {
+                    try execute("INSERT INTO temp.semantic_candidates(identity) VALUES (?)", texts: [identity])
+                }
+            }
+            return true
+        } catch {
+            return false
+        }
+    }
+
     func storeContent(identity: String, name: String, text body: String?, ocrUsed: Bool, hash: String, state: String, chunks: [ChunkVector]?) throws {
         try transaction {
-            var statement: OpaquePointer?
             let contentSQL = """
                 INSERT INTO file_content (file_identity, extracted_text, ocr_used, content_hash, extracted_at, index_state)
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -235,7 +327,7 @@ actor SQLiteDatabaseActor {
                 ocr_used=excluded.ocr_used, content_hash=excluded.content_hash,
                 extracted_at=excluded.extracted_at, index_state=excluded.index_state
                 """
-            try prepare(contentSQL, &statement)
+            let statement = try cachedStatement(contentSQL)
             bindText(statement, 1, identity)
             if let body { bindText(statement, 2, body) } else { sqlite3_bind_null(statement, 2) }
             sqlite3_bind_int(statement, 3, ocrUsed ? 1 : 0)
@@ -243,7 +335,7 @@ actor SQLiteDatabaseActor {
             sqlite3_bind_double(statement, 5, Date().timeIntervalSince1970)
             bindText(statement, 6, state)
             try stepDone(statement)
-            sqlite3_finalize(statement)
+            sqlite3_reset(statement)
 
             try execute("DELETE FROM content_fts WHERE file_identity = ?", texts: [identity])
             if let body {
@@ -261,26 +353,27 @@ actor SQLiteDatabaseActor {
 
     private func replaceChunksInsideTransaction(identity: String, chunks: [ChunkVector]) throws {
         try execute("DELETE FROM content_chunks WHERE file_identity = ?", texts: [identity])
+        let chunkSQL = "INSERT INTO content_chunks (file_identity, ordinal, text) VALUES (?, ?, ?)"
+        let vectorSQL = "INSERT INTO chunk_vectors (chunk_id, provider_id, dimension, vector, norm) VALUES (?, ?, ?, ?, ?)"
         for chunk in chunks {
-            var statement: OpaquePointer?
-            try prepare("INSERT INTO content_chunks (file_identity, ordinal, text) VALUES (?, ?, ?)", &statement)
-            bindText(statement, 1, identity)
-            sqlite3_bind_int(statement, 2, Int32(chunk.ordinal))
-            bindText(statement, 3, chunk.text)
-            try stepDone(statement)
-            sqlite3_finalize(statement)
+            let chunkStatement = try cachedStatement(chunkSQL)
+            bindText(chunkStatement, 1, identity)
+            sqlite3_bind_int(chunkStatement, 2, Int32(chunk.ordinal))
+            bindText(chunkStatement, 3, chunk.text)
+            try stepDone(chunkStatement)
+            sqlite3_reset(chunkStatement)
             let chunkID = sqlite3_last_insert_rowid(db)
 
-            try prepare("INSERT INTO chunk_vectors (chunk_id, provider_id, dimension, vector, norm) VALUES (?, ?, ?, ?, ?)", &statement)
-            sqlite3_bind_int64(statement, 1, chunkID)
-            bindText(statement, 2, chunk.providerID)
-            sqlite3_bind_int(statement, 3, Int32(chunk.vector.count))
+            let vectorStatement = try cachedStatement(vectorSQL)
+            sqlite3_bind_int64(vectorStatement, 1, chunkID)
+            bindText(vectorStatement, 2, chunk.providerID)
+            sqlite3_bind_int(vectorStatement, 3, Int32(chunk.vector.count))
             let data = chunk.vector.withUnsafeBufferPointer { Data(buffer: $0) }
-            _ = data.withUnsafeBytes { sqlite3_bind_blob(statement, 4, $0.baseAddress, Int32(data.count), SQLITE_ACTOR_TRANSIENT) }
+            _ = data.withUnsafeBytes { sqlite3_bind_blob(vectorStatement, 4, $0.baseAddress, Int32(data.count), SQLITE_ACTOR_TRANSIENT) }
             let norm = sqrt(chunk.vector.reduce(Float(0)) { $0 + $1 * $1 })
-            sqlite3_bind_double(statement, 5, Double(norm))
-            try stepDone(statement)
-            sqlite3_finalize(statement)
+            sqlite3_bind_double(vectorStatement, 5, Double(norm))
+            try stepDone(vectorStatement)
+            sqlite3_reset(vectorStatement)
         }
     }
 
@@ -296,15 +389,24 @@ actor SQLiteDatabaseActor {
     }
 
     private func execute(_ sql: String, texts: [String]) throws {
-        var statement: OpaquePointer?
-        try prepare(sql, &statement)
-        defer { sqlite3_finalize(statement) }
+        let statement = try cachedStatement(sql)
+        defer { sqlite3_reset(statement) }
         for (offset, value) in texts.enumerated() { bindText(statement, Int32(offset + 1), value) }
         try stepDone(statement)
     }
 
-    private func prepare(_ sql: String, _ statement: inout OpaquePointer?) throws {
-        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { throw prepareError() }
+    /// Restituisce uno statement preparato riusabile per l'SQL dato, resettandolo e
+    /// azzerandone i binding. Gli statement restano vivi fino a `close()`/`deinit`.
+    private func cachedStatement(_ sql: String) throws -> OpaquePointer? {
+        if let existing = statementCache[sql] {
+            sqlite3_reset(existing)
+            sqlite3_clear_bindings(existing)
+            return existing
+        }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else { throw prepareError() }
+        statementCache[sql] = statement
+        return statement
     }
 
     private func bindText(_ statement: OpaquePointer?, _ index: Int32, _ value: String) {
@@ -316,9 +418,8 @@ actor SQLiteDatabaseActor {
     }
 
     private func scalarText(_ sql: String, values: [String]) -> String? {
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return nil }
-        defer { sqlite3_finalize(statement) }
+        guard let statement = try? cachedStatement(sql) else { return nil }
+        defer { sqlite3_reset(statement) }
         for (offset, value) in values.enumerated() {
             sqlite3_bind_text(statement, Int32(offset + 1), value, -1, SQLITE_ACTOR_TRANSIENT)
         }
