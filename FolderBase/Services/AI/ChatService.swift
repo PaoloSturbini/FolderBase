@@ -134,14 +134,15 @@ final class ChatService: ObservableObject {
             // in italiano, documenti in inglese). Con un motore multilingue (Ollama/OpenAI) lo spazio
             // è unico e copre già tutte le lingue.
             let embedder = EmbeddingEngine.active()
-            let spaces = store.indexedProviderIDs()
+            let spaces = await store.indexedProviderIDsAsync()
             let queries = await embedder.embedForSpaces(question, providerIDs: spaces)
 
             // Pool ampio (più del necessario): serve al SourceSelector per vedere le alternative,
             // riconoscere versioni dello stesso documento e rilevare ambiguità.
             // Non si fallisce se manca l'embedding: il recupero per parole chiave è comunque possibile.
+            // La scansione vettoriale + scoring girano fuori dal main thread (vedi semanticChunksAsync).
             let poolLimit = max(chunkCount * 4, 24)
-            let pool = store.semanticChunks(query: question, queries: queries, candidates: scope, limit: poolLimit)
+            let pool = await store.semanticChunksAsync(query: question, queries: queries, candidates: scope, limit: poolLimit)
             guard !pool.isEmpty else {
                 self.fail(L("chat.noContext"), id: assistantID)
                 return

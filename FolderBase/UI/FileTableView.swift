@@ -1394,12 +1394,8 @@ struct FileTableView: View {
         case .date:
             DateMetadataCell(text: valueBinding(for: item, field: field))
         case .kanban:
-            // Lo stato Kanban si applica solo ai file, non alle cartelle.
-            if item.isFolder {
-                Color.clear.frame(maxWidth: .infinity)
-            } else {
-                selectCell(for: item, field: field)
-            }
+            // Lo stato Kanban è modificabile sia sui file sia sulle cartelle (come le altre select).
+            selectCell(for: item, field: field)
         case .select:
             selectCell(for: item, field: field)
         case .link:

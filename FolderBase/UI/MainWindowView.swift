@@ -164,7 +164,7 @@ struct MainWindowView: View {
         if managedWatcher == nil {
             managedWatcher = FSEventsWatcher { changedPaths in
                 directoryCache.invalidate(paths: changedPaths)
-                metadataStore.reconcileManagedFiles { _, missingIdentities in
+                metadataStore.reconcileManagedFiles(changedPaths: changedPaths) { _, missingIdentities in
                     if autoPurgeOrphans, !missingIdentities.isEmpty {
                         _ = metadataStore.purge(identities: missingIdentities)
                     }

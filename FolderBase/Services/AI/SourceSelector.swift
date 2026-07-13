@@ -3,7 +3,7 @@ import Foundation
 /// Chunk recuperato dall'indice per la chat RAG, con i punteggi che hanno determinato il ranking:
 /// `semantic` (coseno, se disponibile per lo spazio del chunk), `lexical` (termini pesati IDF) e
 /// `fused` (Reciprocal Rank Fusion dei due), su cui ragiona il `SourceSelector`.
-struct RetrievedChunk {
+struct RetrievedChunk: Sendable {
     let identity: String
     let path: String
     let name: String

@@ -34,6 +34,11 @@ final class MetadataStore: ObservableObject {
     private var db: OpaquePointer?
     private var databaseActor: SQLiteDatabaseActor?
 
+    /// Cache di prepared statement riusabili (chiave = SQL) per i percorsi caldi a SQL fisso
+    /// come `persistValue`, invocato ad ogni flush di digitazione. Evita la ricompilazione del
+    /// bytecode SQLite ad ogni scrittura. Gli statement vengono finalizzati alla chiusura.
+    private var statementCache: [String: OpaquePointer] = [:]
+
     /// Cache path → identity per evitare di calcolare/registrare l'identità sul disco
     /// nei percorsi di sola lettura (chiamati ad ogni render di SwiftUI).
     private var identityCacheByPath: [String: String] = [:]
@@ -84,6 +89,7 @@ final class MetadataStore: ObservableObject {
     deinit {
         // I DispatchWorkItem pendenti trattengono lo store fino all'esecuzione; a questo punto
         // non possono più esistere scritture da scaricare. La chiusura resta sincrona e sicura.
+        for statement in statementCache.values { sqlite3_finalize(statement) }
         sqlite3_close(db)
     }
 
@@ -328,7 +334,7 @@ final class MetadataStore: ObservableObject {
 
     private func persistValue(identity: String, fieldID: String, value: String) {
         do {
-            try execute(
+            try executeCached(
                 """
                 INSERT INTO metadata_values (file_identity, field_id, value)
                 VALUES (?, ?, ?)
@@ -613,17 +619,40 @@ final class MetadataStore: ObservableObject {
     /// La parte costosa (risoluzione bookmark + stat sul filesystem per ogni file gestito)
     /// gira su un thread di background: prima bloccava il main thread all'avvio e a ogni
     /// evento FSEvents. Le letture/scritture del DB restano sul main thread.
-    func reconcileManagedFiles(completion: @escaping (_ relocated: Int, _ missingIdentities: [String]) -> Void) {
+    ///
+    /// - Parameter changedPaths: percorsi segnalati da FSEvents. Se valorizzato, la
+    ///   riconciliazione è MIRATA: risolve (bookmark + stat) solo le righe il cui percorso
+    ///   ricade sotto uno dei percorsi cambiati — evitando la scansione O(N) dell'intero
+    ///   archivio ad ogni singolo evento. Passare `nil` (default) forza il full reconcile,
+    ///   usato all'avvio quando non si sa cosa sia cambiato mentre l'app era chiusa.
+    func reconcileManagedFiles(changedPaths: [String]? = nil, completion: @escaping (_ relocated: Int, _ missingIdentities: [String]) -> Void) {
         guard !isReconciling else {
             reconcileRequestedWhileRunning = true
             completion(0, [])
             return
         }
 
-        let rows = (try? loadFileRows()) ?? []
+        var rows = (try? loadFileRows()) ?? []
         guard !rows.isEmpty else {
             completion(0, [])
             return
+        }
+
+        // Reconcile mirato: limita il lavoro pesante alle sole righe coinvolte dagli eventi.
+        if let changedPaths, !changedPaths.isEmpty {
+            let changed = changedPaths.map { URL(fileURLWithPath: $0).standardizedFileURL.path }
+            rows = rows.filter { row in
+                let rowPath = URL(fileURLWithPath: row.lastKnownPath).standardizedFileURL.path
+                return changed.contains { candidate in
+                    rowPath == candidate
+                        || rowPath.hasPrefix(candidate + "/")   // riga sotto una cartella cambiata
+                        || candidate.hasPrefix(rowPath + "/")   // riga è una cartella che contiene il cambiamento
+                }
+            }
+            guard !rows.isEmpty else {
+                completion(0, [])
+                return
+            }
         }
 
         isReconciling = true
@@ -854,6 +883,8 @@ final class MetadataStore: ObservableObject {
 
         if let databaseActor { await databaseActor.close() }
         databaseActor = nil
+        for statement in statementCache.values { sqlite3_finalize(statement) }
+        statementCache.removeAll()
         sqlite3_close(db)
         db = nil
 
@@ -1307,26 +1338,33 @@ final class MetadataStore: ObservableObject {
     /// Ritorna un POOL ordinato per punteggio fuso (`fused`), con un tetto di chunk per file che
     /// preserva la varietà di documenti: la selezione finale (diversità, recency, conflitti tra
     /// versioni) è compito del `SourceSelector`.
+    /// Percorso RAG asincrono: la scansione dei vettori + decodifica BLOB avviene sull'actor di
+    /// background e il calcolo dei punteggi in un task detached, così il main thread non si blocca
+    /// mai durante una domanda. Ricade sul percorso sincrono solo se l'actor non è disponibile.
+    func semanticChunksAsync(query: String, queries: [EmbeddingResult], candidates: Set<String>, limit: Int) async -> [RetrievedChunk] {
+        let startedAt = CFAbsoluteTimeGetCurrent()
+        defer {
+            Self.performanceLog.debug("semanticChunksAsync candidati=\(candidates.count) durata_ms=\((CFAbsoluteTimeGetCurrent() - startedAt) * 1000, format: .fixed(precision: 1))")
+        }
+        guard let databaseActor else {
+            return semanticChunks(query: query, queries: queries, candidates: candidates, limit: limit)
+        }
+        let querySpaces = Set(queries.filter { !$0.vector.isEmpty }.map(\.providerID))
+        let rows = await databaseActor.semanticRows(candidates: candidates, querySpaces: querySpaces)
+        guard !rows.isEmpty else { return [] }
+        return await Task.detached(priority: .userInitiated) {
+            Self.rankSemanticChunks(query: query, queries: queries, rows: rows, limit: limit)
+        }.value
+    }
+
     func semanticChunks(query: String, queries: [EmbeddingResult], candidates: Set<String>, limit: Int) -> [RetrievedChunk] {
         let startedAt = CFAbsoluteTimeGetCurrent()
         defer {
             Self.performanceLog.debug("semanticChunks candidati=\(candidates.count) durata_ms=\((CFAbsoluteTimeGetCurrent() - startedAt) * 1000, format: .fixed(precision: 1))")
         }
-        // Vettori della query indicizzati per spazio (provider_id → vettore + norma).
-        var queryBySpace: [String: (vector: [Float], norm: Float)] = [:]
-        for q in queries where !q.vector.isEmpty {
-            let norm = Self.norm(q.vector)
-            if norm > 0 { queryBySpace[q.providerID] = (q.vector, norm) }
-        }
-        let terms = Self.meaningfulTerms(from: query)
-        // Senza né vettori-query né parole chiave non c'è nulla da recuperare.
-        guard !queryBySpace.isEmpty || !terms.isEmpty else { return [] }
-
+        let querySpaces = Set(queries.filter { !$0.vector.isEmpty }.map(\.providerID))
         if !candidates.isEmpty, !prepareSemanticCandidates(candidates) { return [] }
         var statement: OpaquePointer?
-        // Nessun prefiltro su provider/dimensione: si caricano i chunk di TUTTI gli spazi, così i
-        // documenti in una lingua diversa dalla domanda restano raggiungibili (semantica se possibile,
-        // altrimenti per parole chiave). Il BLOB del vettore si decodifica solo dove serve il coseno.
         let sql = """
             SELECT c.file_identity, f.last_known_path, f.name, c.text, v.provider_id, v.vector, v.norm
             FROM chunk_vectors v
@@ -1336,6 +1374,39 @@ final class MetadataStore: ObservableObject {
             """
         guard (try? prepare(sql, statement: &statement)) != nil else { return [] }
         defer { sqlite3_finalize(statement) }
+        var rows: [SemanticRow] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let providerID = columnText(statement, 4)
+            var vector: [Float] = []
+            if querySpaces.contains(providerID), let blob = columnBlob(statement, 5) {
+                vector = Self.floats(from: blob)
+            }
+            rows.append(SemanticRow(
+                identity: columnText(statement, 0),
+                path: columnText(statement, 1),
+                name: columnText(statement, 2),
+                text: columnText(statement, 3),
+                providerID: providerID,
+                vector: vector,
+                storedNorm: Float(sqlite3_column_double(statement, 6))
+            ))
+        }
+        return Self.rankSemanticChunks(query: query, queries: queries, rows: rows, limit: limit)
+    }
+
+    /// Punteggio + fusione dei chunk recuperati. Puro calcolo (nessun accesso al DB o allo stato),
+    /// quindi `nonisolated`: può girare fuori dal main thread. `rows` arriva già con i vettori
+    /// decodificati (solo per gli spazi-query) dalla connessione di background.
+    nonisolated static func rankSemanticChunks(query: String, queries: [EmbeddingResult], rows: [SemanticRow], limit: Int) -> [RetrievedChunk] {
+        // Vettori della query indicizzati per spazio (provider_id → vettore + norma).
+        var queryBySpace: [String: (vector: [Float], norm: Float)] = [:]
+        for q in queries where !q.vector.isEmpty {
+            let norm = Self.norm(q.vector)
+            if norm > 0 { queryBySpace[q.providerID] = (q.vector, norm) }
+        }
+        let terms = Self.meaningfulTerms(from: query)
+        // Senza né vettori-query né parole chiave non c'è nulla da recuperare.
+        guard !queryBySpace.isEmpty || !terms.isEmpty else { return [] }
 
         // Prima passata: scansione dei chunk. Per ogni termine si registra il PESO del match
         // (esatto nel testo 1.0, prefisso 0.7, con bonus se compare anche nel nome del file) e la
@@ -1347,22 +1418,16 @@ final class MetadataStore: ObservableObject {
         var scanned: [ScannedChunk] = []
         var documentFrequency = [Int](repeating: 0, count: terms.count)
         var totalChunks = 0
-        while sqlite3_step(statement) == SQLITE_ROW {
-            let identity = columnText(statement, 0)
-            let name = columnText(statement, 2)
-            let text = columnText(statement, 3)
-            let providerID = columnText(statement, 4)
+        for row in rows {
+            let name = row.name
+            let text = row.text
             totalChunks += 1
 
             // Semantico: solo se abbiamo un vettore-query per QUESTO spazio (stessa lingua/motore).
             var semantic: Float? = nil
-            if let queryVec = queryBySpace[providerID], let blob = columnBlob(statement, 5) {
-                let vector = Self.floats(from: blob)
-                if vector.count == queryVec.vector.count {
-                    let storedNorm = Float(sqlite3_column_double(statement, 6))
-                    let vectorNorm = storedNorm > 0 ? storedNorm : Self.norm(vector)
-                    semantic = Self.cosine(queryVec.vector, vector, aNorm: queryVec.norm, bNorm: vectorNorm)
-                }
+            if let queryVec = queryBySpace[row.providerID], !row.vector.isEmpty, row.vector.count == queryVec.vector.count {
+                let vectorNorm = row.storedNorm > 0 ? row.storedNorm : Self.norm(row.vector)
+                semantic = Self.cosine(queryVec.vector, row.vector, aNorm: queryVec.norm, bNorm: vectorNorm)
             }
 
             // Lessicale: peso del match per ciascun termine della domanda. Il match nel nome del
@@ -1389,7 +1454,7 @@ final class MetadataStore: ObservableObject {
             }
 
             if semantic != nil || termWeights.contains(where: { $0 > 0 }) {
-                scanned.append(ScannedChunk(identity: identity, path: columnText(statement, 1), name: name, text: text, semantic: semantic, termWeights: termWeights))
+                scanned.append(ScannedChunk(identity: row.identity, path: row.path, name: name, text: text, semantic: semantic, termWeights: termWeights))
             }
         }
         guard !scanned.isEmpty else { return [] }
@@ -1472,6 +1537,12 @@ final class MetadataStore: ObservableObject {
             result.append(columnText(statement, 0))
         }
         return result
+    }
+
+    /// Variante async: legge gli spazi sulla connessione di background, senza toccare il main.
+    func indexedProviderIDsAsync() async -> [String] {
+        if let databaseActor { return await databaseActor.distinctProviderIDs() }
+        return indexedProviderIDs()
     }
 
     /// Mappa identità→hash di TUTTI i file indicizzati con successo. Usata per calcolare la
@@ -1873,7 +1944,7 @@ final class MetadataStore: ObservableObject {
         vector.withUnsafeBufferPointer { Data(buffer: $0) }
     }
 
-    private static func floats(from data: Data) -> [Float] {
+    nonisolated private static func floats(from data: Data) -> [Float] {
         let count = data.count / MemoryLayout<Float>.stride
         guard count > 0 else { return [] }
         return data.withUnsafeBytes { raw in
@@ -1881,7 +1952,7 @@ final class MetadataStore: ObservableObject {
         }
     }
 
-    private static func norm(_ v: [Float]) -> Float {
+    nonisolated private static func norm(_ v: [Float]) -> Float {
         var sumSquares: Float = 0
         vDSP_svesq(v, 1, &sumSquares, vDSP_Length(v.count))
         return sqrt(sumSquares)
@@ -1890,7 +1961,7 @@ final class MetadataStore: ObservableObject {
     /// Coseno tra due vettori della stessa dimensione. Le norme di `a` e `b` possono essere passate
     /// precalcolate (query e vettore memorizzato) per non ricalcolarle a ogni confronto: rimane
     /// solo il prodotto scalare.
-    private static func cosine(_ a: [Float], _ b: [Float], aNorm: Float? = nil, bNorm: Float? = nil) -> Float {
+    nonisolated private static func cosine(_ a: [Float], _ b: [Float], aNorm: Float? = nil, bNorm: Float? = nil) -> Float {
         guard a.count == b.count, !a.isEmpty else { return 0 }
         var dot: Float = 0
         vDSP_dotpr(a, 1, b, 1, &dot, vDSP_Length(a.count))
@@ -1965,6 +2036,39 @@ private extension MetadataStore {
 
             throw StoreError.sqlite(message: lastErrorMessage)
         }
+    }
+
+    /// Variante di `execute` che riusa uno statement preparato dalla cache. Da usare SOLO per
+    /// SQL fisso ad alta frequenza (nessun placeholder di conteggio variabile), così da non far
+    /// crescere illimitatamente la cache. Lo statement viene resettato dopo l'uso.
+    func executeCached(_ sql: String, bindings: [SQLiteBinding] = []) throws {
+        let statement = try cachedStatement(sql)
+        defer {
+            sqlite3_reset(statement)
+            sqlite3_clear_bindings(statement)
+        }
+        try bind(bindings, to: statement)
+
+        while true {
+            let result = sqlite3_step(statement)
+            if result == SQLITE_DONE { return }
+            if result == SQLITE_ROW { continue }
+            throw StoreError.sqlite(message: lastErrorMessage)
+        }
+    }
+
+    private func cachedStatement(_ sql: String) throws -> OpaquePointer? {
+        if let existing = statementCache[sql] {
+            sqlite3_reset(existing)
+            sqlite3_clear_bindings(existing)
+            return existing
+        }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            throw StoreError.sqlite(message: lastErrorMessage)
+        }
+        statementCache[sql] = statement
+        return statement
     }
 
     func intValue(_ sql: String) throws -> Int {
