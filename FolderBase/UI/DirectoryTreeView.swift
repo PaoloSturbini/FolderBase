@@ -10,6 +10,7 @@ struct DirectoryTreeView: View {
     let fontSize: Double
     let onSelect: (URL) -> Void
     let onMoveItems: ([String], URL) -> Void
+    let onRemoveRoot: (URL) -> Void
     @ObservedObject var directoryCache: DirectorySnapshotCache
 
     var body: some View {
@@ -20,6 +21,7 @@ struct DirectoryTreeView: View {
             fontSize: fontSize,
             onSelect: onSelect,
             onMoveItems: onMoveItems,
+            onRemoveRoot: onRemoveRoot,
             directoryCache: directoryCache
         )
         .id(rootURL.path)
@@ -33,6 +35,7 @@ private struct DirectoryNodeView: View {
     let fontSize: Double
     let onSelect: (URL) -> Void
     let onMoveItems: ([String], URL) -> Void
+    let onRemoveRoot: (URL) -> Void
     @ObservedObject var directoryCache: DirectorySnapshotCache
 
     @State private var isExpanded = false
@@ -44,7 +47,15 @@ private struct DirectoryNodeView: View {
     private var accent: Color { AppAccentColor.color(forRaw: appAccentRaw, customHex: appAccentCustomHex) }
 
     private var isSelected: Bool {
-        selectedFolderURL?.standardizedFileURL.path == url.standardizedFileURL.path
+        let selectedPath = selectedFolderURL?.standardizedFileURL.path
+        let nodePath = url.standardizedFileURL.path
+        if depth == 0, let selectedPath {
+            return selectedPath == nodePath || selectedPath.hasPrefix(nodePath + "/")
+        }
+        // La barra azzurra identifica sempre la radice gestita dell'albero corrente.
+        // La sottocartella selezionata resta riconoscibile perché il suo percorso è aperto,
+        // senza creare una seconda evidenziazione concorrente.
+        return false
     }
 
     /// Vero se la cartella selezionata è questa o una sua discendente.
@@ -67,6 +78,7 @@ private struct DirectoryNodeView: View {
                         fontSize: fontSize,
                         onSelect: onSelect,
                         onMoveItems: onMoveItems,
+                        onRemoveRoot: onRemoveRoot,
                         directoryCache: directoryCache
                     )
                 }
@@ -110,6 +122,17 @@ private struct DirectoryNodeView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+
+            if depth == 0 {
+                Button {
+                    onRemoveRoot(url)
+                } label: {
+                    Image(systemName: "minus.circle")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help(L("sidebar.removeFolder"))
+            }
         }
         .font(.system(size: fontSize))
         .padding(.vertical, 3)

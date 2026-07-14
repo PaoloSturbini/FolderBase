@@ -40,6 +40,8 @@ FolderBase takes a different approach:
 - Reusable column templates that can be applied from any selected folder and inherited through its subtree.
 - Persistent inherited column order and visibility, with parent-folder configuration taking precedence on conflicts.
 - Faster folder navigation with a shared LRU snapshot cache, instant Back/Forward display and selective FSEvents invalidation.
+- Multi-root sidebar trees with clear spacing, removable roots and root-level highlighting while navigating subfolders.
+- Finder-style internal drag and drop: drag files or folders from the table onto a folder row to move them into that folder; hold Option to copy.
 - Native table and Kanban board views.
 - Filtering, sorting, multi-selection, bulk editing and CSV export.
 - Metadata persistence across supported file rename and move operations.

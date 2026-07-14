@@ -216,52 +216,35 @@ struct SidebarView: View {
             // layout/transizione del NavigationSplitView durante avanti/indietro.
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        sectionHeader(L("sidebar.folders"))
-
-                        if recentFolderURLs.isEmpty {
+                    if recentFolderURLs.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            sectionHeader(L("sidebar.structure"))
                             Label(L("common.noFolders"), systemImage: "folder")
                                 .foregroundStyle(.secondary)
                                 .padding(.horizontal, 4)
-                        } else {
-                            ForEach(recentFolderURLs, id: \.path) { folderURL in
-                                HStack(spacing: 8) {
-                                    Button {
-                                        selectFolder(folderURL)
-                                    } label: {
-                                        Label(folderURL.lastPathComponent, systemImage: selectedFolderURL?.path == folderURL.path ? "folder.fill" : "folder")
-                                            .lineLimit(1)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                    }
-                                    .buttonStyle(.plain)
-
-                                    Button {
-                                        removeFolder(folderURL)
-                                    } label: {
-                                        Image(systemName: "minus.circle")
-                                    }
-                                    .buttonStyle(.borderless)
-                                    .foregroundStyle(.secondary)
-                                    .help(L("sidebar.removeFolder"))
-                                }
-                                .padding(.horizontal, 4)
-                            }
                         }
-                    }
-
-                    if let treeRootURL {
+                    } else {
                         VStack(alignment: .leading, spacing: 4) {
                             sectionHeader(L("sidebar.structure"))
 
-                            DirectoryTreeView(
-                                rootURL: treeRootURL,
-                                selectedFolderURL: selectedFolderURL,
-                                fontSize: sidebarFontSize,
-                                onSelect: navigateTo,
-                                onMoveItems: moveItems,
-                                directoryCache: directoryCache
-                            )
-                            .id(treeRootURL.path)
+                            // Mostra contemporaneamente l'albero di ogni cartella gestita
+                            // elencata sopra. Lo ScrollView esterno consente di raggiungere
+                            // tutte le directory anche quando gli alberi espansi superano
+                            // l'altezza disponibile della sidebar.
+                            VStack(alignment: .leading, spacing: 14) {
+                                ForEach(recentFolderURLs, id: \.path) { rootURL in
+                                    DirectoryTreeView(
+                                        rootURL: rootURL,
+                                        selectedFolderURL: selectedFolderURL,
+                                        fontSize: sidebarFontSize,
+                                        onSelect: navigateTo,
+                                        onMoveItems: moveItems,
+                                        onRemoveRoot: removeFolder,
+                                        directoryCache: directoryCache
+                                    )
+                                    .id(rootURL.path)
+                                }
+                            }
                         }
                     }
                 }

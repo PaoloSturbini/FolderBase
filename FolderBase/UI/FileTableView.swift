@@ -53,6 +53,10 @@ struct FileTableView: View {
     @State private var showDeleteConfirmation = false
     @State private var tableSortOrder: [FileItemSortComparator] = []
     @State private var selection: Set<FileItem.ID> = []
+    /// Cartella della tabella attualmente evidenziata come destinazione di un trascinamento.
+    /// Il drop sulla riga ha precedenza sul drop generale della tabella e sposta/copia gli
+    /// elementi dentro quella cartella, come nel Finder.
+    @State private var targetedFolderID: FileItem.ID?
     /// Interruttore generale dell'AI (stessa chiave usata nella Configurazione). Quando è false
     /// spariscono le icone chat e la ricerca resta limitata al solo nome.
     @AppStorage(AIProviderSettings.Keys.enabled) private var aiEnabled = true
@@ -1275,9 +1279,39 @@ struct FileTableView: View {
 
         if editingItemID == item.id {
             label
+        } else if item.isFolder {
+            label
+                .help(L("name.helpFolder"))
+                .background(
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(targetedFolderID == item.id ? Color.accentColor.opacity(0.16) : Color.clear)
+
+                        // `SwiftUI.Table` intercetta il drop prima dei modifier SwiftUI
+                        // applicati alle celle. Un ricevitore AppKit registrato per file URL
+                        // rende invece la singola riga-cartella una destinazione affidabile.
+                        FileFolderDropTarget(
+                            isTargeted: Binding(
+                                get: { targetedFolderID == item.id },
+                                set: { targeted in
+                                    if targeted {
+                                        targetedFolderID = item.id
+                                    } else if targetedFolderID == item.id {
+                                        targetedFolderID = nil
+                                    }
+                                }
+                            ),
+                            onDrop: { urls in
+                                guard !urls.isEmpty else { return false }
+                                moveItems(urls.map(\.path), item.url)
+                                return true
+                            }
+                        )
+                    }
+                )
         } else {
             label
-                .help(item.isFolder ? L("name.helpFolder") : L("name.helpFile"))
+                .help(L("name.helpFile"))
         }
     }
 
@@ -1972,6 +2006,95 @@ private struct FileDragIcon: NSViewRepresentable {
     }
 }
 
+/// Destinazione AppKit trasparente usata sulle righe-cartella della `Table`.
+/// Non partecipa all'hit-testing dei clic, quindi selezione, doppio clic e menu contestuale
+/// restano gestiti dalla tabella; riceve soltanto le sessioni di trascinamento di file URL.
+private struct FileFolderDropTarget: NSViewRepresentable {
+    @Binding var isTargeted: Bool
+    let onDrop: ([URL]) -> Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(isTargeted: $isTargeted, onDrop: onDrop)
+    }
+
+    func makeNSView(context: Context) -> FileFolderDropTargetView {
+        let view = FileFolderDropTargetView()
+        view.handler = context.coordinator
+        return view
+    }
+
+    func updateNSView(_ view: FileFolderDropTargetView, context: Context) {
+        context.coordinator.isTargeted = $isTargeted
+        context.coordinator.onDrop = onDrop
+        view.handler = context.coordinator
+    }
+
+    final class Coordinator {
+        var isTargeted: Binding<Bool>
+        var onDrop: ([URL]) -> Bool
+
+        init(isTargeted: Binding<Bool>, onDrop: @escaping ([URL]) -> Bool) {
+            self.isTargeted = isTargeted
+            self.onDrop = onDrop
+        }
+    }
+}
+
+private final class FileFolderDropTargetView: NSView {
+    weak var handler: FileFolderDropTarget.Coordinator?
+
+    /// Registro dei bersagli visibili. Serve al drag interno avviato da `FileDragSourceView`:
+    /// la `SwiftUI.Table` intercetta le normali API di drop, quindi la sorgente individua
+    /// direttamente la cella-cartella sotto il punto di rilascio in coordinate schermo.
+    private static var visibleTargets: [WeakTarget] = []
+
+    private final class WeakTarget {
+        weak var value: FileFolderDropTargetView?
+        init(_ value: FileFolderDropTargetView) { self.value = value }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        Self.visibleTargets.removeAll { $0.value == nil || $0.value === self }
+        if window != nil { Self.visibleTargets.append(WeakTarget(self)) }
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    static func updateInternalDragTarget(at screenPoint: NSPoint) {
+        let target = target(at: screenPoint)
+        for entry in visibleTargets {
+            guard let view = entry.value else { continue }
+            view.handler?.isTargeted.wrappedValue = (view === target)
+        }
+    }
+
+    static func performInternalDrop(at screenPoint: NSPoint, urls: [URL]) -> Bool {
+        let target = target(at: screenPoint)
+        updateInternalDragTarget(at: NSPoint(x: -.greatestFiniteMagnitude, y: -.greatestFiniteMagnitude))
+        guard let target, !urls.isEmpty else { return false }
+        return target.handler?.onDrop(urls) ?? false
+    }
+
+    private static func target(at screenPoint: NSPoint) -> FileFolderDropTargetView? {
+        visibleTargets.removeAll { $0.value == nil }
+        return visibleTargets.compactMap(\.value).last { view in
+            guard let window = view.window, !view.isHiddenOrHasHiddenAncestor else { return false }
+            let windowRect = view.convert(view.bounds, to: nil)
+            return window.convertToScreen(windowRect).contains(screenPoint)
+        }
+    }
+}
+
 /// NSView che disegna l'icona e, al trascinamento, avvia una `NSDraggingSession` con un
 /// `NSDraggingItem` per ogni file (fileURL su pasteboard → il Finder li sposta/copia tutti).
 final class FileDragSourceView: NSView {
@@ -1981,6 +2104,7 @@ final class FileDragSourceView: NSView {
 
     private var mouseDownLocation: NSPoint = .zero
     private var didDrag = false
+    private var draggedURLs: [URL] = []
 
     override var isFlipped: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -2004,6 +2128,7 @@ final class FileDragSourceView: NSView {
         let urls = dragURLsProvider()
         guard !urls.isEmpty else { return }
         didDrag = true
+        draggedURLs = urls
 
         let draggingItems: [NSDraggingItem] = urls.enumerated().map { index, url in
             let item = NSDraggingItem(pasteboardWriter: url as NSURL)
@@ -2026,6 +2151,17 @@ extension FileDragSourceView: NSDraggingSource {
     func draggingSession(_ session: NSDraggingSession,
                          sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
         [.copy, .move, .link]
+    }
+
+    func draggingSession(_ session: NSDraggingSession, movedTo screenPoint: NSPoint) {
+        FileFolderDropTargetView.updateInternalDragTarget(at: screenPoint)
+    }
+
+    func draggingSession(_ session: NSDraggingSession,
+                         endedAt screenPoint: NSPoint,
+                         operation: NSDragOperation) {
+        _ = FileFolderDropTargetView.performInternalDrop(at: screenPoint, urls: draggedURLs)
+        draggedURLs = []
     }
 }
 

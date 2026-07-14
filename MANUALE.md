@@ -72,15 +72,16 @@ Punti importanti:
 
 ### 4.1 Aggiungere e aprire una cartella
 
-1. Apri **Configurazione** nella sidebar, vai in **Cartelle** e usa **Aggiungi cartella**. La cartella entra nell'elenco delle recenti.
-2. All'avvio l'app riapre automaticamente l'ultima cartella usata e mostra subito l'albero.
+1. Apri **Configurazione** nella sidebar, vai in **Cartelle** e usa **Aggiungi cartella**. Ogni cartella aggiunta compare direttamente come radice di un albero nella sidebar; il pulsante **–** sulla radice la rimuove dall'elenco.
+2. Le diverse radici sono separate visivamente e scorrono insieme alla sidebar. All'avvio l'app riapre automaticamente l'ultima cartella usata.
 
 ### 4.2 Navigare
 
 - **Singolo click**: seleziona una riga.
 - **Doppio click** (o **Invio**) sul nome di una sottocartella: ci entra, come nel Finder.
 - In alto trovi i pulsanti **Indietro / Avanti / Su (↑)** e il percorso corrente.
-- L'**albero a sinistra** parte dalla cartella selezionata: cliccando un nodo la tabella si aggiorna. Puoi **trascinare file dalla tabella (o dalla board) su una cartella dell'albero** per spostarli lì.
+- La sidebar mostra contemporaneamente gli **alberi di tutte le cartelle aggiunte**. Quando navighi in una sottocartella, la barra azzurra resta sulla relativa radice principale. Cliccando un nodo la tabella si aggiorna.
+- Puoi **trascinare file o cartelle dalla tabella sopra una sottocartella della stessa tabella** per spostarli al suo interno. Il drag normale sposta; tenendo premuto **Option** copia. Puoi anche rilasciarli su una cartella dell'albero a sinistra.
 
 La tabella si **aggiorna da sola** quando aggiungi, rimuovi o rinomini file nella cartella corrente dall'esterno (Finder, terminale…), grazie al watcher basato su **FSEvents**.
 
