@@ -43,9 +43,10 @@ La build viene messa in `/tmp/folderbase-run`, **fuori** dalla cartella del prog
 ```bash
 ./make-app.sh   # crea il bundle FolderBase.app e lo installa in /Applications
 ./make-dmg.sh   # crea un .dmg distribuibile in dist/
+./notarize-dmg.sh # invia il DMG ad Apple e applica il ticket
 ```
 
-`make-app.sh` compila in release e assembla un bundle `FolderBase.app` in `/Applications`, con `Info.plist` (bundle id `com.paolosturbini.folderbase`, min OS 14.4) e icona generata da `AppIcon.png` (idealmente 1024×1024) presente nella cartella del progetto. Applica anche una firma ad-hoc per ridurre gli avvisi all'avvio locale. Da qui in poi puoi lanciare FolderBase come una normale app dal Launchpad/Dock.
+`make-app.sh` compila in release e assembla un bundle `FolderBase.app` in `/Applications`, con `Info.plist` (bundle id `com.paolosturbini.folderbase`, min OS 14.4) e icona generata da `AppIcon.png` (idealmente 1024×1024) presente nella cartella del progetto. Applica la firma Developer ID con hardened runtime e timestamp. `make-dmg.sh` firma anche il contenitore; `notarize-dmg.sh` lo invia al servizio notarile Apple, attende l'accettazione e applica il ticket. Da qui in poi puoi lanciare FolderBase come una normale app dal Launchpad/Dock.
 
 In alternativa puoi aprire `Package.swift` con Xcode e premere ▶︎.
 
@@ -324,7 +325,7 @@ Chiudi l'app e cancella `~/Library/Application Support/FolderBase/folderbase.sql
 Usa sempre `--build-path /tmp/folderbase-run` (o gli script forniti): la cartella `.build` è già in `.gitignore`.
 
 **L'app non parte come bundle dopo `make-app.sh`.**
-Manca `AppIcon.png` o la firma ad-hoc non è andata a buon fine: l'app userà l'icona generica ma dovrebbe comunque avviarsi. Per la distribuzione fuori dal tuo Mac servono notarizzazione e security-scoped bookmark.
+Manca `AppIcon.png` oppure la firma Developer ID non è andata a buon fine. Verifica che il certificato e la relativa chiave privata siano presenti nel Portachiavi, quindi ripeti la build e i controlli `codesign`.
 
 ---
 
@@ -332,7 +333,7 @@ Manca `AppIcon.png` o la firma ad-hoc non è andata a buon fine: l'app userà l'
 
 - **Robustezza identità**: l'identità si basa su `String(describing:)` dell'identificatore filesystem; si potrebbe ancorarla a `bookmark_data` per maggiore stabilità tra riavvii.
 - **Volumi diversi**: lo spostamento tra volumi può generare una nuova identità e richiedere la migrazione manuale dei metadata.
-- **Sandbox/distribuzione**: per distribuire l'app fuori da `swift run` servono security-scoped bookmark risolti all'avvio e la notarizzazione Apple.
+- **Sandbox/distribuzione**: il rilascio diretto è firmato e notarizzato; un'eventuale distribuzione nel Mac App Store richiederebbe inoltre sandbox, entitlement e revisione dedicata.
 - **Motori AI cloud**: usando OpenAI, testi ed estratti lasciano il Mac; per la massima privacy usa il motore Apple o Ollama in locale.
 
 ---

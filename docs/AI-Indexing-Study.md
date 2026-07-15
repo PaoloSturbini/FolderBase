@@ -39,7 +39,7 @@ protocol TextExtractor {
 | **Endpoint locale** (Ollama `nomic-embed-text`/`mxbai-embed-large`, LM Studio, llama.cpp server) | POST a `http://localhost:11434/api/embeddings` | Privato, gratuito, offline, stesso codice REST del BYOK | L'utente deve installare/avviare un server; usa RAM/CPU | 768–1024 |
 | **On-device Apple** (`NLContextualEmbedding` del framework NaturalLanguage, disponibile da macOS 14) | API nativa, nessuna rete | Zero dipendenze, zero costo, privato, sempre disponibile | Qualità semantica inferiore ai modelli dedicati, multilingua più debole | ~512–768 |
 
-**Raccomandazione**: partire con **on-device Apple** come default "funziona-subito" (nessuna configurazione, coerente con un'app scaricata da GitHub non notarizzata) e offrire **Ollama** e **BYOK** come opzioni avanzate. Tutti e tre implementano lo stesso `EmbeddingProvider`, quindi il resto della pipeline non cambia.
+**Raccomandazione**: partire con **on-device Apple** come default "funziona-subito" (nessuna configurazione e nessuna dipendenza esterna) e offrire **Ollama** e **BYOK** come opzioni avanzate. Tutti e tre implementano lo stesso `EmbeddingProvider`, quindi il resto della pipeline non cambia.
 
 > Nota architetturale importante: **la dimensione del vettore fa parte dell'identità dell'indice**. Cambiare provider (es. da 768 a 1536) invalida tutti gli embedding già calcolati. Va salvato `provider_id` + `dimension` nell'indice e gestito il "reindex" al cambio.
 
@@ -218,7 +218,7 @@ protocol ChatProvider {
 - **Chiave BYOK**: mai in `UserDefaults`/JSON. Usare **Keychain** (`kSecClassGenericPassword`). Nel pannello mostrare solo "configurata / non configurata".
 - **Trasparenza dati**: se il provider è cloud, avvisare chiaramente che il **contenuto** dei file (non solo i nomi) viene inviato all'endpoint. Default on-device proprio per evitarlo.
 - **Opt-in per cartella**: l'indicizzazione non deve mai partire da sola sull'intero disco. Coerente col modello "metadata per-cartella".
-- **App non-sandboxed + non notarizzata**: caricare `sqlite-vec` come `.dylib` e fare chiamate rete a `localhost`/cloud è possibile senza entitlement, ma se un domani si volesse notarizzare/App Store servirebbero entitlement rete e revisione del caricamento estensioni (in tal caso preferire l'opzione B pura Swift o linking statico).
+- **App non-sandboxed + notarizzata**: eventuali librerie dinamiche aggiuntive come `sqlite-vec` dovrebbero essere incluse nella firma Developer ID e validate nel flusso di notarizzazione. Per il Mac App Store servirebbero inoltre sandbox, entitlement rete e revisione del caricamento delle estensioni; resta preferibile l'opzione B pura Swift o il linking statico.
 - **Costi**: con BYOK, mostrare una stima ("~N documenti, ~M token") prima di lanciare un reindex massivo; per la chat, il costo è per conversazione (contesto + risposta).
 
 ## 9. Roadmap incrementale

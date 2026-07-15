@@ -13,6 +13,7 @@ BUILD_PATH="/tmp/folderbase-run"
 ICON_PNG="AppIcon.png"
 INSTALL_DIR="/Applications"
 BUNDLE_ID="com.paolosturbini.folderbase"
+SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: PAOLO ANTONIO STURBIN (F9SXX7XX48)}"
 
 echo ">> Compilo in ${CONFIG}..."
 swift build -c "${CONFIG}" --build-path "${BUILD_PATH}"
@@ -80,8 +81,16 @@ else
     echo "Attenzione: ${ICON_PNG} non trovato, l'app usera' l'icona generica."
 fi
 
-# Firma ad-hoc (non e' notarizzazione, ma evita alcuni avvisi all'avvio locale).
-codesign --force --deep --sign - "${APP}" >/dev/null 2>&1 || true
+# Firma Developer ID con hardened runtime e timestamp Apple, prerequisiti per
+# Gatekeeper e notarizzazione. La chiave privata resta nel Portachiavi locale.
+echo ">> Firmo con ${SIGN_IDENTITY}..."
+codesign \
+    --force \
+    --options runtime \
+    --timestamp \
+    --sign "${SIGN_IDENTITY}" \
+    "${APP}"
+codesign --verify --deep --strict --verbose=2 "${APP}"
 
 # Forza il refresh dell'icona nel Finder/Dock.
 touch "${APP}"

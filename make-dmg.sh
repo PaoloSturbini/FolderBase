@@ -14,6 +14,7 @@ ICON_PNG="AppIcon.png"
 BUNDLE_ID="com.paolosturbini.folderbase"
 VERSION="1.5.6"
 DIST_DIR="dist"
+SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: PAOLO ANTONIO STURBIN (F9SXX7XX48)}"
 
 echo ">> Compilo in ${CONFIG}..."
 swift build -c "${CONFIG}" --build-path "${BUILD_PATH}"
@@ -77,8 +78,15 @@ else
     echo "Attenzione: ${ICON_PNG} non trovato, l'app usera' l'icona generica."
 fi
 
-# Firma ad-hoc (NON notarizzazione: vedi note sotto)
-codesign --force --deep --sign - "${APP}" >/dev/null 2>&1 || true
+# Firma Developer ID con hardened runtime e timestamp Apple.
+echo ">> Firmo l'app con ${SIGN_IDENTITY}..."
+codesign \
+    --force \
+    --options runtime \
+    --timestamp \
+    --sign "${SIGN_IDENTITY}" \
+    "${APP}"
+codesign --verify --deep --strict --verbose=2 "${APP}"
 
 # --- Layout del DMG: app + collegamento ad /Applications ---
 ln -s /Applications "${STAGE}/Applications"
@@ -86,13 +94,27 @@ ln -s /Applications "${STAGE}/Applications"
 mkdir -p "${DIST_DIR}"
 DMG="${DIST_DIR}/${APP_NAME}-${VERSION}.dmg"
 rm -f "${DMG}"
+DMG_WORK="$(mktemp -d)"
+SIGNABLE_DMG="${DMG_WORK}/${APP_NAME}-${VERSION}.dmg"
 
 echo ">> Creo il DMG..."
 hdiutil create \
     -volname "${APP_NAME}" \
     -srcfolder "${STAGE}" \
     -ov -format UDZO \
-    "${DMG}" >/dev/null
+    "${SIGNABLE_DMG}" >/dev/null
 
 rm -rf "${STAGE}"
+echo ">> Firmo il DMG con ${SIGN_IDENTITY}..."
+# hdiutil/Finder puo' aggiungere attributi estesi locali che impediscono a
+# codesign di aggiornare il contenitore. Non fanno parte del contenuto del DMG.
+xattr -c "${SIGNABLE_DMG}"
+codesign \
+    --force \
+    --timestamp \
+    --sign "${SIGN_IDENTITY}" \
+    "${SIGNABLE_DMG}"
+codesign --verify --strict --verbose=2 "${SIGNABLE_DMG}"
+mv "${SIGNABLE_DMG}" "${DMG}"
+rmdir "${DMG_WORK}"
 echo "OK: creato ${DMG}"

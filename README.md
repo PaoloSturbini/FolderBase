@@ -94,22 +94,13 @@ Download the latest compiled DMG from:
 
 Open the DMG and drag **FolderBase** into **Applications**.
 
-### Gatekeeper notice
+### Signed and notarized release
 
-The currently distributed build is ad-hoc signed and is **not notarized by Apple**. On first launch:
-
-1. Open the `Applications` folder in Finder.
-2. Control-click or right-click `FolderBase.app`.
-3. Select **Open**.
-4. Confirm **Open** in the system dialog.
+The distributed build is signed with a **Developer ID Application** certificate
+and notarized by Apple. Open the DMG, drag FolderBase into **Applications**, and
+launch it normally.
 
 Users who prefer not to run a precompiled build can compile FolderBase directly from source.
-
-As an advanced fallback only, the quarantine attribute can be removed with:
-
-```bash
-xattr -dr com.apple.quarantine /Applications/FolderBase.app
-```
 
 ## Build from source
 
