@@ -30,6 +30,7 @@ final class ChatService: ObservableObject {
     /// Ambito corrente della chat: insieme di identità su cui cercare (vuoto = tutto l'indice) e
     /// un'etichetta descrittiva mostrata nell'header ("Tutto l'indice", "Cartella: …", "File: …").
     @Published private(set) var scopeLabel: String = ""
+    @Published private(set) var isWholeIndexScope = true
     private var candidates: Set<String> = []
     /// Ultima domanda posta, per il pulsante "Rilancia".
     @Published private(set) var lastQuestion: String?
@@ -54,6 +55,7 @@ final class ChatService: ObservableObject {
     func configure(candidates: Set<String>, scopeLabel: String) {
         self.candidates = candidates
         self.scopeLabel = scopeLabel
+        self.isWholeIndexScope = candidates.isEmpty
         reset()
     }
 

@@ -28,6 +28,9 @@ final class MetadataStore: ObservableObject {
     /// di invalidare l'intera tabella a ogni carattere digitato.
     private(set) var metadataByFileIdentity: [String: FileMetadata] = [:]
     let metadataChanges = PassthroughSubject<Set<String>, Never>()
+    /// Evento separato per cambi di schema/colonne. Le viste che mostrano solo valori non
+    /// devono osservare l'intero store e ridisegnarsi per ogni mutazione non pertinente.
+    let metadataStructureChanges = PassthroughSubject<Void, Never>()
 
     private let dbURL: URL
     private let legacyMetadataURL: URL
@@ -231,6 +234,7 @@ final class MetadataStore: ObservableObject {
             let loaded = (try? await databaseActor.loadMetadata(identities: identities)) ?? [:]
             guard let self, self.activeMetadataIdentities == identities else { return }
             self.metadataByFileIdentity = loaded
+            self.pendingChangedIdentities.formUnion(identities)
             self.notifyMetadataChanged(immediate: true)
         }
     }
@@ -660,6 +664,24 @@ final class MetadataStore: ObservableObject {
             guard let self else { return }
             // `resolve` è puro filesystem (bookmark, stat): nessuno stato del DB toccato.
             let resolutions = rows.map { row in (row, Self.resolve(row)) }
+            let trackingUpdates: [FileTrackingUpdate] = resolutions.compactMap { row, resolution in
+                guard case .present(let url) = resolution else { return nil }
+                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
+                let bookmark = row.bookmark ?? (try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil))
+                return FileTrackingUpdate(identity: row.identity, path: url.path, name: url.lastPathComponent, size: size, bookmark: bookmark)
+            }
+            let relocations: [FileRelocationUpdate] = resolutions.compactMap { row, resolution in
+                guard case .relocated(let url) = resolution,
+                      let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey, .fileResourceIdentifierKey, .volumeIdentifierKey]) else { return nil }
+                let fileID = Self.stableDescription(values.fileResourceIdentifier)
+                let volumeID = Self.stableDescription(values.volumeIdentifier)
+                let identity = Self.fileIdentity(fileIdentifier: fileID, volumeIdentifier: volumeID, path: url.path)
+                let bookmark = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+                return FileRelocationUpdate(previousIdentity: row.identity, newIdentity: identity,
+                    fileIdentifier: fileID, volumeIdentifier: volumeID, path: url.path,
+                    name: url.lastPathComponent, isDirectory: values.isDirectory ?? false,
+                    size: values.fileSize.map(Int64.init), bookmark: bookmark)
+            }
 
             DispatchQueue.main.async {
                 Task { @MainActor in
@@ -667,24 +689,16 @@ final class MetadataStore: ObservableObject {
                 var missingIdentities: [String] = []
                 var requiresMetadataReload = false
 
-                let trackingUpdates: [FileTrackingUpdate] = resolutions.compactMap { row, resolution in
-                    guard case .present(let url) = resolution else { return nil }
-                    let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
-                    let bookmark = row.bookmark ?? (try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil))
-                    return FileTrackingUpdate(identity: row.identity, path: url.path, name: url.lastPathComponent, size: size, bookmark: bookmark)
-                }
-
                 do {
                     if let databaseActor = self.databaseActor {
-                        try await databaseActor.applyTrackingUpdates(trackingUpdates)
+                        try await databaseActor.applyReconciliation(tracking: trackingUpdates, relocations: relocations)
                     }
-                    try self.execute("BEGIN IMMEDIATE TRANSACTION")
                     for (row, resolution) in resolutions {
                         switch resolution {
                         case .present(let url):
                             if url.path != row.lastKnownPath { relocated += 1 }
                         case .relocated(let url):
-                            _ = try? self.reconcileMovedItem(previousIdentity: row.identity, newURL: url, refreshingState: false)
+                            _ = url
                             relocated += 1
                             requiresMetadataReload = true
                         case .missing:
@@ -693,9 +707,8 @@ final class MetadataStore: ObservableObject {
                             break
                         }
                     }
-                    try self.execute("COMMIT")
                 } catch {
-                    try? self.execute("ROLLBACK")
+                    assertionFailure("Failed reconciliation: \(error)")
                 }
 
                 self.identityCacheByPath.removeAll()
@@ -1146,6 +1159,7 @@ final class MetadataStore: ObservableObject {
         notifyMetadataChanged(immediate: true)
         fieldsByFolder = (try? loadFields()) ?? [:]
         metadataByFileIdentity = (try? loadMetadata(identities: activeMetadataIdentities)) ?? [:]
+        metadataStructureChanges.send()
     }
 
     private func loadFields() throws -> [String: [MetadataField]] {

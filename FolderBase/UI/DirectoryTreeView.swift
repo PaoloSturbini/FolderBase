@@ -88,7 +88,8 @@ private struct DirectoryNodeView: View {
         .onChange(of: directoryCache.invalidationGeneration) {
             let nodePath = url.standardizedFileURL.path
             guard directoryCache.lastInvalidatedPaths.isEmpty || directoryCache.lastInvalidatedPaths.contains(where: {
-                $0 == nodePath || $0.hasPrefix(nodePath + "/") || nodePath.hasPrefix($0 + "/")
+                let changed = URL(fileURLWithPath: $0).standardizedFileURL
+                return changed.path == nodePath || changed.deletingLastPathComponent().path == nodePath
             }) else { return }
             reload()
         }
@@ -180,9 +181,8 @@ private struct DirectoryNodeView: View {
         guard !didLoad else { return }
         didLoad = true
 
-        if let cached = directoryCache.snapshot(for: url) {
+        if let cached = directoryCache.snapshot(for: url, allowStale: true) {
             children = cached.childDirectories
-            return
         }
 
         let targetURL = url
@@ -190,7 +190,7 @@ private struct DirectoryNodeView: View {
             let loaded = await Task.detached(priority: .userInitiated) {
                 try? FileBrowserService().contentsOfDirectory(at: targetURL, showHiddenFiles: false)
             }.value ?? []
-            guard url == targetURL else { return }
+            guard !Task.isCancelled, url == targetURL else { return }
             directoryCache.store(loaded, for: targetURL)
             var transaction = Transaction()
             transaction.disablesAnimations = true

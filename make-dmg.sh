@@ -12,7 +12,7 @@ CONFIG="release"
 BUILD_PATH="/tmp/folderbase-run"
 ICON_PNG="AppIcon.png"
 BUNDLE_ID="com.paolosturbini.folderbase"
-VERSION="1.5.6"
+VERSION="1.5.7"
 DIST_DIR="dist"
 SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: PAOLO ANTONIO STURBIN (F9SXX7XX48)}"
 
@@ -43,7 +43,7 @@ cat > "${APP}/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key>         <string>${APP_NAME}</string>
     <key>CFBundlePackageType</key>        <string>APPL</string>
     <key>CFBundleShortVersionString</key> <string>${VERSION}</string>
-    <key>CFBundleVersion</key>            <string>13</string>
+    <key>CFBundleVersion</key>            <string>14</string>
     <key>CFBundleIconFile</key>           <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>     <string>14.4</string>
     <key>NSHighResolutionCapable</key>    <true/>
@@ -115,6 +115,9 @@ codesign \
     --sign "${SIGN_IDENTITY}" \
     "${SIGNABLE_DMG}"
 codesign --verify --strict --verbose=2 "${SIGNABLE_DMG}"
-mv "${SIGNABLE_DMG}" "${DMG}"
+# Su macOS recenti una cartella Documents con attributo com.apple.provenance può rifiutare
+# il rename cross-directory di un contenitore appena firmato. La copia conserva firma e bytes.
+cp "${SIGNABLE_DMG}" "${DMG}"
+rm -f "${SIGNABLE_DMG}"
 rmdir "${DMG_WORK}"
 echo "OK: creato ${DMG}"

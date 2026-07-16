@@ -6,10 +6,11 @@ import SwiftUI
 struct KanbanBoardView: View {
     let items: [FileItem]
     let field: MetadataField
-    @ObservedObject var metadataStore: MetadataStore
+    let metadataStore: MetadataStore
     let fontSize: Double
     let openItem: (FileItem) -> Void
     @ObservedObject private var loc = LocalizationManager.shared
+    @State private var metadataRevision = 0
 
     private struct Column: Identifiable {
         let id: String
@@ -26,12 +27,19 @@ struct KanbanBoardView: View {
 
     private var columns: [Column] {
         let source = boardItems
+        let validLabels = Set(field.options.map(\.label))
+        var grouped: [String: [FileItem]] = [:]
+        grouped.reserveCapacity(field.options.count + 1)
+        for item in source {
+            let value = metadataStore.value(for: item, field: field)
+            grouped[validLabels.contains(value) ? value : "", default: []].append(item)
+        }
         var result: [Column] = [
             Column(
                 id: "__unassigned__",
                 assignmentLabel: "",
                 color: .gray,
-                items: source.filter { metadataStore.value(for: $0, field: field).isEmpty }
+                items: grouped[""] ?? []
             )
         ]
 
@@ -41,7 +49,7 @@ struct KanbanBoardView: View {
                     id: option.id,
                     assignmentLabel: option.label,
                     color: option.color,
-                    items: source.filter { metadataStore.value(for: $0, field: field) == option.label }
+                    items: grouped[option.label] ?? []
                 )
             )
         }
@@ -59,6 +67,7 @@ struct KanbanBoardView: View {
             .padding(12)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onReceive(metadataStore.metadataChanges) { _ in metadataRevision &+= 1 }
     }
 
     private func columnView(_ column: Column) -> some View {
@@ -82,7 +91,7 @@ struct KanbanBoardView: View {
             .padding(.horizontal, 4)
 
             ScrollView {
-                VStack(spacing: 8) {
+                LazyVStack(spacing: 8) {
                     ForEach(column.items) { item in
                         card(item)
                     }

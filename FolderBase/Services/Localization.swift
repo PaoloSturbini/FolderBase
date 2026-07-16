@@ -213,6 +213,7 @@ enum LocalizedStrings {
         "chat.export.you": ("Tu", "You"),
         "chat.export.assistant": ("Assistente", "Assistant"),
         "chat.scope.label": ("Ambito", "Scope"),
+        "chat.scope.pick": ("Scegli l'ambito della chat", "Choose the chat scope"),
         "chat.scope.all": ("Tutto l'indice", "Entire index"),
         "chat.scope.folder": ("Cartella", "Folder"),
         "chat.scope.file": ("File", "File"),

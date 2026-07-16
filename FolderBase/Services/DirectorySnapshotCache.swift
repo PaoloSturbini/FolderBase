@@ -20,13 +20,15 @@ final class DirectorySnapshotCache: ObservableObject {
     }
 
     private var entries: [String: Entry] = [:]
+    private var staleKeys: Set<String> = []
     private var clock: UInt64 = 0
     private let capacity: Int
 
     init(capacity: Int = 40) { self.capacity = max(5, capacity) }
 
-    func snapshot(for url: URL) -> DirectorySnapshot? {
+    func snapshot(for url: URL, allowStale: Bool = false) -> DirectorySnapshot? {
         let key = url.standardizedFileURL.path
+        guard allowStale || !staleKeys.contains(key) else { return nil }
         guard var entry = entries[key] else { return nil }
         clock &+= 1
         entry.lastAccess = clock
@@ -35,11 +37,13 @@ final class DirectorySnapshotCache: ObservableObject {
     }
 
     func store(_ items: [FileItem], for url: URL) {
+        let key = url.standardizedFileURL.path
         clock &+= 1
-        entries[url.standardizedFileURL.path] = Entry(
+        entries[key] = Entry(
             snapshot: DirectorySnapshot(items: items, loadedAt: Date()),
             lastAccess: clock
         )
+        staleKeys.remove(key)
         trimIfNeeded()
     }
 
@@ -47,9 +51,10 @@ final class DirectorySnapshotCache: ObservableObject {
         guard !paths.isEmpty else { return }
         let normalized = paths.map { URL(fileURLWithPath: $0).standardizedFileURL.path }
         for key in entries.keys where normalized.contains(where: { changed in
-            key == changed || key.hasPrefix(changed + "/") || changed.hasPrefix(key + "/")
+            let parent = URL(fileURLWithPath: changed).deletingLastPathComponent().standardizedFileURL.path
+            return key == changed || key == parent || key.hasPrefix(changed + "/")
         }) {
-            entries[key] = nil
+            staleKeys.insert(key)
         }
         lastInvalidatedPaths = normalized
         invalidationGeneration &+= 1
@@ -57,6 +62,7 @@ final class DirectorySnapshotCache: ObservableObject {
 
     func invalidateAll() {
         entries.removeAll()
+        staleKeys.removeAll()
         lastInvalidatedPaths = []
         invalidationGeneration &+= 1
     }

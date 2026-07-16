@@ -9,6 +9,8 @@ struct FileItem: Identifiable, Hashable, Sendable {
     var created: Date
     var size: Int64?
     var isFolder: Bool
+    var sortNameKey: String
+    var sortTypeKey: String
 
     /// Formatter condivisi: crearne uno nuovo per ogni cella a ogni render (come prima)
     /// è molto costoso — l'inizializzazione di DateFormatter richiede millisecondi.

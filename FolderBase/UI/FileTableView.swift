@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 
 struct FileTableView: View {
     @Binding var items: [FileItem]
-    @ObservedObject var metadataStore: MetadataStore
+    let metadataStore: MetadataStore
     @ObservedObject private var loc = LocalizationManager.shared
 
     let selectedFolderURL: URL?
@@ -111,7 +111,12 @@ struct FileTableView: View {
     }
 
     /// Token per presentare la finestra di chat (l'ambito è già in `chatService`).
-    private struct ChatRequest: Identifiable { let id = UUID() }
+    private struct ChatRequest: Identifiable {
+        let id = UUID()
+        /// File selezionato nel momento esatto in cui la chat viene aperta. Resta congelato
+        /// per tutta la vita della finestra, anche se la selezione della tabella cambia.
+        let focusedFile: FileItem?
+    }
 
     /// Ambito della ricerca: per nome (storico) o per contenuto. La ricerca "Contenuto" è IBRIDA:
     /// fonde il full-text (parole esatte, FTS5/bm25) con la ricerca semantica (significato,
@@ -180,8 +185,8 @@ struct FileTableView: View {
         .sheet(item: $quickLookItem) { item in
             QuickLookSheet(url: item.url) { quickLookItem = nil }
         }
-        .sheet(item: $chatRequest) { _ in
-            ChatView(chatService: chatService, store: metadataStore) {
+        .sheet(item: $chatRequest) { request in
+            ChatView(chatService: chatService, store: metadataStore, focusedFile: request.focusedFile) {
                 chatRequest = nil
             }
         }
@@ -196,7 +201,7 @@ struct FileTableView: View {
                 onSearchChanged()
             }
         }
-        .onChange(of: items) {
+        .onChange(of: items) { oldItems, newItems in
             // Cambiando cartella il riferimento di "Trova simili" non è più valido.
             similarRank = nil
             similarToName = nil
@@ -204,8 +209,9 @@ struct FileTableView: View {
             // "tutte le sottocartelle" deve riflettere subito cancellazioni e spostamenti.
             subtreeItems = []
             subtreeLoadedForPath = nil
-            // Dati cambiati → ricostruisci l'indice, poi riapplica l'eventuale ricerca.
-            rebuildMetadataIndex()
+            // Un evento filesystem normalmente tocca poche righe: aggiorna gli indici per
+            // differenza e riserva la ricostruzione completa ai cambi cartella/dataset estesi.
+            updateItemsIndex(from: oldItems, to: newItems)
             if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 relevanceRank = nil
             } else {
@@ -229,6 +235,9 @@ struct FileTableView: View {
         .onChange(of: metadataFields) { rebuildMetadataIndex() }
         .onReceive(metadataStore.metadataChanges) { identities in
             updateMetadataIndex(changedIDs: identities)
+        }
+        .onReceive(metadataStore.metadataStructureChanges) {
+            rebuildMetadataIndex()
         }
         // Selezione → riporta l'item singolo al pannello note (o nil).
         .onChange(of: selection) { reportSelectedItem() }
@@ -291,7 +300,11 @@ struct FileTableView: View {
         }
         searchTask = Task {
             if !rawNeedle.isEmpty {
-                try? await Task.sleep(for: .milliseconds(150))
+                // Sotto 2.000 righe il filtro locale è immediato; oltre la soglia coalizza i
+                // tasti per evitare scansioni e ordinamenti completi a ogni carattere.
+                let count = searchSource.count
+                let delay = count < 2_000 ? 0 : (count < 10_000 ? 80 : 140)
+                if delay > 0 { try? await Task.sleep(for: .milliseconds(delay)) }
                 guard !Task.isCancelled, searchToken == token else { return }
             }
             applySearch(rawNeedle: rawNeedle, token: token)
@@ -348,9 +361,9 @@ struct FileTableView: View {
     }
 
     /// Configura l'ambito della chat (candidati + etichetta) e la apre.
-    private func startChat(candidates: Set<String>, scopeLabel: String) {
+    private func startChat(candidates: Set<String>, scopeLabel: String, focusedFile: FileItem? = nil) {
         chatService.configure(candidates: candidates, scopeLabel: scopeLabel)
-        chatRequest = ChatRequest()
+        chatRequest = ChatRequest(focusedFile: focusedFile)
     }
 
     /// Identità dei file indicizzabili sotto una cartella (ricorsivo), da usare come ambito chat.
@@ -547,7 +560,10 @@ struct FileTableView: View {
         HStack(spacing: 8) {
             if aiEnabled {
                 Button {
-                    startChat(candidates: [], scopeLabel: L("chat.scope.all"))
+                    let focusedFile = selectedItems.count == 1 && selectedItems[0].isFolder == false
+                        ? selectedItems[0]
+                        : nil
+                    startChat(candidates: [], scopeLabel: L("chat.scope.all"), focusedFile: focusedFile)
                 } label: {
                     Label(L("toolbar.chat"), systemImage: "bubble.left.and.bubble.right")
                 }
@@ -823,6 +839,56 @@ struct FileTableView: View {
         cachedSearchText = searchIndex
         cachedItemsByID = itemsByID
         cachedSourceIDs = Set(itemsByID.keys)
+        refreshDisplayCache()
+    }
+
+    /// Aggiorna le cache della tabella quando il filesystem cambia poche righe. Riduce il
+    /// lavoro da O(campi × tutti i file) a O(campi × righe cambiate).
+    private func updateItemsIndex(from oldItems: [FileItem], to newItems: [FileItem]) {
+        guard !searchAllSubfolders else {
+            rebuildMetadataIndex()
+            return
+        }
+        let oldByID = Dictionary(uniqueKeysWithValues: oldItems.map { ($0.id, $0) })
+        let newByID = Dictionary(uniqueKeysWithValues: newItems.map { ($0.id, $0) })
+        let removed = Set(oldByID.keys).subtracting(newByID.keys)
+        let added = Set(newByID.keys).subtracting(oldByID.keys)
+        let modified = Set(newByID.keys).intersection(oldByID.keys).filter { newByID[$0] != oldByID[$0] }
+        let changed = added.union(modified)
+
+        // Un cambio molto ampio è tipicamente navigazione verso un'altra cartella: in quel
+        // caso il percorso lineare è più semplice e veloce delle molte mutazioni copy-on-write.
+        guard removed.count + changed.count <= max(32, newItems.count / 4) else {
+            rebuildMetadataIndex()
+            return
+        }
+
+        var itemsByID = cachedItemsByID
+        var index = cachedIndex
+        var searchIndex = cachedSearchText
+        for identity in removed {
+            itemsByID[identity] = nil
+            searchIndex[identity] = nil
+            for fieldID in index.keys { index[fieldID]?[identity] = nil }
+        }
+        for identity in changed {
+            guard let item = newByID[identity] else { continue }
+            itemsByID[identity] = item
+            var components = [item.name]
+            for field in metadataFields {
+                let value = metadataStore.value(for: item, field: field)
+                if value.isEmpty { index[field.id]?[identity] = nil }
+                else {
+                    index[field.id, default: [:]][identity] = value
+                    components.append(value)
+                }
+            }
+            searchIndex[identity] = components.joined(separator: "\u{1F}").localizedLowercase
+        }
+        cachedItemsByID = itemsByID
+        cachedSourceIDs = Set(newByID.keys)
+        cachedIndex = index
+        cachedSearchText = searchIndex
         refreshDisplayCache()
     }
 
@@ -1107,7 +1173,8 @@ struct FileTableView: View {
                 } else {
                     Button {
                         startChat(candidates: [single.identity],
-                                  scopeLabel: "\(L("chat.scope.file")): \(single.name)")
+                                  scopeLabel: "\(L("chat.scope.file")): \(single.name)",
+                                  focusedFile: single)
                     } label: {
                         Label(L("ctx.chatFile"), systemImage: "bubble.left.and.bubble.right")
                     }
@@ -1239,7 +1306,7 @@ struct FileTableView: View {
     /// abbiano la stessa altezza, a prescindere dal contenuto (cartelle, file, celle tag/
     /// data, riga selezionata) e dalle colonne metadata presenti in quella cartella.
     private var rowHeight: CGFloat {
-        max(contentFontSize + 9, 22)
+        max(contentFontSize + 7, 20)
     }
 
     private func cell(for item: FileItem, column: ColumnDescriptor) -> some View {
@@ -1317,8 +1384,8 @@ struct FileTableView: View {
 
     @ViewBuilder
     private func nameLabel(_ item: FileItem) -> some View {
-        let iconSide = max(contentFontSize + 3, 16)
-        HStack(spacing: 8) {
+        let iconSide = max(contentFontSize + 1, 14)
+        HStack(spacing: 6) {
             // Il trascinamento del file parte solo dall'icona: così il clic sul TESTO del
             // nome resta istantaneo come le altre celle (il drag su tutta la cella
             // introduceva un ritardo alla pressione per distinguere clic/trascinamento).
@@ -1808,18 +1875,18 @@ struct FileItemSortComparator: SortComparator, Hashable {
 
         switch columnID {
         case "name":
-            result = lhs.name.localizedStandardCompare(rhs.name)
+            result = lhs.sortNameKey.localizedStandardCompare(rhs.sortNameKey)
         case "size":
             result = compareValues(lhs.size ?? -1, rhs.size ?? -1)
         case "type":
-            result = lhs.type.localizedStandardCompare(rhs.type)
+            result = lhs.sortTypeKey.localizedStandardCompare(rhs.sortTypeKey)
         case "created":
             result = compareValues(lhs.created, rhs.created)
         default:
             result = compareMetadata(lhs, rhs)
         }
 
-        let resolved = result == .orderedSame ? lhs.name.localizedStandardCompare(rhs.name) : result
+        let resolved = result == .orderedSame ? lhs.sortNameKey.localizedStandardCompare(rhs.sortNameKey) : result
         return order == .forward ? resolved : resolved.reversed
     }
 

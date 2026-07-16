@@ -14,9 +14,13 @@ final class DirectorySnapshotCacheTests: XCTestCase {
 
         cache.invalidate(paths: [child.appendingPathComponent("file.txt").path])
 
-        XCTAssertNil(cache.snapshot(for: root))
+        XCTAssertNotNil(cache.snapshot(for: root))
         XCTAssertNil(cache.snapshot(for: child))
+        XCTAssertNotNil(cache.snapshot(for: child, allowStale: true))
         XCTAssertNotNil(cache.snapshot(for: other))
+
+        cache.store([], for: child)
+        XCTAssertNotNil(cache.snapshot(for: child))
     }
 
     @MainActor

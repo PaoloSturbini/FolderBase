@@ -388,14 +388,18 @@ final class IndexingService: ObservableObject {
     nonisolated static func fileItem(for url: URL) -> FileItem? {
         guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileResourceIdentifierKey, .volumeIdentifierKey, .creationDateKey, .fileSizeKey]) else { return nil }
         let identity = MetadataStore.identity(for: url, resourceValues: values)
+        let name = url.lastPathComponent
+        let type = url.pathExtension.uppercased()
         return FileItem(
             identity: identity,
             url: url,
-            name: url.lastPathComponent,
-            type: url.pathExtension.uppercased(),
+            name: name,
+            type: type,
             created: values.creationDate ?? .distantPast,
             size: Int64(values.fileSize ?? 0),
-            isFolder: false
+            isFolder: false,
+            sortNameKey: name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current),
+            sortTypeKey: type.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
         )
     }
 

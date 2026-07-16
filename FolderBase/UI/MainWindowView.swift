@@ -1,8 +1,12 @@
 import SwiftUI
+import os
 
 struct MainWindowView: View {
+    private static let performanceLog = OSLog(subsystem: "com.paolosturbini.folderbase", category: .pointsOfInterest)
     @ObservedObject private var loc = LocalizationManager.shared
-    @StateObject private var metadataStore = MetadataStore()
+    // Riferimento stabile ma non osservato dalla finestra intera: sono tabella e sidebar a
+    // sottoscrivere solo gli eventi necessari. Evita di rigenerare tutto l'HSplitView.
+    @State private var metadataStore = MetadataStore()
     @StateObject private var recentFoldersStore = RecentFoldersStore()
     @StateObject private var templateStore = TemplateStore()
     @StateObject private var backupService = BackupService()
@@ -164,17 +168,14 @@ struct MainWindowView: View {
         if managedWatcher == nil {
             managedWatcher = FSEventsWatcher { changedPaths in
                 directoryCache.invalidate(paths: changedPaths)
+                // La vista non deve aspettare bookmark e transazioni SQLite: aggiorna subito
+                // la cartella visibile, mentre la riconciliazione prosegue indipendentemente.
+                if shouldRefreshVisibleFolder(for: changedPaths) {
+                    reloadCurrentFolder(preservingCurrentSnapshot: true)
+                }
                 metadataStore.reconcileManagedFiles(changedPaths: changedPaths) { _, missingIdentities in
                     if autoPurgeOrphans, !missingIdentities.isEmpty {
                         _ = metadataStore.purge(identities: missingIdentities)
-                    }
-                    guard let selectedFolderURL else { return }
-                    let selectedPath = selectedFolderURL.standardizedFileURL.path
-                    if changedPaths.isEmpty || changedPaths.contains(where: {
-                        let changed = URL(fileURLWithPath: $0).standardizedFileURL.path
-                        return changed == selectedPath || changed.hasPrefix(selectedPath + "/") || selectedPath.hasPrefix(changed + "/")
-                    }) {
-                        reloadCurrentFolder()
                     }
                 }
             }
@@ -316,18 +317,33 @@ struct MainWindowView: View {
         fetchItems(at: url, useCachedSnapshot: true)
     }
 
-    private func reloadCurrentFolder() {
+    private func reloadCurrentFolder(preservingCurrentSnapshot: Bool = false) {
         guard let selectedFolderURL else { return }
-        directoryCache.invalidate(paths: [selectedFolderURL.path])
-        fetchItems(at: selectedFolderURL, useCachedSnapshot: false)
+        // FSEvents ha già invalidato in modo preciso il percorso coinvolto. Una seconda
+        // invalidazione della cartella selezionata renderebbe stale anche tutto il sottoalbero.
+        if !preservingCurrentSnapshot {
+            directoryCache.invalidate(paths: [selectedFolderURL.path])
+        }
+        fetchItems(at: selectedFolderURL, useCachedSnapshot: preservingCurrentSnapshot, allowStaleSnapshot: preservingCurrentSnapshot)
+    }
+
+    private func shouldRefreshVisibleFolder(for changedPaths: [String]) -> Bool {
+        guard let selectedFolderURL else { return false }
+        guard !changedPaths.isEmpty else { return true }
+        let selected = selectedFolderURL.standardizedFileURL.path
+        return changedPaths.contains { rawPath in
+            let changedURL = URL(fileURLWithPath: rawPath).standardizedFileURL
+            return changedURL.path == selected
+                || changedURL.deletingLastPathComponent().path == selected
+        }
     }
 
     /// Legge il contenuto della cartella su un thread di background (la lettura del
     /// filesystem può essere lenta) e aggiorna la UI sul main thread. Un guard scarta
     /// i risultati arrivati in ritardo se nel frattempo si è navigato altrove.
-    private func fetchItems(at url: URL, useCachedSnapshot: Bool) {
+    private func fetchItems(at url: URL, useCachedSnapshot: Bool, allowStaleSnapshot: Bool = false) {
         folderLoadTask?.cancel()
-        if useCachedSnapshot, let cached = directoryCache.snapshot(for: url) {
+        if useCachedSnapshot, let cached = directoryCache.snapshot(for: url, allowStale: allowStaleSnapshot) {
             items = cached.items
             metadataStore.loadMetadata(for: cached.items)
             errorMessage = nil
@@ -338,10 +354,13 @@ struct MainWindowView: View {
         let includeHidden = showHiddenFiles
 
         folderLoadTask = Task {
-            let worker = Task.detached(priority: .userInitiated) { () -> (items: [FileItem]?, error: String?) in
+            let signpostID = OSSignpostID(log: Self.performanceLog)
+            os_signpost(.begin, log: Self.performanceLog, name: "DirectoryRefresh", signpostID: signpostID, "%{public}s", url.path)
+            defer { os_signpost(.end, log: Self.performanceLog, name: "DirectoryRefresh", signpostID: signpostID) }
+            let worker = Task.detached(priority: .userInitiated) { () -> (preview: FileBrowserService.Preview?, error: String?) in
                 guard !Task.isCancelled else { return (nil, nil) }
                 do {
-                    return (try FileBrowserService().contentsOfDirectory(at: url, showHiddenFiles: includeHidden), nil)
+                    return (try FileBrowserService().previewOfDirectory(at: url, showHiddenFiles: includeHidden), nil)
                 } catch {
                     return (nil, error.localizedDescription)
                 }
@@ -357,9 +376,9 @@ struct MainWindowView: View {
             var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction) {
-                if let loaded = outcome.items {
+                if let loaded = outcome.preview?.items {
                     directoryCache.store(loaded, for: url)
-                    items = loaded
+                    if loaded != items { items = loaded }
                     metadataStore.loadMetadata(for: loaded)
                     errorMessage = nil
                 } else if let error = outcome.error {
@@ -368,6 +387,18 @@ struct MainWindowView: View {
                 }
 
                 isLoading = false
+            }
+
+            // Nelle directory grandi l'anteprima è già interattiva. Completa attributi e
+            // content type senza trattenere il main actor né modificare le identità delle righe.
+            if outcome.preview?.needsEnrichment == true {
+                let enrichment = Task.detached(priority: .utility) {
+                    try? FileBrowserService().contentsOfDirectory(at: url, showHiddenFiles: includeHidden)
+                }
+                let detailed = await withTaskCancellationHandler { await enrichment.value } onCancel: { enrichment.cancel() }
+                guard !Task.isCancelled, selectedFolderURL == url, let detailed else { return }
+                directoryCache.store(detailed, for: url)
+                if detailed != items { items = detailed }
             }
         }
     }

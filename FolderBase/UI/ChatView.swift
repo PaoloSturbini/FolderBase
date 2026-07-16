@@ -9,6 +9,9 @@ struct ChatView: View {
     @ObservedObject var chatService: ChatService
     @ObservedObject private var loc = LocalizationManager.shared
     let store: MetadataStore
+    /// File che era selezionato quando la chat è stata aperta. Non segue le selezioni
+    /// successive della tabella, così l'utente sa sempre quale documento verrà interrogato.
+    let focusedFile: FileItem?
     let dismiss: () -> Void
 
     @State private var input = ""
@@ -59,13 +62,7 @@ struct ChatView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Label(L("chat.title"), systemImage: "bubble.left.and.bubble.right")
                     .font(.headline)
-                if !chatService.scopeLabel.isEmpty {
-                    Text("\(L("chat.scope.label")): \(chatService.scopeLabel)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
+                scopeMenu
             }
             Spacer()
 
@@ -111,6 +108,65 @@ struct ChatView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+    }
+
+    private enum ScopeChoice: String {
+        case all
+        case file
+    }
+
+    /// Se la chat è stata aperta con un file selezionato, permette di passare tra tutto
+    /// l'indice e quel solo file. Cambiare contesto azzera intenzionalmente la conversazione.
+    @ViewBuilder
+    private var scopeMenu: some View {
+        if let focusedFile {
+            Menu {
+                Picker(L("chat.scope.pick"), selection: scopeChoiceBinding) {
+                    Text(L("chat.scope.all")).tag(ScopeChoice.all)
+                    Text("\(L("chat.scope.file")): \(focusedFile.name)").tag(ScopeChoice.file)
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+            } label: {
+                HStack(spacing: 3) {
+                    Text("\(L("chat.scope.label")): \(chatService.scopeLabel)")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Image(systemName: "chevron.down")
+                        .font(.caption2)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize(horizontal: false, vertical: true)
+            .hoverDescription(L("chat.scope.pick"))
+        } else if !chatService.scopeLabel.isEmpty {
+            Text("\(L("chat.scope.label")): \(chatService.scopeLabel)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+    }
+
+    private var scopeChoiceBinding: Binding<ScopeChoice> {
+        Binding(
+            get: { chatService.isWholeIndexScope ? .all : .file },
+            set: { choice in
+                guard let focusedFile else { return }
+                switch choice {
+                case .all:
+                    chatService.configure(candidates: [], scopeLabel: L("chat.scope.all"))
+                case .file:
+                    chatService.configure(
+                        candidates: [focusedFile.identity],
+                        scopeLabel: "\(L("chat.scope.file")): \(focusedFile.name)"
+                    )
+                }
+            }
+        )
     }
 
     /// Menu per cambiare al volo il FORNITORE di chat (Ollama / OpenAI). Apple è mostrato ma

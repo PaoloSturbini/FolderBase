@@ -7,6 +7,27 @@ final class FileBrowserService {
         .isDirectoryKey, .creationDateKey, .fileSizeKey, .contentTypeKey,
         .fileResourceIdentifierKey, .volumeIdentifierKey
     ]
+    private static let identityKeys: Set<URLResourceKey> = [
+        .isDirectoryKey, .fileResourceIdentifierKey, .volumeIdentifierKey
+    ]
+
+    struct Preview: Sendable {
+        let items: [FileItem]
+        let needsEnrichment: Bool
+    }
+
+    /// Per directory grandi restituisce prima nomi, tipo base e identità. Dimensione, data e
+    /// content type arrivano con la lettura completa successiva, senza cambiare gli ID delle righe.
+    func previewOfDirectory(at url: URL, showHiddenFiles: Bool = false, detailedThreshold: Int = 800) throws -> Preview {
+        let options: FileManager.DirectoryEnumerationOptions = showHiddenFiles ? [] : [.skipsHiddenFiles]
+        let urls = try FileManager.default.contentsOfDirectory(
+            at: url, includingPropertiesForKeys: Array(Self.identityKeys), options: options
+        )
+        guard urls.count > detailedThreshold else {
+            return Preview(items: try makeItems(urls: urls, resourceKeys: Self.resourceKeys, detailed: true), needsEnrichment: false)
+        }
+        return Preview(items: try makeItems(urls: urls, resourceKeys: Self.identityKeys, detailed: false), needsEnrichment: true)
+    }
 
     func contentsOfDirectory(at url: URL, showHiddenFiles: Bool = false) throws -> [FileItem] {
         let options: FileManager.DirectoryEnumerationOptions = showHiddenFiles ? [] : [.skipsHiddenFiles]
@@ -16,21 +37,29 @@ final class FileBrowserService {
             options: options
         )
 
+        return try makeItems(urls: urls, resourceKeys: Self.resourceKeys, detailed: true)
+    }
+
+    private func makeItems(urls: [URL], resourceKeys: Set<URLResourceKey>, detailed: Bool) throws -> [FileItem] {
         var items: [FileItem] = []
         items.reserveCapacity(urls.count)
         for fileURL in urls where !FileSystemPolicy.isInTrash(fileURL) {
             if Task.isCancelled { return [] }
-            let values = try fileURL.resourceValues(forKeys: Self.resourceKeys)
+            let values = try fileURL.resourceValues(forKeys: resourceKeys)
             let isFolder = values.isDirectory ?? false
             let identity = MetadataStore.identity(for: fileURL, resourceValues: values)
+            let type = isFolder ? L("file.folderType") : (detailed ? values.contentType?.localizedDescription : nil) ?? fileURL.pathExtension.uppercased()
+            let name = fileURL.lastPathComponent
             items.append(FileItem(
                     identity: identity,
                     url: fileURL,
-                    name: fileURL.lastPathComponent,
-                    type: isFolder ? L("file.folderType") : values.contentType?.localizedDescription ?? fileURL.pathExtension.uppercased(),
-                    created: values.creationDate ?? .distantPast,
-                    size: isFolder ? nil : Int64(values.fileSize ?? 0),
-                    isFolder: isFolder
+                    name: name,
+                    type: type,
+                    created: detailed ? values.creationDate ?? .distantPast : .distantPast,
+                    size: detailed && !isFolder ? values.fileSize.map(Int64.init) : nil,
+                    isFolder: isFolder,
+                    sortNameKey: name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current),
+                    sortTypeKey: type.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             ))
         }
         return items.sorted { lhs, rhs in

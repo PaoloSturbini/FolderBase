@@ -11,6 +11,18 @@ struct FileTrackingUpdate: Sendable {
     let bookmark: Data?
 }
 
+struct FileRelocationUpdate: Sendable {
+    let previousIdentity: String
+    let newIdentity: String
+    let fileIdentifier: String
+    let volumeIdentifier: String
+    let path: String
+    let name: String
+    let isDirectory: Bool
+    let size: Int64?
+    let bookmark: Data?
+}
+
 /// Riga grezza per la ricerca semantica, prodotta dalla connessione di background. Contiene già il
 /// vettore decodificato: il costoso passaggio BLOB→[Float] avviene fuori dal main thread.
 struct SemanticRow: Sendable {
@@ -110,6 +122,71 @@ actor SQLiteDatabaseActor {
                 try stepDone(statement)
             }
         }
+    }
+
+    /// Applica in una sola transazione actor-backed sia il tracking ordinario sia i riagganci
+    /// di identità. Nessuna query SQLite di riconciliazione torna sul main actor.
+    func applyReconciliation(tracking: [FileTrackingUpdate], relocations: [FileRelocationUpdate]) throws {
+        guard !tracking.isEmpty || !relocations.isEmpty else { return }
+        try transaction {
+            for update in tracking {
+                try updateTracking(update)
+            }
+            for move in relocations {
+                try upsertRelocatedFile(move)
+                try execute("""
+                    UPDATE metadata_values SET file_identity = ? WHERE file_identity = ?
+                    AND NOT EXISTS (SELECT 1 FROM metadata_values e WHERE e.file_identity = ? AND e.field_id = metadata_values.field_id)
+                    """, texts: [move.newIdentity, move.previousIdentity, move.newIdentity])
+                try execute("DELETE FROM metadata_values WHERE file_identity = ?", texts: [move.previousIdentity])
+                try execute("""
+                    UPDATE metadata_fields SET folder_identity = ? WHERE folder_identity = ?
+                    AND NOT EXISTS (SELECT 1 FROM metadata_fields e WHERE e.folder_identity = ? AND e.id = metadata_fields.id)
+                    """, texts: [move.newIdentity, move.previousIdentity, move.newIdentity])
+                try execute("DELETE FROM metadata_fields WHERE folder_identity = ?", texts: [move.previousIdentity])
+            }
+        }
+    }
+
+    private func updateTracking(_ update: FileTrackingUpdate) throws {
+        let sql = "UPDATE files SET last_known_path=?, name=?, size=?, bookmark_data=?, updated_at=? WHERE identity=?"
+        let statement = try cachedStatement(sql)
+        defer { sqlite3_reset(statement); sqlite3_clear_bindings(statement) }
+        bindText(statement, 1, update.path)
+        bindText(statement, 2, update.name)
+        if let size = update.size { sqlite3_bind_int64(statement, 3, size) } else { sqlite3_bind_null(statement, 3) }
+        bindBlob(update.bookmark, statement: statement, index: 4)
+        sqlite3_bind_double(statement, 5, Date().timeIntervalSince1970)
+        bindText(statement, 6, update.identity)
+        try stepDone(statement)
+    }
+
+    private func upsertRelocatedFile(_ move: FileRelocationUpdate) throws {
+        let sql = """
+            INSERT INTO files (identity, file_resource_identifier, volume_identifier, bookmark_data, last_known_path, name, is_directory, size, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(identity) DO UPDATE SET file_resource_identifier=excluded.file_resource_identifier,
+            volume_identifier=excluded.volume_identifier, bookmark_data=excluded.bookmark_data,
+            last_known_path=excluded.last_known_path, name=excluded.name, is_directory=excluded.is_directory,
+            size=excluded.size, updated_at=excluded.updated_at
+            """
+        let statement = try cachedStatement(sql)
+        defer { sqlite3_reset(statement); sqlite3_clear_bindings(statement) }
+        bindText(statement, 1, move.newIdentity)
+        bindText(statement, 2, move.fileIdentifier)
+        bindText(statement, 3, move.volumeIdentifier)
+        bindBlob(move.bookmark, statement: statement, index: 4)
+        bindText(statement, 5, move.path)
+        bindText(statement, 6, move.name)
+        sqlite3_bind_int(statement, 7, move.isDirectory ? 1 : 0)
+        if let size = move.size { sqlite3_bind_int64(statement, 8, size) } else { sqlite3_bind_null(statement, 8) }
+        sqlite3_bind_double(statement, 9, Date().timeIntervalSince1970)
+        try stepDone(statement)
+    }
+
+    private func bindBlob(_ data: Data?, statement: OpaquePointer?, index: Int32) {
+        guard let data else { sqlite3_bind_null(statement, index); return }
+        _ = data.withUnsafeBytes { sqlite3_bind_blob(statement, index, $0.baseAddress, Int32(data.count), SQLITE_ACTOR_TRANSIENT) }
     }
 
     func backup(to destinationURL: URL, maxBusyRetries: Int = 100) async throws {

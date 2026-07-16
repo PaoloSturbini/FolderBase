@@ -86,6 +86,8 @@ Punti importanti:
 
 La tabella si **aggiorna da sola** quando aggiungi, rimuovi o rinomini file nella cartella corrente dall'esterno (Finder, terminale…), grazie al watcher basato su **FSEvents**.
 
+L'aggiornamento visibile è immediato e non attende la riconciliazione del database. Nelle cartelle molto grandi FolderBase mostra prima nomi e cartelle, quindi completa in background dimensione, data e tipo dei file mantenendo stabile selezione e metadata.
+
 ### 4.3 Colonne standard
 
 Ogni tabella mostra di base: **Name**, **Type**, **Created**, **Size**. Le cartelle non hanno dimensione (`—`).
@@ -302,6 +304,7 @@ Pragma attivi: `foreign_keys = ON`, `journal_mode = WAL`.
 - Le note di testo si salvano con **debounce**; le modifiche in blocco usano una **singola transazione**.
 - `FileBrowserService` è puro e senza stato, quindi le letture delle cartelle possono girare in background; il reconcile è asincrono.
 - Tabella e albero condividono una **cache LRU di snapshot**: Back/Forward mostra subito il contenuto noto e lo aggiorna in background.
+- Gli snapshot usano una strategia **stale-while-revalidate**; tabella, ricerca e Kanban aggiornano solo i dati coinvolti e il lavoro SQLite di riconciliazione resta fuori dal main thread.
 - FSEvents osserva solo le radici selezionate e invalida il ramo coinvolto, senza ricreare lo stream o ricaricare tutto l'albero a ogni navigazione.
 - L'estrazione testo usa un `runProcess` con timeout e SIGKILL per evitare blocchi dell'indicizzazione.
 
