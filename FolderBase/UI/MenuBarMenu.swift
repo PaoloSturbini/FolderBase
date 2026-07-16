@@ -39,7 +39,6 @@ struct MenuBarMenu: View {
                     } label: {
                         Label(url.lastPathComponent, systemImage: "folder")
                     }
-                    .help(url.path)
                 }
             }
             Divider()

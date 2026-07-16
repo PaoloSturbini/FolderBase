@@ -123,7 +123,7 @@
   <section id="cartelle">
     <h2>Aggiungere e aprire una cartella</h2>
     <ol class="steps">
-      <li>Apri <strong>Configurazione</strong> nella sidebar, vai in <strong>Cartelle</strong> e usa <strong>Aggiungi cartella</strong>. Ogni cartella compare direttamente come radice di un albero; il pulsante <strong>–</strong> sulla radice la rimuove.</li>
+      <li>Apri <strong>Configurazione</strong> nella sidebar, vai in <strong>Cartelle</strong> e usa <strong>Aggiungi cartella</strong>. Ogni cartella compare come radice; i pulsanti su/giù ne cambiano l'ordine persistente e <strong>–</strong> la rimuove.</li>
       <li>Le radici sono separate e scorrono insieme alla sidebar. All'avvio l'app riapre automaticamente l'ultima cartella usata.</li>
     </ol>
   </section>
@@ -134,7 +134,7 @@
       <li><strong>Singolo click</strong>: seleziona una riga.</li>
       <li><strong>Doppio click</strong> (o <kbd>Invio</kbd>) sul nome di una sottocartella: ci entra, come nel Finder.</li>
       <li>In alto trovi i pulsanti <strong>Indietro / Avanti / Su (↑)</strong> e il percorso corrente.</li>
-      <li>La sidebar mostra gli <strong>alberi di tutte le cartelle aggiunte</strong>. Se navighi in una sottocartella, la barra azzurra resta sulla relativa radice principale.</li>
+      <li>La sidebar mostra gli <strong>alberi di tutte le cartelle aggiunte</strong> nell'ordine scelto. La barra azzurra segue esattamente la cartella o sottocartella selezionata.</li>
       <li>Puoi <strong>trascinare file o cartelle dalla tabella su una sottocartella della stessa tabella</strong> per spostarli al suo interno. Tieni premuto <kbd>Option</kbd> per copiarli. Puoi anche rilasciarli su una cartella dell'albero a sinistra.</li>
     </ul>
     <div class="tip"><strong>Auto-refresh.</strong> La tabella si aggiorna da sola quando aggiungi, rimuovi o rinomini file dall'esterno (Finder, terminale…).</div>
@@ -154,7 +154,7 @@
         <tr><td><strong>Link</strong></td><td>URL, path locale, markdown o wiki link <code>[[Nota]]</code></td><td>—</td></tr>
       </tbody>
     </table>
-    <p>I tag colorati (Select e Kanban) possono usare 8 colori. Se rinomini un'opzione, i valori già assegnati vengono aggiornati; se la elimini, viene rimossa anche dalle righe che la usavano.</p>
+    <p>I tag colorati (Select e Kanban) possono usare 8 colori. Le nuove opzioni vengono salvate subito. Se rinomini un'opzione, i valori già assegnati vengono aggiornati; se la elimini, viene rimossa anche dalle righe che la usavano.</p>
     <h3>Modificare i metadata</h3>
     <p>Scrivi direttamente nelle celle: il salvataggio è <strong>automatico</strong>. Le note di testo vengono salvate con un breve ritardo per non scrivere su disco a ogni tasto.</p>
   </section>
@@ -202,7 +202,7 @@
 
   <section id="template">
     <h2>Template</h2>
-    <p>Un <strong>template</strong> è un insieme riutilizzabile di colonne (nome e tipo). Lo crei e gestisci nella sezione <strong>Template</strong> della Configurazione. Il pulsante template resta disponibile nella radice selezionata e in ogni sottocartella; le colonne applicate vengono ereditate dal relativo sottoalbero.</p>
+    <p>Un <strong>template</strong> è un insieme riutilizzabile di colonne. Il pulsante resta disponibile nella radice e in ogni sottocartella. Durante la propagazione i campi compatibili conservano valori e opzioni Select/Kanban; le strutture incompatibili restano autonome.</p>
   </section>
 
   <section id="impostazioni">

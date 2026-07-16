@@ -59,6 +59,7 @@ struct MainWindowView: View {
                 showFileExtensions: $showFileExtensions,
                 selectFolder: selectFolder,
                 removeFolder: removeRecentFolder,
+                reorderFolder: { url, offset in recentFoldersStore.move(url, offset: offset) },
                 chooseFolder: chooseFolder,
                 navigateTo: navigate,
                 moveItems: moveItemsByPath,

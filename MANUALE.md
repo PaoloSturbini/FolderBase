@@ -73,7 +73,7 @@ Punti importanti:
 
 ### 4.1 Aggiungere e aprire una cartella
 
-1. Apri **Configurazione** nella sidebar, vai in **Cartelle** e usa **Aggiungi cartella**. Ogni cartella aggiunta compare direttamente come radice di un albero nella sidebar; il pulsante **–** sulla radice la rimuove dall'elenco.
+1. Apri **Configurazione** nella sidebar, vai in **Cartelle** e usa **Aggiungi cartella**. Ogni cartella aggiunta compare direttamente come radice di un albero nella sidebar; i pulsanti su/giù ne cambiano l'ordine persistente e il pulsante **–** la rimuove dall'elenco.
 2. Le diverse radici sono separate visivamente e scorrono insieme alla sidebar. All'avvio l'app riapre automaticamente l'ultima cartella usata.
 
 ### 4.2 Navigare
@@ -81,7 +81,7 @@ Punti importanti:
 - **Singolo click**: seleziona una riga.
 - **Doppio click** (o **Invio**) sul nome di una sottocartella: ci entra, come nel Finder.
 - In alto trovi i pulsanti **Indietro / Avanti / Su (↑)** e il percorso corrente.
-- La sidebar mostra contemporaneamente gli **alberi di tutte le cartelle aggiunte**. Quando navighi in una sottocartella, la barra azzurra resta sulla relativa radice principale. Cliccando un nodo la tabella si aggiorna.
+- La sidebar mostra contemporaneamente gli **alberi di tutte le cartelle aggiunte**, nello stesso ordine scelto in Configurazione. Quando navighi, la barra azzurra segue esattamente la cartella o sottocartella selezionata.
 - Puoi **trascinare file o cartelle dalla tabella sopra una sottocartella della stessa tabella** per spostarli al suo interno. Il drag normale sposta; tenendo premuto **Option** copia. Puoi anche rilasciarli su una cartella dell'albero a sinistra.
 
 La tabella si **aggiorna da sola** quando aggiungi, rimuovi o rinomini file nella cartella corrente dall'esterno (Finder, terminale…), grazie al watcher basato su **FSEvents**.
@@ -105,11 +105,11 @@ Pulsante **+ Colonna** in alto a destra. Le colonne create in una cartella vengo
 | **Select** | Tag a valori liberi con colore scelto; il vuoto appare come `<vuoto>` | Per valore |
 | **Link** | URL, path locale, markdown link o wiki link `[[Nota]]`, con pulsanti per scegliere file/cartelle, collegare una nota e aprire | — |
 
-I tag colorati (Select e Kanban) possono usare 8 colori: grigio, rosso, arancio, giallo, verde, blu, viola, rosa. Se rinomini un'opzione, i valori già assegnati in tabella vengono aggiornati; se la elimini, viene rimossa anche dalle righe che la usavano.
+I tag colorati (Select e Kanban) possono usare 8 colori: grigio, rosso, arancio, giallo, verde, blu, viola, rosa. Le nuove opzioni vengono salvate immediatamente. Se rinomini un'opzione, i valori già assegnati in tabella vengono aggiornati; se la elimini, viene rimossa anche dalle righe che la usavano.
 
 ### 4.5 Template di colonne
 
-Un **template** è un insieme di colonne (nome + tipo) riutilizzabile. Il pulsante con l'icona template in alto a sinistra è disponibile nella cartella radice selezionata e in ogni sua sottocartella, anche se esistono già colonne. Le colonne applicate vengono ereditate da tutto il sottoalbero. I template si creano e si modificano da **Configurazione → Template**.
+Un **template** è un insieme di colonne (nome + tipo) riutilizzabile. Il pulsante con l'icona template in alto a sinistra è disponibile nella cartella radice selezionata e in ogni sua sottocartella, anche se esistono già colonne. Le colonne applicate vengono ereditate da tutto il sottoalbero: i campi compatibili già presenti vengono adattati conservando i valori e le opzioni Select/Kanban vengono unite; una sottocartella con struttura incompatibile resta invece autonoma. I template si creano e si modificano da **Configurazione → Template**.
 
 ### 4.6 Gestire le colonne
 
@@ -148,7 +148,7 @@ Sotto l'albero, nella sidebar, un **pannello dettagli** mostra e permette di mod
 
 ### 4.12 Gestire file e cartelle
 
-Clic destro su un elemento per: **Apri**, **Anteprima rapida** (Quick Look), **Mostra nel Finder**, **Rinomina**, **Sposta**, **Imposta metadata**, **Sposta nel Cestino**.
+Clic destro su un elemento per: **Apri**, **Anteprima rapida** (Quick Look), **Mostra nel Finder**, **Copia link Markdown**, **Rinomina**, **Sposta**, **Imposta metadata**, **Sposta nel Cestino**.
 
 - Dalla **Configurazione → Cartelle** puoi creare file vuoti e cartelle nella directory corrente.
 - **Esporta CSV** (icona condividi) salva la tabella corrente rispettando filtri e ordinamento attivi.

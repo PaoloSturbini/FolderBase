@@ -3,7 +3,7 @@ import XCTest
 
 final class MetadataInheritanceTests: XCTestCase {
     @MainActor
-    func testParentFieldsComeFirstAndWinNameConflicts() {
+    func testIncompatibleOrganizedChildBecomesInheritanceBoundary() {
         let parentStatus = MetadataField(id: "parent-status", name: "Stato", kind: .text, options: [])
         let parentDate = MetadataField(id: "parent-date", name: "Data", kind: .date, options: [])
         let childStatus = MetadataField(id: "child-status", name: "stàto", kind: .number, options: [])
@@ -14,6 +14,17 @@ final class MetadataInheritanceTests: XCTestCase {
             [childStatus, childOwner]
         ])
 
-        XCTAssertEqual(inherited.map(\.id), ["parent-status", "parent-date", "child-owner"])
+        XCTAssertEqual(inherited.map(\.id), ["child-status", "child-owner"])
+    }
+
+    @MainActor
+    func testCompatibleChildKeepsParentFieldAndAddsLocalFields() {
+        let parentStatus = MetadataField(id: "parent-status", name: "Stato", kind: .text, options: [])
+        let childStatus = MetadataField(id: "child-status", name: "stàto", kind: .text, options: [])
+        let childOwner = MetadataField(id: "child-owner", name: "Responsabile", kind: .text, options: [])
+
+        let inherited = MetadataStore.mergeInheritedFields([[parentStatus], [childStatus, childOwner]])
+
+        XCTAssertEqual(inherited.map(\.id), ["parent-status", "child-owner"])
     }
 }

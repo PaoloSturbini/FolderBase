@@ -82,11 +82,6 @@ struct FileTableView: View {
     @State private var optionFilters: [String: Set<String>] = [:]
     @State private var viewMode: ViewMode = .table
     @State private var boardFieldID: String?
-    @State private var columnCustomization = TableColumnCustomization<FileItem>()
-    @AppStorage("columnCustomization") private var legacyColumnCustomizationData = Data()
-    @State private var columnCustomizationByFolder: [String: Data] = [:]
-    @AppStorage("columnCustomizationByFolder") private var columnCustomizationByFolderData = Data()
-    @State private var isRestoringColumnConfiguration = false
     @State private var hiddenByFolder: [String: Set<String>] = [:]
     @AppStorage("hiddenColumnsByFolder") private var hiddenColumnsData = Data()
 
@@ -159,7 +154,16 @@ struct FileTableView: View {
             }
         }
         .sheet(item: $fieldPendingEdit) { field in
-            MetadataFieldEditorView(title: L("field.edit"), field: field) { name, kind, options in
+            MetadataFieldEditorView(
+                title: L("field.edit"),
+                field: field,
+                autosaveOptions: { name, kind, options in
+                    if let selectedFolderURL {
+                        let owner = metadataStore.ownerURL(of: field, folderURL: selectedFolderURL, configurationRootURL: configurationRootURL)
+                        metadataStore.updateField(folderURL: owner, field: field, name: name, kind: kind, options: options)
+                    }
+                }
+            ) { name, kind, options in
                 if let selectedFolderURL {
                     let owner = metadataStore.ownerURL(of: field, folderURL: selectedFolderURL, configurationRootURL: configurationRootURL)
                     metadataStore.updateField(folderURL: owner, field: field, name: name, kind: kind, options: options)
@@ -436,18 +440,15 @@ struct FileTableView: View {
                 Image(systemName: "chevron.left")
             }
             .disabled(!canGoBack)
-            .hoverDescription(L("nav.back"))
 
             Button(action: goForward) {
                 Image(systemName: "chevron.right")
             }
             .disabled(!canGoForward)
-            .hoverDescription(L("nav.forward"))
 
             Button(action: goUp) {
                 Image(systemName: "arrow.up")
             }
-            .hoverDescription(L("nav.up"))
 
             if isInsideSelectedConfigurationRoot {
                 templateMenu
@@ -518,7 +519,6 @@ struct FileTableView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
-            .hoverDescription(L("search.scope.help"))
 
             Divider().frame(height: 14)
 
@@ -568,7 +568,6 @@ struct FileTableView: View {
                     Label(L("toolbar.chat"), systemImage: "bubble.left.and.bubble.right")
                 }
                 .labelStyle(.iconOnly)
-                .hoverDescription(L("toolbar.chatHelp"))
             }
 
             if hasKanbanField {
@@ -579,7 +578,6 @@ struct FileTableView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .frame(width: 90)
-                .hoverDescription(L("toolbar.viewHelp"))
             }
 
             Button {
@@ -589,7 +587,6 @@ struct FileTableView: View {
             }
             .labelStyle(.iconOnly)
             .disabled(selectedFolderURL == nil)
-            .hoverDescription(L("toolbar.newFileHelp"))
 
             Button {
                 newItemRequest = NewItemRequest(isDirectory: true)
@@ -598,7 +595,6 @@ struct FileTableView: View {
             }
             .labelStyle(.iconOnly)
             .disabled(selectedFolderURL == nil)
-            .hoverDescription(L("toolbar.newFolderHelp"))
 
             // Icona descrittiva per aggiungere una colonna metadata, a destra di
             // "Nuovo file" e "Nuova cartella" (sostituisce il vecchio pulsante "+ Colonna").
@@ -609,7 +605,6 @@ struct FileTableView: View {
             }
             .labelStyle(.iconOnly)
             .disabled(selectedFolderURL == nil)
-            .hoverDescription(L("toolbar.addColumnHelp"))
 
             Divider()
                 .frame(height: 20)
@@ -623,14 +618,12 @@ struct FileTableView: View {
             }
             .labelStyle(.iconOnly)
             .disabled(tableSortOrder.isEmpty)
-            .hoverDescription(L("toolbar.defaultOrderHelp"))
 
             Button(action: exportCSV) {
                 Label(L("toolbar.exportCSV"), systemImage: "square.and.arrow.up")
             }
             .labelStyle(.iconOnly)
             .disabled(items.isEmpty)
-            .hoverDescription(L("toolbar.exportCSVHelp"))
         }
     }
 
@@ -653,7 +646,6 @@ struct FileTableView: View {
             Label(L("toolbar.columns"), systemImage: "tablecells")
         }
         .labelStyle(.iconOnly)
-        .hoverDescription(L("toolbar.columnsHelp"))
     }
 
     @ViewBuilder
@@ -773,7 +765,6 @@ struct FileTableView: View {
             Label(L("templateMenu.apply"), systemImage: "rectangle.stack.badge.plus")
         }
         .labelStyle(.iconOnly)
-        .hoverDescription(L("templateMenu.help"))
     }
 
     private var isInsideSelectedConfigurationRoot: Bool {
@@ -997,10 +988,7 @@ struct FileTableView: View {
     /// Tutte le colonne (standard + metadata), comprese quelle nascoste.
     private var allColumns: [ColumnDescriptor] {
         var result: [ColumnDescriptor] = [
-            ColumnDescriptor(id: "name", title: L("col.name"), kind: .name, minWidth: 80, idealWidth: 320),
-            ColumnDescriptor(id: "size", title: L("col.size"), kind: .size, minWidth: 50, idealWidth: 110),
-            ColumnDescriptor(id: "type", title: L("col.type"), kind: .type, minWidth: 50, idealWidth: 170),
-            ColumnDescriptor(id: "created", title: L("col.created"), kind: .created, minWidth: 60, idealWidth: 160)
+            ColumnDescriptor(id: "name", title: L("col.name"), kind: .name, minWidth: 80, idealWidth: 320)
         ]
 
         for field in metadataFields {
@@ -1014,6 +1002,12 @@ struct FileTableView: View {
                 )
             )
         }
+
+        result.append(contentsOf: [
+            ColumnDescriptor(id: "size", title: L("col.size"), kind: .size, minWidth: 50, idealWidth: 110),
+            ColumnDescriptor(id: "type", title: L("col.type"), kind: .type, minWidth: 50, idealWidth: 170),
+            ColumnDescriptor(id: "created", title: L("col.created"), kind: .created, minWidth: 60, idealWidth: 160)
+        ])
 
         return result
     }
@@ -1061,7 +1055,7 @@ struct FileTableView: View {
     }
 
     private var table: some View {
-        Table(cachedVisibleItems, selection: $selection, sortOrder: $tableSortOrder, columnCustomization: $columnCustomization) {
+        Table(cachedVisibleItems, selection: $selection, sortOrder: $tableSortOrder) {
             TableColumnForEach(visibleColumns) { column in
                 TableColumn(column.title, sortUsing: sortComparator(for: column, index: cachedIndex)) { item in
                     cell(for: item, column: column)
@@ -1092,13 +1086,8 @@ struct FileTableView: View {
             }
         }
         .onAppear {
-            restoreColumnCustomization()
             restoreHiddenColumns()
         }
-        .onChange(of: columnCustomization) {
-            if !isRestoringColumnConfiguration { persistColumnCustomization() }
-        }
-        .onChange(of: selectedFolderURL) { restoreColumnCustomization() }
         .onChange(of: hiddenByFolder) {
             persistHiddenColumns()
         }
@@ -1210,6 +1199,14 @@ struct FileTableView: View {
 
             Divider()
 
+            Button {
+                copyMarkdownLinks([single])
+            } label: {
+                Label(L("ctx.copyMarkdownLink"), systemImage: "link")
+            }
+
+            Divider()
+
             Button(role: .destructive) {
                 requestTrash([single])
             } label: {
@@ -1231,43 +1228,18 @@ struct FileTableView: View {
 
             Divider()
 
+            Button {
+                copyMarkdownLinks(targets)
+            } label: {
+                Label(L("ctx.copyMarkdownLink"), systemImage: "link")
+            }
+
+            Divider()
+
             Button(role: .destructive) {
                 requestTrash(targets)
             } label: {
                 Label("\(L("ctx.trash")) (\(targets.count))", systemImage: "trash")
-            }
-        }
-    }
-
-    private func restoreColumnCustomization() {
-        isRestoringColumnConfiguration = true
-        defer { isRestoringColumnConfiguration = false }
-        if columnCustomizationByFolder.isEmpty, !columnCustomizationByFolderData.isEmpty,
-           let decoded = try? JSONDecoder().decode([String: Data].self, from: columnCustomizationByFolderData) {
-            columnCustomizationByFolder = decoded
-        }
-        let inheritedData = configurationAncestorKeys.compactMap { columnCustomizationByFolder[$0] }.first
-            ?? (legacyColumnCustomizationData.isEmpty ? nil : legacyColumnCustomizationData)
-        if let inheritedData,
-           let decoded = try? JSONDecoder().decode(TableColumnCustomization<FileItem>.self, from: inheritedData) {
-            columnCustomization = decoded
-        } else {
-            columnCustomization = TableColumnCustomization<FileItem>()
-        }
-
-        // La visibilità è ora gestita da noi (menù "Colonne"): forziamo visibili tutte le
-        // colonne nella personalizzazione nativa, così quelle nascoste in passato col vecchio
-        // menù di sistema tornano visibili e non restano blottate.
-        for column in allColumns {
-            columnCustomization[visibility: column.id] = .visible
-        }
-    }
-
-    private func persistColumnCustomization() {
-        if let data = try? JSONEncoder().encode(columnCustomization) {
-            columnCustomizationByFolder[folderKey] = data
-            if let encoded = try? JSONEncoder().encode(columnCustomizationByFolder) {
-                columnCustomizationByFolderData = encoded
             }
         }
     }
@@ -1348,7 +1320,6 @@ struct FileTableView: View {
             label
         } else if item.isFolder {
             label
-                .help(L("name.helpFolder"))
                 .background(
                     ZStack {
                         RoundedRectangle(cornerRadius: 5)
@@ -1378,7 +1349,6 @@ struct FileTableView: View {
                 )
         } else {
             label
-                .help(L("name.helpFile"))
         }
     }
 
@@ -1428,7 +1398,6 @@ struct FileTableView: View {
                 onClick: { selection = [item.id] }
             )
             .frame(width: side, height: side)
-            .help(L("name.dragHint"))
         }
     }
 
@@ -1509,7 +1478,6 @@ struct FileTableView: View {
                     Image(systemName: "link.badge.plus")
                 }
                 .buttonStyle(.borderless)
-                .help(L("link.chooseFile"))
 
                 Button {
                     chooseWikiLink(for: item, field: field)
@@ -1517,7 +1485,6 @@ struct FileTableView: View {
                     Image(systemName: "note.text.badge.plus")
                 }
                 .buttonStyle(.borderless)
-                .help(L("link.wiki"))
 
                 Button {
                     openLink(for: item, field: field)
@@ -1526,7 +1493,6 @@ struct FileTableView: View {
                 }
                 .buttonStyle(.borderless)
                 .disabled(metadataStore.value(for: item, field: field).isEmpty)
-                .help(L("link.open"))
             }
         }
     }
@@ -1616,6 +1582,21 @@ struct FileTableView: View {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.writeObjects(urls)
+    }
+
+    /// Copia uno o più collegamenti Markdown assoluti. `absoluteString` produce URL `file://`
+    /// correttamente percent-encoded, quindi spazi e caratteri accentati restano cliccabili.
+    private func copyMarkdownLinks(_ items: [FileItem]) {
+        guard !items.isEmpty else { return }
+        let markdown = items.map { item in
+            let escapedName = item.name
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "]", with: "\\]")
+            return "[\(escapedName)](\(item.url.absoluteString))"
+        }.joined(separator: "\n")
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(markdown, forType: .string)
     }
 
     private func exportCSV() {
@@ -1805,46 +1786,6 @@ struct FileTableView: View {
         }
 
         return nil
-    }
-}
-
-/// Mostra, al passaggio del mouse, una descrizione dell'elemento in un popover con lo
-/// STESSO stile dell'anteprima delle note (vedi `EditableTextCell`): testo semplice su
-/// sfondo popover. Sostituisce il tooltip nativo `.help()` sulle icone della barra in alto.
-/// Un breve ritardo evita che appaia per semplice sfioramento o che disturbi il clic.
-private struct HoverDescription: ViewModifier {
-    let text: String
-    @State private var isShowing = false
-    @State private var hoverTask: Task<Void, Never>?
-
-    func body(content: Content) -> some View {
-        content
-            .onHover { hovering in
-                hoverTask?.cancel()
-                if hovering && !text.isEmpty {
-                    hoverTask = Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: 350_000_000)
-                        if !Task.isCancelled { isShowing = true }
-                    }
-                } else {
-                    isShowing = false
-                }
-            }
-            .popover(isPresented: $isShowing, arrowEdge: .bottom) {
-                Text(text)
-                    .font(.body)
-                    .multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: 320, alignment: .leading)
-                    .padding(12)
-            }
-    }
-}
-
-extension View {
-    /// Descrizione a comparsa (hover) in stile "campo note".
-    func hoverDescription(_ text: String) -> some View {
-        modifier(HoverDescription(text: text))
     }
 }
 
@@ -2294,7 +2235,6 @@ private struct DateMetadataCell: View {
                         }
                         .buttonStyle(.borderless)
                         .foregroundStyle(.secondary)
-                        .help(L("common.empty"))
                     }
                 }
                 .onHover { isHovering = $0 }

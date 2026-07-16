@@ -13,8 +13,18 @@ final class RecentFoldersStore: ObservableObject {
 
     func add(_ url: URL) {
         let standardizedURL = url.standardizedFileURL
-        folderURLs.removeAll { $0.path == standardizedURL.path }
-        folderURLs.insert(standardizedURL, at: 0)
+        guard !folderURLs.contains(where: { $0.path == standardizedURL.path }) else { return }
+        folderURLs.append(standardizedURL)
+        save()
+    }
+
+    /// Sposta una cartella di una posizione mantenendo l'ordine scelto dall'utente persistente.
+    func move(_ url: URL, offset: Int) {
+        guard let source = folderURLs.firstIndex(where: { $0.path == url.standardizedFileURL.path }) else { return }
+        let destination = source + offset
+        guard folderURLs.indices.contains(destination) else { return }
+        let moved = folderURLs.remove(at: source)
+        folderURLs.insert(moved, at: destination)
         save()
     }
 

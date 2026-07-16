@@ -131,7 +131,6 @@ struct KanbanBoardView: View {
         .onTapGesture(count: 2) {
             openItem(item)
         }
-        .help(item.name)
     }
 
     private func applyDrop(paths: [String], toLabel label: String) -> Bool {

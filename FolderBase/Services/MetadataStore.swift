@@ -186,13 +186,38 @@ final class MetadataStore: ObservableObject {
         var result: [MetadataField] = []
         var claimedNames: Set<String> = []
         for fields in groups {
+            let existingByName = Dictionary(uniqueKeysWithValues: result.map { (normalizedFieldName($0.name), $0) })
+            let hasIncompatibleCollision = fields.contains { field in
+                guard let inherited = existingByName[normalizedFieldName(field.name)] else { return false }
+                return !fieldsAreCompatible(inherited: inherited, local: field)
+            }
+            // Una cartella già organizzata con uno schema incompatibile è un confine: non le
+            // imponiamo il template dell'antenato e preserviamo integralmente colonne e valori.
+            if hasIncompatibleCollision {
+                result = []
+                claimedNames = []
+            }
             for field in fields {
-                let key = field.name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                let key = normalizedFieldName(field.name)
                 guard claimedNames.insert(key).inserted else { continue }
                 result.append(field)
             }
         }
         return result
+    }
+
+    private nonisolated static func normalizedFieldName(_ name: String) -> String {
+        name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    }
+
+    private nonisolated static func fieldsAreCompatible(
+        inherited: MetadataField,
+        local: MetadataField
+    ) -> Bool {
+        guard inherited.kind == local.kind else { return false }
+        guard inherited.kind.usesOptions else { return true }
+        let inheritedLabels = Set(inherited.options.map { normalizedFieldName($0.label) })
+        return local.options.allSatisfy { inheritedLabels.contains(normalizedFieldName($0.label)) }
     }
 
     func ownerURL(of field: MetadataField, folderURL: URL, configurationRootURL: URL?) -> URL {
@@ -401,17 +426,44 @@ final class MetadataStore: ObservableObject {
         do {
             let folderIdentity = try registerFile(at: folderURL)
             var appended: [MetadataField] = []
+            var appliedFields: [MetadataField] = []
+            var updatedExisting: [MetadataField] = []
+            let existingFields = fieldsByFolder[folderIdentity] ?? []
 
             try execute("BEGIN IMMEDIATE TRANSACTION")
             for templateField in template.fields {
                 let trimmedName = templateField.name.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmedName.isEmpty else { continue }
+                let propagatedOptions = try mergedPropagatedOptions(
+                    for: templateField,
+                    below: folderURL
+                )
+
+                if let existing = existingFields.first(where: {
+                    Self.normalizedFieldName($0.name) == Self.normalizedFieldName(trimmedName)
+                }) {
+                    // Non duplica una struttura già presente. Un conflitto di tipo rende questa
+                    // cartella un confine di propagazione ed è lasciato completamente intatto.
+                    if existing.kind == templateField.kind {
+                        var adapted = existing
+                        adapted.options = propagatedOptions
+                        let optionsData = try JSONEncoder().encode(adapted.options)
+                        let optionsJSON = String(data: optionsData, encoding: .utf8) ?? "[]"
+                        try execute(
+                            "UPDATE metadata_fields SET options_json = ? WHERE id = ?",
+                            bindings: [.text(optionsJSON), .text(adapted.id)]
+                        )
+                        appliedFields.append(adapted)
+                        updatedExisting.append(adapted)
+                    }
+                    continue
+                }
 
                 let field = MetadataField(
                     id: UUID().uuidString,
                     name: trimmedName,
                     kind: templateField.kind,
-                    options: normalizedOptions(for: templateField.kind, options: templateField.options)
+                    options: propagatedOptions
                 )
                 let optionsData = try JSONEncoder().encode(field.options)
                 let optionsJSON = String(data: optionsData, encoding: .utf8) ?? "[]"
@@ -424,14 +476,145 @@ final class MetadataStore: ObservableObject {
                     bindings: [.text(field.id), .text(folderIdentity), .text(field.name), .text(field.kind.rawValue), .text(optionsJSON), .text(folderIdentity)]
                 )
                 appended.append(field)
+                appliedFields.append(field)
             }
             try execute("COMMIT")
 
             fieldsByFolder[folderIdentity, default: []].append(contentsOf: appended)
+            for updated in updatedExisting {
+                if let index = fieldsByFolder[folderIdentity]?.firstIndex(where: { $0.id == updated.id }) {
+                    fieldsByFolder[folderIdentity]?[index] = updated
+                }
+            }
+            try reconcileCompatibleDescendantFields(
+                with: appliedFields,
+                below: folderURL,
+                excluding: folderIdentity
+            )
+            metadataStructureChanges.send()
         } catch {
             try? execute("ROLLBACK")
             assertionFailure("Failed to apply template: \(error)")
         }
+    }
+
+    /// Unisce alle opzioni del template tutte le opzioni già configurate nelle Select/Kanban
+    /// omonime del sottoalbero. L'ordine del template resta prioritario; le opzioni locali nuove
+    /// vengono accodate conservando ID, etichetta e colore, così anche i valori esistenti sono
+    /// migrabili senza perdita.
+    private func mergedPropagatedOptions(
+        for templateField: FieldTemplate,
+        below rootURL: URL
+    ) throws -> [MetadataSelectOption] {
+        guard templateField.kind.usesOptions else { return [] }
+        var result = normalizedOptions(for: templateField.kind, options: templateField.options)
+        var labels = Set(result.map { Self.normalizedFieldName($0.label) })
+
+        for (folderIdentity, fields) in fieldsByFolder {
+            guard try isFolderIdentity(folderIdentity, atOrBelow: rootURL) else { continue }
+            for field in fields where field.kind == templateField.kind
+                && Self.normalizedFieldName(field.name) == Self.normalizedFieldName(templateField.name) {
+                for option in field.options {
+                    let key = Self.normalizedFieldName(option.label)
+                    if labels.insert(key).inserted { result.append(option) }
+                }
+            }
+        }
+        return result
+    }
+
+    /// Trasferisce i valori dai campi locali omonimi e compatibili al campo ereditato del
+    /// template. I campi non convertibili non vengono toccati: `mergeInheritedFields` farà di
+    /// quella cartella un confine, evitando qualunque perdita di organizzazione preesistente.
+    private func reconcileCompatibleDescendantFields(
+        with inheritedFields: [MetadataField],
+        below rootURL: URL,
+        excluding rootIdentity: String
+    ) throws {
+        for (folderIdentity, localFields) in fieldsByFolder where folderIdentity != rootIdentity {
+            guard try isFolderIdentity(folderIdentity, below: rootURL) else { continue }
+            for local in localFields {
+                guard let inherited = inheritedFields.first(where: {
+                    Self.normalizedFieldName($0.name) == Self.normalizedFieldName(local.name)
+                }), inherited.kind == local.kind,
+                let valueMapping = try compatibleValueMapping(from: local, to: inherited) else { continue }
+
+                try execute("BEGIN IMMEDIATE TRANSACTION")
+                for (oldValue, newValue) in valueMapping where oldValue != newValue {
+                    try execute(
+                        "UPDATE metadata_values SET value = ? WHERE field_id = ? AND value = ?",
+                        bindings: [.text(newValue), .text(local.id), .text(oldValue)]
+                    )
+                }
+                try execute(
+                    """
+                    INSERT OR IGNORE INTO metadata_values (file_identity, field_id, value)
+                    SELECT file_identity, ?, value FROM metadata_values WHERE field_id = ?
+                    """,
+                    bindings: [.text(inherited.id), .text(local.id)]
+                )
+                try execute("DELETE FROM metadata_fields WHERE id = ?", bindings: [.text(local.id)])
+                try execute("COMMIT")
+                fieldsByFolder[folderIdentity]?.removeAll { $0.id == local.id }
+
+                for (identity, var metadata) in metadataByFileIdentity {
+                    guard let oldValue = metadata.values.removeValue(forKey: local.id) else { continue }
+                    metadata.values[inherited.id] = valueMapping[oldValue] ?? oldValue
+                    metadataByFileIdentity[identity] = metadata
+                }
+            }
+        }
+    }
+
+    private func isFolderIdentity(_ identity: String, below rootURL: URL) throws -> Bool {
+        try isFolderIdentity(identity, atOrBelow: rootURL, includeRoot: false)
+    }
+
+    private func isFolderIdentity(
+        _ identity: String,
+        atOrBelow rootURL: URL,
+        includeRoot: Bool = true
+    ) throws -> Bool {
+        var statement: OpaquePointer?
+        try prepare("SELECT last_known_path FROM files WHERE identity = ?", statement: &statement)
+        defer { sqlite3_finalize(statement) }
+        try bind([.text(identity)], to: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return false }
+        let path = columnText(statement, 0)
+        let rootPath = rootURL.standardizedFileURL.path
+        return (includeRoot && path == rootPath) || path.hasPrefix(rootPath + "/")
+    }
+
+    private func compatibleValueMapping(
+        from local: MetadataField,
+        to inherited: MetadataField
+    ) throws -> [String: String]? {
+        guard local.kind == inherited.kind else { return nil }
+        guard local.kind.usesOptions else { return [:] }
+
+        let targetByLabel = Dictionary(uniqueKeysWithValues: inherited.options.map {
+            (Self.normalizedFieldName($0.label), $0.label)
+        })
+        var mapping: [String: String] = [:]
+        for option in local.options {
+            if let targetLabel = targetByLabel[Self.normalizedFieldName(option.label)] {
+                mapping[option.label] = targetLabel
+            } else if try metadataValueExists(fieldID: local.id, value: option.label) {
+                return nil
+            }
+        }
+        return mapping
+    }
+
+    private func metadataValueExists(fieldID: String, value: String) throws -> Bool {
+        var statement: OpaquePointer?
+        try prepare(
+            "SELECT 1 FROM metadata_values WHERE field_id = ? AND value = ? LIMIT 1",
+            statement: &statement
+        )
+        defer { sqlite3_finalize(statement) }
+        try bind([.text(fieldID), .text(value)], to: statement)
+        return sqlite3_step(statement) == SQLITE_ROW
     }
 
     func removeField(folderURL: URL, field: MetadataField) {

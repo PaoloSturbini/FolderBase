@@ -61,7 +61,6 @@ struct TemplateEditorView: View {
                                     Image(systemName: "pencil")
                                 }
                                 .buttonStyle(.borderless)
-                                .help(L("templateEditor.editField"))
 
                                 Button {
                                     fields.removeAll { $0.id == field.id }
@@ -70,7 +69,6 @@ struct TemplateEditorView: View {
                                 }
                                 .buttonStyle(.borderless)
                                 .foregroundStyle(.secondary)
-                                .help(L("templateEditor.removeField"))
                             }
                             .padding(.vertical, 2)
 

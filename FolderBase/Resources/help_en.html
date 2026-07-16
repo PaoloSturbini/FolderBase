@@ -123,7 +123,7 @@
   <section id="folders">
     <h2>Adding and opening a folder</h2>
     <ol class="steps">
-      <li>Open <strong>Settings</strong> in the sidebar, go to <strong>Folders</strong> and use <strong>Add folder</strong>. Each folder appears directly as a tree root; use the <strong>–</strong> button on the root to remove it.</li>
+      <li>Open <strong>Settings</strong>, go to <strong>Folders</strong> and use <strong>Add folder</strong>. Each folder appears as a root; the up/down buttons persistently reorder it and <strong>–</strong> removes it.</li>
       <li>Roots are visually separated and scroll together in the sidebar. On launch the app automatically reopens the last folder you used.</li>
     </ol>
   </section>
@@ -134,7 +134,7 @@
       <li><strong>Single click</strong>: selects a row.</li>
       <li><strong>Double click</strong> (or <kbd>Return</kbd>) on a subfolder name: enters it, just like Finder.</li>
       <li>At the top you'll find <strong>Back / Forward / Up (↑)</strong> buttons and the current path.</li>
-      <li>The sidebar shows <strong>all added folder trees</strong>. While navigating a subfolder, the blue highlight remains on its main root.</li>
+      <li>The sidebar shows <strong>all added folder trees</strong> in your chosen order. The blue highlight follows the exact selected folder or subfolder.</li>
       <li>You can <strong>drag files or folders from the table onto a subfolder row in the same table</strong> to move them into it. Hold <kbd>Option</kbd> to copy. You can also drop them onto a folder in the tree on the left.</li>
     </ul>
     <div class="tip"><strong>Auto-refresh.</strong> The table updates itself when you add, remove or rename files from elsewhere (Finder, terminal…).</div>
@@ -154,7 +154,7 @@
         <tr><td><strong>Link</strong></td><td>URL, local path, markdown or wiki link <code>[[Note]]</code></td><td>—</td></tr>
       </tbody>
     </table>
-    <p>Colored tags (Select and Kanban) can use 8 colors. If you rename an option, values already assigned are updated; if you delete it, it is also removed from the rows using it.</p>
+    <p>Colored tags (Select and Kanban) can use 8 colors. New options are saved immediately. If you rename an option, assigned values are updated; deleting it also removes it from rows using it.</p>
     <h3>Editing metadata</h3>
     <p>Type directly into the cells: saving is <strong>automatic</strong>. Text notes are saved with a short delay so the app doesn't write to disk on every keystroke.</p>
   </section>
@@ -202,7 +202,7 @@
 
   <section id="templates">
     <h2>Templates</h2>
-    <p>A <strong>template</strong> is a reusable set of columns (name and type). You create and manage them in the <strong>Templates</strong> section of Settings. The template button remains available in the selected root and all its subfolders; applied columns are inherited throughout that subtree.</p>
+    <p>A <strong>template</strong> is a reusable set of columns. The button remains available in the root and every subfolder. Propagation preserves values and Select/Kanban options in compatible fields, while incompatible local structures remain independent.</p>
   </section>
 
   <section id="settings">

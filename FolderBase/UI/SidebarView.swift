@@ -149,6 +149,7 @@ struct SidebarView: View {
     @ObservedObject private var launchAtLogin = LaunchAtLoginService.shared
     let selectFolder: (URL) -> Void
     let removeFolder: (URL) -> Void
+    let reorderFolder: (URL, Int) -> Void
     let chooseFolder: () -> Void
     let navigateTo: (URL) -> Void
     let moveItems: ([String], URL) -> Void
@@ -656,7 +657,7 @@ struct SidebarView: View {
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
-                        ForEach(recentFolderURLs, id: \.path) { folderURL in
+                        ForEach(Array(recentFolderURLs.enumerated()), id: \.element.path) { index, folderURL in
                             HStack(spacing: 8) {
                                 Button {
                                     selectFolder(folderURL)
@@ -668,13 +669,28 @@ struct SidebarView: View {
                                 .buttonStyle(.plain)
 
                                 Button {
+                                    reorderFolder(folderURL, -1)
+                                } label: {
+                                    Image(systemName: "chevron.up")
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(index == 0)
+
+                                Button {
+                                    reorderFolder(folderURL, 1)
+                                } label: {
+                                    Image(systemName: "chevron.down")
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(index == recentFolderURLs.count - 1)
+
+                                Button {
                                     removeFolder(folderURL)
                                 } label: {
                                     Image(systemName: "minus.circle")
                                 }
                                 .buttonStyle(.borderless)
                                 .foregroundStyle(.secondary)
-                                .help("Togli cartella")
                             }
                             .padding(.vertical, 2)
                         }
@@ -731,7 +747,6 @@ struct SidebarView: View {
                                 .buttonStyle(.borderless)
                                 .foregroundStyle(.secondary)
                                 .disabled(indexingService.isIndexing)
-                                .help(L("indexing.recheck"))
                             }
                         }
 
@@ -1445,7 +1460,6 @@ struct SidebarView: View {
                                 )
                                 .contentShape(Circle())
                                 .onTapGesture { appAccentRaw = option.rawValue }
-                                .help(option.title)
                         }
                         Spacer(minLength: 0)
                     }
@@ -1671,7 +1685,6 @@ struct SidebarView: View {
                                     Image(systemName: "pencil")
                                 }
                                 .buttonStyle(.borderless)
-                                .help(L("templates.editTemplate"))
 
                                 Button {
                                     templateStore.delete(id: template.id)
@@ -1680,7 +1693,6 @@ struct SidebarView: View {
                                 }
                                 .buttonStyle(.borderless)
                                 .foregroundStyle(.secondary)
-                                .help(L("templates.deleteTemplate"))
                             }
                             .padding(.vertical, 2)
 

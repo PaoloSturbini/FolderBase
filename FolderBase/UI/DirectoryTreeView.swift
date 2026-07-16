@@ -49,13 +49,7 @@ private struct DirectoryNodeView: View {
     private var isSelected: Bool {
         let selectedPath = selectedFolderURL?.standardizedFileURL.path
         let nodePath = url.standardizedFileURL.path
-        if depth == 0, let selectedPath {
-            return selectedPath == nodePath || selectedPath.hasPrefix(nodePath + "/")
-        }
-        // La barra azzurra identifica sempre la radice gestita dell'albero corrente.
-        // La sottocartella selezionata resta riconoscibile perché il suo percorso è aperto,
-        // senza creare una seconda evidenziazione concorrente.
-        return false
+        return selectedPath == nodePath
     }
 
     /// Vero se la cartella selezionata è questa o una sua discendente.
@@ -132,7 +126,6 @@ private struct DirectoryNodeView: View {
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(.secondary)
-                .help(L("sidebar.removeFolder"))
             }
         }
         .font(.system(size: fontSize))

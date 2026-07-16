@@ -5,6 +5,7 @@ import SwiftUI
 struct MetadataFieldEditorView: View {
     let title: String
     var save: (String, MetadataFieldKind, [MetadataSelectOption]) -> Void
+    var autosaveOptions: ((String, MetadataFieldKind, [MetadataSelectOption]) -> Void)?
     var cancel: () -> Void
 
     @ObservedObject private var loc = LocalizationManager.shared
@@ -14,9 +15,16 @@ struct MetadataFieldEditorView: View {
     @State private var newOptionColor: MetadataTagColor = .blue
     @State private var options: [MetadataSelectOption] = []
 
-    init(title: String, field: MetadataField? = nil, save: @escaping (String, MetadataFieldKind, [MetadataSelectOption]) -> Void, cancel: @escaping () -> Void) {
+    init(
+        title: String,
+        field: MetadataField? = nil,
+        autosaveOptions: ((String, MetadataFieldKind, [MetadataSelectOption]) -> Void)? = nil,
+        save: @escaping (String, MetadataFieldKind, [MetadataSelectOption]) -> Void,
+        cancel: @escaping () -> Void
+    ) {
         self.title = title
         self.save = save
+        self.autosaveOptions = autosaveOptions
         self.cancel = cancel
         _name = State(initialValue: field?.name ?? "")
         _kind = State(initialValue: field?.kind ?? .text)
@@ -144,14 +152,23 @@ struct MetadataFieldEditorView: View {
 
         options.append(MetadataSelectOption(label: label, color: newOptionColor))
         newOptionLabel = ""
+        persistOptionsImmediately()
     }
 
     private func removeOption(_ option: MetadataSelectOption) {
         options.removeAll { $0.id == option.id }
+        persistOptionsImmediately()
     }
 
     private func normalizeOptions() {
         options = normalizedEditorOptions()
+        persistOptionsImmediately()
+    }
+
+    private func persistOptionsImmediately() {
+        let normalized = selectableOptions
+        options = normalized
+        autosaveOptions?(name, kind, normalized)
     }
 
     private func normalizedEditorOptions() -> [MetadataSelectOption] {
@@ -184,6 +201,7 @@ struct MetadataFieldEditorView: View {
             set: { newValue in
                 guard let index = options.firstIndex(where: { $0.id == option.id }) else { return }
                 options[index].color = newValue
+                persistOptionsImmediately()
             }
         )
     }

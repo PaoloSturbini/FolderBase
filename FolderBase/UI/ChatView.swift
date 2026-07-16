@@ -75,7 +75,6 @@ struct ChatView: View {
             }
             .buttonStyle(.borderless)
             .disabled(!chatService.canRerun)
-            .hoverDescription(L("chat.rerun"))
 
             Button {
                 copyConversation()
@@ -84,7 +83,6 @@ struct ChatView: View {
             }
             .buttonStyle(.borderless)
             .disabled(!chatService.hasConversation)
-            .hoverDescription(L("chat.copy"))
 
             Button {
                 exportConversation()
@@ -93,7 +91,6 @@ struct ChatView: View {
             }
             .buttonStyle(.borderless)
             .disabled(!chatService.hasConversation)
-            .hoverDescription(L("chat.export"))
 
             Button {
                 chatService.reset()
@@ -102,7 +99,6 @@ struct ChatView: View {
             }
             .buttonStyle(.borderless)
             .disabled(!chatService.hasConversation || chatService.isBusy)
-            .hoverDescription(L("chat.new"))
 
             Button(L("common.done")) { dismiss() }
         }
@@ -141,7 +137,6 @@ struct ChatView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize(horizontal: false, vertical: true)
-            .hoverDescription(L("chat.scope.pick"))
         } else if !chatService.scopeLabel.isEmpty {
             Text("\(L("chat.scope.label")): \(chatService.scopeLabel)")
                 .font(.caption)
@@ -196,7 +191,6 @@ struct ChatView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .hoverDescription(L("chat.provider.pick"))
     }
 
     private var chatProviderLabel: String {
@@ -285,7 +279,6 @@ struct ChatView: View {
                     Image(systemName: "doc.on.doc")
                 }
                 .buttonStyle(.borderless)
-                .hoverDescription(L("chat.msg.copy"))
 
                 Button {
                     if message.role == .user {
@@ -298,7 +291,6 @@ struct ChatView: View {
                 }
                 .buttonStyle(.borderless)
                 .disabled(chatService.isBusy)
-                .hoverDescription(L(message.role == .user ? "chat.msg.rerun" : "chat.msg.regenerate"))
             }
             .font(.caption)
             .foregroundStyle(.secondary)
