@@ -47,6 +47,15 @@ final class ChatService: ObservableObject {
 
     private var task: Task<Void, Never>?
 
+    /// Buffer dei token in streaming: invece di riscrivere l'array @Published (e ridisegnare la
+    /// chat) a OGNI token, i token si accumulano qui e vengono scritti nel messaggio in modo
+    /// coalizzato ogni ~40 ms. Riduce drasticamente le ricomposizioni sul main thread durante
+    /// risposte lunghe/veloci.
+    private var pendingToken = ""
+    private var pendingStreamID: UUID?
+    private var flushScheduled = false
+    private static let streamFlushInterval: UInt64 = 40_000_000 // 40 ms
+
     var isConfigured: Bool { ChatEngine.active() != nil }
     var canRerun: Bool { lastQuestion != nil && !isBusy }
     var hasConversation: Bool { !messages.isEmpty }
@@ -62,6 +71,7 @@ final class ChatService: ObservableObject {
     func reset() {
         task?.cancel()
         task = nil
+        clearStreamBuffer()
         messages = []
         errorMessage = nil
         isBusy = false
@@ -72,7 +82,14 @@ final class ChatService: ObservableObject {
     func cancel() {
         task?.cancel()
         task = nil
+        if let id = pendingStreamID { flushStream(id: id) }
         isBusy = false
+    }
+
+    private func clearStreamBuffer() {
+        pendingToken = ""
+        pendingStreamID = nil
+        flushScheduled = false
     }
 
     /// Ripete l'ultima domanda posta (utile dopo un cambio di modello o una reindicizzazione).
@@ -205,9 +222,11 @@ final class ChatService: ObservableObject {
                         if Task.isCancelled { break }
                         self.append(token, id: assistantID)
                     }
+                    self.flushStream(id: assistantID)
                     self.isBusy = false
                     self.task = nil
                 } catch {
+                    self.flushStream(id: assistantID)
                     if self.text(for: assistantID).isEmpty {
                         self.fail(L("chat.streamFail"), id: assistantID)
                     } else {
@@ -321,9 +340,40 @@ final class ChatService: ObservableObject {
 
     // MARK: - Mutazioni del messaggio in streaming
 
+    /// Accumula il token nel buffer e programma una scrittura coalizzata (non scrive subito
+    /// l'array @Published: evita una ricomposizione della chat per ogni token).
     private func append(_ token: String, id: UUID) {
-        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
-        messages[index].text += token
+        pendingToken += token
+        pendingStreamID = id
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: ChatService.streamFlushInterval)
+            self?.flushPendingToken()
+        }
+    }
+
+    /// Scrittura periodica del buffer (chiamata dal timer di coalescing).
+    private func flushPendingToken() {
+        flushScheduled = false
+        guard let id = pendingStreamID else { return }
+        applyPendingToken(id: id)
+    }
+
+    /// Svuotamento immediato e sincrono del buffer (fine stream, errore, cancellazione).
+    private func flushStream(id: UUID) {
+        flushScheduled = false
+        applyPendingToken(id: id)
+    }
+
+    private func applyPendingToken(id: UUID) {
+        guard !pendingToken.isEmpty else { return }
+        guard let index = messages.firstIndex(where: { $0.id == id }) else {
+            pendingToken = ""
+            return
+        }
+        messages[index].text += pendingToken
+        pendingToken = ""
     }
 
     private func setSources(_ sources: [Source], id: UUID) {

@@ -13,7 +13,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP_NAME="FolderBase"
-VERSION="1.5.9"
+VERSION="1.5.10"
 NOTARY_PROFILE="${NOTARY_PROFILE:-folderbase-notary}"
 DMG="dist/${APP_NAME}-${VERSION}.dmg"
 

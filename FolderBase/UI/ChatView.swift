@@ -46,7 +46,13 @@ struct ChatView: View {
                 }
                 .onChange(of: chatService.messages.last?.text) {
                     if let lastID = chatService.messages.last?.id {
-                        withAnimation { proxy.scrollTo(lastID, anchor: .bottom) }
+                        // Durante lo streaming lo scroll NON è animato (animare a ogni flush di
+                        // token è costoso e produce scatti); si anima solo a risposta conclusa.
+                        if chatService.isBusy {
+                            proxy.scrollTo(lastID, anchor: .bottom)
+                        } else {
+                            withAnimation { proxy.scrollTo(lastID, anchor: .bottom) }
+                        }
                     }
                 }
             }

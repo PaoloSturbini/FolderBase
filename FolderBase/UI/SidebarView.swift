@@ -159,7 +159,10 @@ struct SidebarView: View {
     @ObservedObject var metadataStore: MetadataStore
     @ObservedObject var backupService: BackupService
     @ObservedObject var indexingService: IndexingService
-    @ObservedObject var directoryCache: DirectorySnapshotCache
+    /// NON osservato dalla sidebar: gli alberi (`DirectoryTreeView`) lo osservano già
+    /// direttamente e si aggiornano da soli. Osservarlo qui faceva rivalutare l'intera sidebar
+    /// (albero incluso) a ogni evento FSEvents.
+    let directoryCache: DirectorySnapshotCache
     let chatService: ChatService
     /// Item selezionato nella tabella: ne mostriamo la nota nel pannello in fondo alla sidebar.
     let selectedNoteItem: FileItem?
@@ -213,9 +216,6 @@ struct SidebarView: View {
     @AppStorage("notesPanelHeight") private var notesPanelHeight = 160.0
     /// Altezza di partenza catturata all'inizio del trascinamento dell'handle di resize.
     @State private var notesDragBaseline: Double?
-    /// Aggiorna il pannello note solo quando cambia il file selezionato. I caricamenti metadata
-    /// delle altre righe non devono più invalidare tutto l'albero delle cartelle.
-    @State private var selectedMetadataRevision = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -234,28 +234,24 @@ struct SidebarView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             sectionHeader(L("sidebar.structure"))
 
-                            // Mostra contemporaneamente l'albero di ogni cartella gestita
-                            // elencata sopra. Lo ScrollView esterno consente di raggiungere
-                            // tutte le directory anche quando gli alberi espansi superano
-                            // l'altezza disponibile della sidebar.
-                            VStack(alignment: .leading, spacing: 14) {
-                                ForEach(recentFolderURLs, id: \.path) { rootURL in
-                                    DirectoryTreeView(
-                                        rootURL: rootURL,
-                                        selectedFolderURL: selectedFolderURL,
-                                        fontSize: sidebarFontSize,
-                                        onSelect: navigateTo,
-                                        onMoveItems: moveItems,
-                                        onRemoveRoot: removeFolder,
-                                        configurationRootURL: treeRootURL,
-                                        onAction: directoryAction,
-                                        metadataStore: metadataStore,
-                                        chatService: chatService,
-                                        directoryCache: directoryCache
-                                    )
-                                    .id(rootURL.path)
-                                }
-                            }
+                            // Albero isolato in un subview Equatable: gli altri publish della
+                            // sidebar (progresso indicizzazione, backup, metadati) NON ne forzano
+                            // più la ricostruzione. Gli alberi restano reattivi ai propri eventi
+                            // (directoryCache) tramite le loro sottoscrizioni interne.
+                            SidebarTreeSection(
+                                rootURLs: recentFolderURLs,
+                                selectedFolderURL: selectedFolderURL,
+                                fontSize: sidebarFontSize,
+                                treeRootURL: treeRootURL,
+                                onSelect: navigateTo,
+                                onMoveItems: moveItems,
+                                onRemoveRoot: removeFolder,
+                                onAction: directoryAction,
+                                metadataStore: metadataStore,
+                                chatService: chatService,
+                                directoryCache: directoryCache
+                            )
+                            .equatable()
                         }
                     }
                 }
@@ -286,10 +282,6 @@ struct SidebarView: View {
         }
         .font(.system(size: sidebarFontSize))
         .navigationTitle("FolderBase")
-        .onReceive(metadataStore.metadataChanges) { identities in
-            guard let identity = selectedNoteItem?.identity, identities.contains(identity) else { return }
-            selectedMetadataRevision &+= 1
-        }
     }
 
     private func sectionHeader(_ title: String) -> some View {
@@ -2413,4 +2405,53 @@ private enum UpdateUIState {
     case upToDate(String)
     case available(latest: String, releaseURL: URL, downloadURL: URL?)
     case failed(String)
+}
+
+/// Sezione "Struttura" della sidebar (gli alberi delle cartelle gestite), estratta in un subview
+/// `Equatable` per isolarla dai re-render della `SidebarView`. Con `.equatable()` SwiftUI salta la
+/// ricostruzione dell'albero quando gli input di valore (radici, selezione, font) non cambiano,
+/// anche se la sidebar si rivaluta per altri motivi (progresso indicizzazione, backup, metadati).
+/// La reattività ai contenuti delle cartelle resta garantita dai `DirectoryTreeView`, che osservano
+/// `directoryCache` per conto proprio. Le closure e i reference type (store/cache) NON entrano nel
+/// confronto di uguaglianza: sono stabili per l'intera vita della finestra.
+struct SidebarTreeSection: View, Equatable {
+    let rootURLs: [URL]
+    let selectedFolderURL: URL?
+    let fontSize: Double
+    let treeRootURL: URL?
+    let onSelect: (URL) -> Void
+    let onMoveItems: ([String], URL) -> Void
+    let onRemoveRoot: (URL) -> Void
+    let onAction: (URL, DirectoryTreeAction) -> Void
+    let metadataStore: MetadataStore
+    let chatService: ChatService
+    let directoryCache: DirectorySnapshotCache
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(rootURLs, id: \.path) { rootURL in
+                DirectoryTreeView(
+                    rootURL: rootURL,
+                    selectedFolderURL: selectedFolderURL,
+                    fontSize: fontSize,
+                    onSelect: onSelect,
+                    onMoveItems: onMoveItems,
+                    onRemoveRoot: onRemoveRoot,
+                    configurationRootURL: treeRootURL,
+                    onAction: onAction,
+                    metadataStore: metadataStore,
+                    chatService: chatService,
+                    directoryCache: directoryCache
+                )
+                .id(rootURL.path)
+            }
+        }
+    }
+
+    static func == (lhs: SidebarTreeSection, rhs: SidebarTreeSection) -> Bool {
+        lhs.rootURLs == rhs.rootURLs
+            && lhs.selectedFolderURL == rhs.selectedFolderURL
+            && lhs.fontSize == rhs.fontSize
+            && lhs.treeRootURL == rhs.treeRootURL
+    }
 }

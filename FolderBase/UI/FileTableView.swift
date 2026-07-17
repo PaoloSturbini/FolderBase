@@ -897,6 +897,23 @@ struct FileTableView: View {
             searchIndex[identity] = components.joined(separator: "\u{1F}").localizedLowercase
         }
         cachedSearchText = searchIndex
+
+        // Una modifica di VALORE metadata cambia l'insieme di righe visibili o il loro ordine SOLO
+        // se: c'è un filtro per opzione attivo, una ricerca "nome" attiva (che indicizza anche i
+        // valori metadata) oppure l'ordinamento è su una colonna metadata. In tutti gli altri casi
+        // la lista filtrata+ordinata è identica: evitiamo il re-filter+re-sort O(n log n) dell'intera
+        // tabella. Le celle si aggiornano comunque perché `cachedIndex` è @State (già mutato sopra),
+        // quindi la modifica alla cella resta visibile.
+        let standardSortColumns: Set<String> = ["name", "size", "type", "created"]
+        let sortIsMetadata: Bool = {
+            guard let columnID = tableSortOrder.first?.columnID else { return false }
+            return !standardSortColumns.contains(columnID)
+        }()
+        let nameSearchActive = searchScope == .name
+            && !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if optionFilters.isEmpty, !nameSearchActive, !sortIsMetadata {
+            return
+        }
         refreshDisplayCache()
     }
 

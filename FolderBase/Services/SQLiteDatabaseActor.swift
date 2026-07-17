@@ -23,6 +23,20 @@ struct FileRelocationUpdate: Sendable {
     let bookmark: Data?
 }
 
+/// Dati per registrare (UPSERT) una riga nella tabella `files`. Calcolati fuori dal main thread
+/// (resourceValues + bookmark sono I/O su disco) e applicati dall'actor insieme al contenuto, così
+/// l'indicizzazione non tocca più la connessione principale né il main actor per la registrazione.
+struct FileRegistration: Sendable {
+    let identity: String
+    let fileIdentifier: String
+    let volumeIdentifier: String
+    let bookmark: Data?
+    let path: String
+    let name: String
+    let isDirectory: Bool
+    let size: Int64?
+}
+
 /// Riga grezza per la ricerca semantica, prodotta dalla connessione di background. Contiene già il
 /// vettore decodificato: il costoso passaggio BLOB→[Float] avviene fuori dal main thread.
 struct SemanticRow: Sendable {
@@ -396,8 +410,12 @@ actor SQLiteDatabaseActor {
         }
     }
 
-    func storeContent(identity: String, name: String, path: String = "", text body: String?, ocrUsed: Bool, hash: String, state: String, chunks: [ChunkVector]?) throws {
+    func storeContent(identity: String, name: String, path: String = "", text body: String?, ocrUsed: Bool, hash: String, state: String, chunks: [ChunkVector]?, registration: FileRegistration? = nil) throws {
         try transaction {
+            // Registrazione della riga `files` PRIMA del contenuto, nella stessa transazione: la
+            // foreign key di file_content è sempre soddisfatta e non serve una scrittura separata
+            // sulla connessione principale (main thread).
+            if let registration { try upsertFileRow(registration) }
             let contentSQL = """
                 INSERT INTO file_content (file_identity, name, path, extracted_text, ocr_used, content_hash, extracted_at, index_state)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -425,6 +443,31 @@ actor SQLiteDatabaseActor {
                 try replaceChunksInsideTransaction(identity: identity, chunks: chunks)
             }
         }
+    }
+
+    /// UPSERT della riga `files` (usato durante l'indicizzazione). Stesso schema di
+    /// `upsertRelocatedFile`, ma per una registrazione ordinaria.
+    private func upsertFileRow(_ reg: FileRegistration) throws {
+        let sql = """
+            INSERT INTO files (identity, file_resource_identifier, volume_identifier, bookmark_data, last_known_path, name, is_directory, size, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(identity) DO UPDATE SET file_resource_identifier=excluded.file_resource_identifier,
+            volume_identifier=excluded.volume_identifier, bookmark_data=excluded.bookmark_data,
+            last_known_path=excluded.last_known_path, name=excluded.name, is_directory=excluded.is_directory,
+            size=excluded.size, updated_at=excluded.updated_at
+            """
+        let statement = try cachedStatement(sql)
+        defer { sqlite3_reset(statement); sqlite3_clear_bindings(statement) }
+        bindText(statement, 1, reg.identity)
+        bindText(statement, 2, reg.fileIdentifier)
+        bindText(statement, 3, reg.volumeIdentifier)
+        bindBlob(reg.bookmark, statement: statement, index: 4)
+        bindText(statement, 5, reg.path)
+        bindText(statement, 6, reg.name)
+        sqlite3_bind_int(statement, 7, reg.isDirectory ? 1 : 0)
+        if let size = reg.size { sqlite3_bind_int64(statement, 8, size) } else { sqlite3_bind_null(statement, 8) }
+        sqlite3_bind_double(statement, 9, Date().timeIntervalSince1970)
+        try stepDone(statement)
     }
 
     func replaceChunks(identity: String, chunks: [ChunkVector]) throws {

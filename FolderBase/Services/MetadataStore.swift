@@ -1648,6 +1648,38 @@ final class MetadataStore: ObservableObject {
         )
     }
 
+    /// Costruisce la registrazione della riga `files` per un file da indicizzare, LEGGENDO da disco
+    /// (resourceValues + bookmark). È `nonisolated` così può girare fuori dal main thread durante
+    /// l'indicizzazione. L'`identity` è quella già calcolata per l'item (coerente con la foreign key
+    /// di file_content). Se resourceValues fallisce, produce comunque una registrazione minima con
+    /// path/nome, così il contenuto non resta orfano.
+    nonisolated static func fileRegistration(url: URL, identity: String) -> FileRegistration {
+        guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileResourceIdentifierKey, .volumeIdentifierKey, .fileSizeKey]) else {
+            return FileRegistration(identity: identity, fileIdentifier: "", volumeIdentifier: "", bookmark: nil, path: url.path, name: url.lastPathComponent, isDirectory: false, size: nil)
+        }
+        let bookmark = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+        return FileRegistration(
+            identity: identity,
+            fileIdentifier: stableDescription(values.fileResourceIdentifier),
+            volumeIdentifier: stableDescription(values.volumeIdentifier),
+            bookmark: bookmark,
+            path: url.path,
+            name: url.lastPathComponent,
+            isDirectory: values.isDirectory ?? false,
+            size: values.fileSize.map(Int64.init)
+        )
+    }
+
+    /// Aggiorna lo stato in memoria dopo una registrazione file avvenuta sull'actor (senza passare
+    /// da `registerFile` sul main): cache identità e insieme dei file registrati.
+    private func noteRegistered(identity: String, path: String) {
+        identityCacheByPath[path] = identity
+        if !registeredIdentities.contains(identity) {
+            registeredIdentities.insert(identity)
+            invalidateManagedDirectoriesCache()
+        }
+    }
+
     // MARK: - Indicizzazione contenuti (Fase 0: estrazione + full-text search)
 
     /// Hash di change-detection dei soli file già **indicizzati** con successo (nil altrimenti).
@@ -1977,9 +2009,14 @@ final class MetadataStore: ObservableObject {
     /// file nella tabella `files` (necessario per la foreign key) senza toccare il percorso
     /// caldo di navigazione.
     func storeExtractedText(for item: FileItem, text: String, ocrUsed: Bool, hash: String) async {
-        _ = try? registerFile(at: item.url)
         if let contentDatabaseActor {
-            try? await contentDatabaseActor.storeContent(identity: item.identity, name: item.name, path: item.url.path, text: text, ocrUsed: ocrUsed, hash: hash, state: "indexed", chunks: nil)
+            let url = item.url
+            let identity = item.identity
+            let registration = await Task.detached(priority: .utility) {
+                MetadataStore.fileRegistration(url: url, identity: identity)
+            }.value
+            try? await contentDatabaseActor.storeContent(identity: item.identity, name: item.name, path: item.url.path, text: text, ocrUsed: ocrUsed, hash: hash, state: "indexed", chunks: nil, registration: registration)
+            noteRegistered(identity: item.identity, path: item.url.path)
             return
         }
         do {
@@ -2024,9 +2061,14 @@ final class MetadataStore: ObservableObject {
         hash: String,
         chunks: [(ordinal: Int, text: String, providerID: String, vector: [Float])]
     ) async {
-        _ = try? registerFile(at: item.url)
         if let contentDatabaseActor {
-            try? await contentDatabaseActor.storeContent(identity: item.identity, name: item.name, path: item.url.path, text: text, ocrUsed: ocrUsed, hash: hash, state: "indexed", chunks: chunks)
+            let url = item.url
+            let identity = item.identity
+            let registration = await Task.detached(priority: .utility) {
+                MetadataStore.fileRegistration(url: url, identity: identity)
+            }.value
+            try? await contentDatabaseActor.storeContent(identity: item.identity, name: item.name, path: item.url.path, text: text, ocrUsed: ocrUsed, hash: hash, state: "indexed", chunks: chunks, registration: registration)
+            noteRegistered(identity: item.identity, path: item.url.path)
             return
         }
         do {
@@ -2068,9 +2110,14 @@ final class MetadataStore: ObservableObject {
     /// Marca un file come non supportato (nessun testo estraibile) salvando comunque l'hash,
     /// così l'indicizzazione non lo riprova finché il file non cambia.
     func markContentUnsupported(for item: FileItem, hash: String) async {
-        _ = try? registerFile(at: item.url)
         if let contentDatabaseActor {
-            try? await contentDatabaseActor.storeContent(identity: item.identity, name: item.name, path: item.url.path, text: nil, ocrUsed: false, hash: hash, state: "unsupported", chunks: nil)
+            let url = item.url
+            let identity = item.identity
+            let registration = await Task.detached(priority: .utility) {
+                MetadataStore.fileRegistration(url: url, identity: identity)
+            }.value
+            try? await contentDatabaseActor.storeContent(identity: item.identity, name: item.name, path: item.url.path, text: nil, ocrUsed: false, hash: hash, state: "unsupported", chunks: nil, registration: registration)
+            noteRegistered(identity: item.identity, path: item.url.path)
             return
         }
         _ = try? registerFile(at: item.url)
