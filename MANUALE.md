@@ -88,6 +88,8 @@ La tabella si **aggiorna da sola** quando aggiungi, rimuovi o rinomini file nell
 
 L'aggiornamento visibile è immediato e non attende la riconciliazione del database. Nelle cartelle molto grandi FolderBase mostra prima nomi e cartelle, quindi completa in background dimensione, data e tipo dei file mantenendo stabile selezione e metadata.
 
+Anche la preparazione della tabella avviene in background: costruzione degli indici metadata, filtri e ordinamenti sono cancellabili e i risultati appartenenti a una cartella o ricerca ormai superata vengono ignorati. La raccolta ricorsiva dei documenti per la chat di una cartella non blocca più la navigazione e la chat viene aperta solo quando il suo ambito è pronto.
+
 ### 4.3 Colonne standard
 
 Ogni tabella mostra di base: **Name**, **Type**, **Created**, **Size**. Le cartelle non hanno dimensione (`—`).

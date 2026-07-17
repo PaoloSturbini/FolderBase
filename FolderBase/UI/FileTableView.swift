@@ -68,6 +68,7 @@ struct FileTableView: View {
     /// Token anti-race: scarta i risultati di una ricerca superata da una più recente.
     @State private var searchToken = UUID()
     @State private var searchTask: Task<Void, Never>?
+    @State private var chatPreparationTask: Task<Void, Never>?
     /// "Trova simili a questo": ranking di similarità (identità→posizione) rispetto a un file, e
     /// nome del file di riferimento (per il chip). Quando attivo prevale su ricerca testo/scope.
     @State private var similarRank: [String: Int]?
@@ -94,6 +95,8 @@ struct FileTableView: View {
     @State private var cachedSearchText: [String: String] = [:]
     @State private var cachedVisibleItems: [FileItem] = []
     @State private var indexRebuildTask: Task<Void, Never>?
+    @State private var displayRefreshTask: Task<Void, Never>?
+    @State private var tablePipelineToken = UUID()
     /// Indici della base corrente usati dagli aggiornamenti metadata incrementali. Vengono
     /// ricostruiti insieme a `cachedIndex`, evitando una scansione di `searchSource` per ogni
     /// notifica (e una seconda scansione per ogni identita modificata).
@@ -379,9 +382,19 @@ struct FileTableView: View {
         chatRequest = ChatRequest(focusedFile: focusedFile)
     }
 
-    /// Identità dei file indicizzabili sotto una cartella (ricorsivo), da usare come ambito chat.
-    private func folderChatCandidates(_ folder: FileItem) -> Set<String> {
-        Set(IndexingService.fileItems(under: folder.url, limit: 20000).map { $0.identity })
+    /// Prepara l'ambito ricorsivo fuori dal main actor. La task viene cancellata se parte una
+    /// nuova ricerca o una nuova preparazione, quindi un risultato superato non apre la chat.
+    private func startFolderChat(_ folder: FileItem) {
+        let url = folder.url
+        let label = "\(L("chat.scope.folder")): \(folder.name)"
+        chatPreparationTask?.cancel()
+        chatPreparationTask = Task {
+            let candidates = await Task.detached(priority: .userInitiated) {
+                Set(IndexingService.fileItems(under: url, limit: 20_000).map(\.identity))
+            }.value
+            guard !Task.isCancelled else { return }
+            startChat(candidates: candidates, scopeLabel: label)
+        }
     }
 
     /// "Trova simili a questo": ordina la cartella corrente per similarità semantica al file dato
@@ -783,37 +796,33 @@ struct FileTableView: View {
     /// valori metadata) — NON a ogni tasto di ricerca o cambio ordinamento, che riusano l'indice.
     private func rebuildMetadataIndex() {
         let source = searchSource
-        var itemsByID: [String: FileItem] = [:]
-        itemsByID.reserveCapacity(source.count)
-        for item in source { itemsByID[item.id] = item }
-
-        var index: [String: [String: String]] = [:]
-        for field in metadataFields {
-            var perItem: [String: String] = [:]
-            for item in source {
-                let value = metadataStore.value(for: item, field: field)
-                if !value.isEmpty { perItem[item.id] = value }
+        let fields = metadataFields
+        let metadata = metadataStore.metadataByFileIdentity
+        indexRebuildTask?.cancel()
+        displayRefreshTask?.cancel()
+        let token = UUID()
+        tablePipelineToken = token
+        indexRebuildTask = Task.detached(priority: .userInitiated) {
+            guard let built = TableDataPipeline.buildIndex(
+                source: source, fields: fields, metadata: metadata
+            ) else { return }
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard tablePipelineToken == token else { return }
+                cachedIndex = built.index
+                cachedSearchText = built.searchText
+                cachedItemsByID = built.itemsByID
+                cachedSourceIDs = Set(built.itemsByID.keys)
+                refreshDisplayCache()
             }
-            index[field.id] = perItem
         }
-        var searchIndex: [String: String] = [:]
-        for item in source {
-            var components = [item.name]
-            for perItem in index.values {
-                if let value = perItem[item.id], !value.isEmpty { components.append(value) }
-            }
-            searchIndex[item.id] = components.joined(separator: "\u{1F}").localizedLowercase
-        }
-        cachedIndex = index
-        cachedSearchText = searchIndex
-        cachedItemsByID = itemsByID
-        cachedSourceIDs = Set(itemsByID.keys)
-        refreshDisplayCache()
     }
 
     /// Aggiorna le cache della tabella quando il filesystem cambia poche righe. Riduce il
     /// lavoro da O(campi × tutti i file) a O(campi × righe cambiate).
     private func updateItemsIndex(from oldItems: [FileItem], to newItems: [FileItem]) {
+        indexRebuildTask?.cancel()
+        tablePipelineToken = UUID()
         guard !searchAllSubfolders else {
             rebuildMetadataIndex()
             return
@@ -874,6 +883,10 @@ struct FileTableView: View {
     /// Aggiorna solo le righe metadata realmente cambiate. Durante modifiche bulk o digitazione
     /// evita di rifare O(campi × file) quando è cambiato un solo file.
     private func updateMetadataIndex(changedIDs requestedIDs: Set<String>) {
+        // Un indice completo costruito da uno snapshot precedente non deve sovrascrivere questa
+        // modifica incrementale più recente.
+        indexRebuildTask?.cancel()
+        tablePipelineToken = UUID()
         let changedIDs = requestedIDs.intersection(cachedSourceIDs)
         guard !changedIDs.isEmpty else { return }
 
@@ -922,7 +935,6 @@ struct FileTableView: View {
         let index = cachedIndex
         let rawNeedle = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         let needle = rawNeedle.lowercased()
-        var result: [FileItem]
 
         // Ricerca "Contenuto" (ibrida FTS+semantica): il ranking di rilevanza è calcolato in modo
         // asincrono in `onSearchChanged` e conservato in `relevanceRank`; qui filtra i risultati
@@ -932,43 +944,26 @@ struct FileTableView: View {
 
         // Base: cartella corrente, o tutto il sottoalbero se la ricerca estesa è attiva.
         let source = searchSource
-
-        if optionFilters.isEmpty, needle.isEmpty, similarRank == nil {
-            result = source
-        } else {
-            result = source.filter { item in
-                // Filtri per opzione (AND tra campi, OR tra valori dello stesso campo).
-                for (fieldID, labels) in optionFilters where !labels.isEmpty {
-                    let value = index[fieldID]?[item.id] ?? ""
-                    if !labels.contains(value) { return false }
-                }
-
-                // "Trova simili" prevale su ricerca testo/scope.
-                if let similarRank {
-                    return similarRank[item.id] != nil
-                }
-
-                guard !needle.isEmpty else { return true }
-
-                if let activeRank {
-                    return activeRank[item.id] != nil
-                }
-
-                // Modalità "nome": nome file o valori metadata.
-                return cachedSearchText[item.id]?.contains(needle) == true
+        let searchIndex = cachedSearchText
+        let filters = optionFilters
+        let similar = similarRank
+        let comparator = tableSortOrder.first
+        displayRefreshTask?.cancel()
+        let token = UUID()
+        tablePipelineToken = token
+        displayRefreshTask = Task.detached(priority: .userInitiated) {
+            guard let result = TableDataPipeline.visibleItems(
+                source: source, index: index, searchTextByID: searchIndex,
+                filters: filters, needle: needle, similarRank: similar,
+                relevanceRank: activeRank, comparator: comparator
+            ) else { return }
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard tablePipelineToken == token else { return }
+                cachedVisibleItems = result
+                reportSelectedItem()
             }
         }
-
-        if let similarRank {
-            // Ordina per similarità al file di riferimento (i più simili in alto).
-            result.sort { (similarRank[$0.id] ?? .max) < (similarRank[$1.id] ?? .max) }
-        } else if let activeRank {
-            // Ordina per rilevanza ibrida (i più pertinenti in alto).
-            result.sort { (activeRank[$0.id] ?? .max) < (activeRank[$1.id] ?? .max) }
-        } else if let comparator = tableSortOrder.first {
-            result.sort { comparator.compare($0, $1) == .orderedAscending }
-        }
-        cachedVisibleItems = result
     }
 
     private var selectedItems: [FileItem] {
@@ -1185,8 +1180,7 @@ struct FileTableView: View {
 
                 if single.isFolder {
                     Button {
-                        startChat(candidates: folderChatCandidates(single),
-                                  scopeLabel: "\(L("chat.scope.folder")): \(single.name)")
+                        startFolderChat(single)
                     } label: {
                         Label(L("ctx.chatFolder"), systemImage: "bubble.left.and.bubble.right")
                     }
@@ -1886,6 +1880,98 @@ struct FileTableView: View {
     }
 }
 
+/// Lavoro puro della tabella. Non legge stato SwiftUI/ObservableObject e può quindi essere
+/// eseguito in una Task detached cancellabile senza bloccare selezione, scroll o digitazione.
+enum TableDataPipeline {
+    struct BuiltIndex: Sendable {
+        let index: [String: [String: String]]
+        let searchText: [String: String]
+        let itemsByID: [String: FileItem]
+    }
+
+    static func buildIndex(
+        source: [FileItem],
+        fields: [MetadataField],
+        metadata: [String: FileMetadata]
+    ) -> BuiltIndex? {
+        var itemsByID: [String: FileItem] = [:]
+        itemsByID.reserveCapacity(source.count)
+        for item in source {
+            if Task.isCancelled { return nil }
+            itemsByID[item.id] = item
+        }
+
+        var index: [String: [String: String]] = [:]
+        for field in fields {
+            if Task.isCancelled { return nil }
+            var perItem: [String: String] = [:]
+            for item in source {
+                let value = metadata[item.identity]?.values[field.id] ?? ""
+                if !value.isEmpty { perItem[item.id] = value }
+            }
+            index[field.id] = perItem
+        }
+
+        var searchText: [String: String] = [:]
+        searchText.reserveCapacity(source.count)
+        for item in source {
+            if Task.isCancelled { return nil }
+            var components = [item.name]
+            for perItem in index.values {
+                if let value = perItem[item.id], !value.isEmpty { components.append(value) }
+            }
+            searchText[item.id] = components.joined(separator: "\u{1F}").localizedLowercase
+        }
+        return BuiltIndex(index: index, searchText: searchText, itemsByID: itemsByID)
+    }
+
+    static func visibleItems(
+        source: [FileItem],
+        index: [String: [String: String]],
+        searchTextByID: [String: String],
+        filters: [String: Set<String>],
+        needle: String,
+        similarRank: [String: Int]?,
+        relevanceRank: [String: Int]?,
+        comparator: FileItemSortComparator?
+    ) -> [FileItem]? {
+        var result: [FileItem]
+        if filters.isEmpty, needle.isEmpty, similarRank == nil {
+            result = source
+        } else {
+            result = []
+            result.reserveCapacity(source.count)
+            for item in source {
+                if Task.isCancelled { return nil }
+                var matches = true
+                for (fieldID, labels) in filters where !labels.isEmpty {
+                    if !labels.contains(index[fieldID]?[item.id] ?? "") { matches = false; break }
+                }
+                guard matches else { continue }
+                if let similarRank {
+                    if similarRank[item.id] != nil { result.append(item) }
+                } else if needle.isEmpty {
+                    result.append(item)
+                } else if let relevanceRank {
+                    if relevanceRank[item.id] != nil { result.append(item) }
+                } else if searchTextByID[item.id]?.contains(needle) == true {
+                    result.append(item)
+                }
+            }
+        }
+
+        if Task.isCancelled { return nil }
+        if let similarRank {
+            result.sort { (similarRank[$0.id] ?? .max) < (similarRank[$1.id] ?? .max) }
+        } else if let relevanceRank {
+            result.sort { (relevanceRank[$0.id] ?? .max) < (relevanceRank[$1.id] ?? .max) }
+        } else if let comparator {
+            result.sort { comparator.compare($0, $1) == .orderedAscending }
+        }
+        return Task.isCancelled ? nil : result
+    }
+}
+
 private struct ColumnDescriptor: Identifiable {
     enum Kind {
         case name
@@ -1902,7 +1988,7 @@ private struct ColumnDescriptor: Identifiable {
     let idealWidth: CGFloat
 }
 
-struct FileItemSortComparator: SortComparator, Hashable {
+struct FileItemSortComparator: SortComparator, Hashable, Sendable {
     var columnID: String
     var kind: MetadataFieldKind?
     var metadataValuesByItemID: [String: String] = [:]

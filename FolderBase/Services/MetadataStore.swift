@@ -4,7 +4,7 @@ import Accelerate
 import Combine
 import OSLog
 
-struct FileMetadata: Codable, Equatable {
+struct FileMetadata: Codable, Equatable, Sendable {
     var values: [String: String]
 
     static let empty = FileMetadata(values: [:])

@@ -1,6 +1,6 @@
 import Foundation
 
-enum MetadataFieldKind: String, CaseIterable, Codable, Identifiable {
+enum MetadataFieldKind: String, CaseIterable, Codable, Identifiable, Sendable {
     case text = "Nota libera"
     case number = "Numero"
     case date = "Data"
@@ -35,7 +35,7 @@ enum MetadataFieldKind: String, CaseIterable, Codable, Identifiable {
     }
 }
 
-enum MetadataTagColor: String, CaseIterable, Codable, Identifiable {
+enum MetadataTagColor: String, CaseIterable, Codable, Identifiable, Sendable {
     case gray
     case red
     case orange
@@ -69,7 +69,7 @@ enum MetadataTagColor: String, CaseIterable, Codable, Identifiable {
     }
 }
 
-struct MetadataSelectOption: Identifiable, Codable, Hashable {
+struct MetadataSelectOption: Identifiable, Codable, Hashable, Sendable {
     var id: String
     var label: String
     var color: MetadataTagColor
@@ -81,7 +81,7 @@ struct MetadataSelectOption: Identifiable, Codable, Hashable {
     }
 }
 
-struct MetadataField: Identifiable, Codable, Hashable {
+struct MetadataField: Identifiable, Codable, Hashable, Sendable {
     var id: String
     var name: String
     var kind: MetadataFieldKind

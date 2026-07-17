@@ -23,6 +23,7 @@ struct DirectoryTreeView: View {
     @State private var childrenByPath: [String: [URL]] = [:]
     @State private var loadingPaths: Set<String> = []
     @State private var chatFolder: ChatFolder?
+    @State private var chatPreparationTask: Task<Void, Never>?
 
     fileprivate struct Row: Identifiable, Equatable {
         let url: URL
@@ -67,7 +68,7 @@ struct DirectoryTreeView: View {
                     onRemoveRoot: row.depth == 0 ? { onRemoveRoot(row.url) } : nil,
                     onAction: { action in onAction(row.url, action) },
                     onOpenWindow: openInNewWindow,
-                    onChat: { chatFolder = ChatFolder(url: row.url) }
+                    onChat: { prepareChat(for: row.url) }
                 )
                 .equatable()
             }
@@ -79,11 +80,6 @@ struct DirectoryTreeView: View {
             ChatView(chatService: chatService, store: metadataStore, focusedFile: nil) {
                 chatFolder = nil
             }
-            .onAppear {
-                let folder = request.url
-                let candidates = Set(IndexingService.fileItems(under: folder, limit: 20_000).map(\.identity))
-                chatService.configure(candidates: candidates, scopeLabel: "\(L("chat.scope.folder")): \(folder.lastPathComponent)")
-            }
         }
     }
 
@@ -92,6 +88,19 @@ struct DirectoryTreeView: View {
             folderPath: url.path,
             configurationRootPath: (configurationRootURL ?? rootURL).path
         ))
+    }
+
+    private func prepareChat(for folder: URL) {
+        chatPreparationTask?.cancel()
+        let label = "\(L("chat.scope.folder")): \(folder.lastPathComponent)"
+        chatPreparationTask = Task {
+            let candidates = await Task.detached(priority: .userInitiated) {
+                Set(IndexingService.fileItems(under: folder, limit: 20_000).map(\.identity))
+            }.value
+            guard !Task.isCancelled else { return }
+            chatService.configure(candidates: candidates, scopeLabel: label)
+            chatFolder = ChatFolder(url: folder)
+        }
     }
 
     private func toggle(_ url: URL) {

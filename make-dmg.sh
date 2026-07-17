@@ -12,7 +12,7 @@ CONFIG="release"
 BUILD_PATH="/tmp/folderbase-run"
 ICON_PNG="AppIcon.png"
 BUNDLE_ID="com.paolosturbini.folderbase"
-VERSION="1.5.11"
+VERSION="1.5.12"
 DIST_DIR="dist"
 SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: PAOLO ANTONIO STURBIN (F9SXX7XX48)}"
 
@@ -43,7 +43,7 @@ cat > "${APP}/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key>         <string>${APP_NAME}</string>
     <key>CFBundlePackageType</key>        <string>APPL</string>
     <key>CFBundleShortVersionString</key> <string>${VERSION}</string>
-    <key>CFBundleVersion</key>            <string>18</string>
+    <key>CFBundleVersion</key>            <string>19</string>
     <key>CFBundleIconFile</key>           <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>     <string>14.4</string>
     <key>NSHighResolutionCapable</key>    <true/>
