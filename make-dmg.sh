@@ -129,9 +129,10 @@ codesign --verify --strict --verbose=2 "${SIGNABLE_DMG}"
 # Su macOS recenti una cartella Documents con attributo com.apple.provenance può rifiutare
 # il rename cross-directory di un contenitore appena firmato. La copia conserva firma e bytes.
 xattr -d com.apple.provenance "${DIST_DIR}" 2>/dev/null || true
-# `cp -X` NON copia gli attributi estesi (es. com.apple.provenance): copiarli nella cartella
-# Documents protetta causava "Operation not permitted". Firma e bytes del DMG restano intatti.
-cp -X "${SIGNABLE_DMG}" "${DMG}"
+# `cat` copia solo i BYTES (mai gli attributi estesi): con `cp`/`cp -X` la copia in ~/Documents
+# fallisce ancora con "Operation not permitted" per l'xattr restricted com.apple.provenance.
+# La firma del DMG è nei bytes, quindi resta valida (verificato con codesign --verify).
+cat "${SIGNABLE_DMG}" > "${DMG}"
 rm -f "${SIGNABLE_DMG}"
 rmdir "${DMG_WORK}"
 echo "OK: creato ${DMG}"
