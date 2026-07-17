@@ -158,13 +158,37 @@ final class SQLiteDatabaseActorTests: XCTestCase {
         }
     }
 
+    func testRelocationPreservesFileMetadataAndFolderFieldsWhenIdentityChanges() async throws {
+        try withDatabase(at: databaseURL) { db in
+            try execute(db, "INSERT INTO files(identity, last_known_path, name, is_directory) VALUES ('old-id', '/old/Folder', 'Folder', 1)")
+            try execute(db, "INSERT INTO metadata_fields(id, folder_identity, name, kind, options_json, position) VALUES ('field-1', 'old-id', 'Stato', 'text', '[]', 0)")
+            try execute(db, "INSERT INTO metadata_values(file_identity, field_id, value) VALUES ('old-id', 'field-1', 'conservato')")
+        }
+
+        let actor = try SQLiteDatabaseActor(url: databaseURL)
+        try await actor.applyReconciliation(tracking: [], relocations: [
+            FileRelocationUpdate(
+                previousIdentity: "old-id", newIdentity: "new-id",
+                fileIdentifier: "file", volumeIdentifier: "volume",
+                path: "/new/Folder", name: "Folder", isDirectory: true,
+                size: nil, bookmark: nil
+            )
+        ])
+
+        try withDatabase(at: databaseURL) { db in
+            XCTAssertEqual(try scalarText(db, "SELECT value FROM metadata_values WHERE file_identity='new-id' AND field_id='field-1'"), "conservato")
+            XCTAssertEqual(try scalarText(db, "SELECT folder_identity FROM metadata_fields WHERE id='field-1'"), "new-id")
+            XCTAssertEqual(try scalarInt(db, "SELECT count(*) FROM files WHERE identity='old-id'"), 0)
+        }
+    }
+
     private func createSchema(at url: URL) throws {
         try withDatabase(at: url) { db in
-            try execute(db, "CREATE TABLE files (identity TEXT PRIMARY KEY, last_known_path TEXT, name TEXT, size INTEGER, bookmark_data BLOB, updated_at REAL)")
-            try execute(db, "CREATE TABLE metadata_fields (id TEXT PRIMARY KEY)")
+            try execute(db, "CREATE TABLE files (identity TEXT PRIMARY KEY, file_resource_identifier TEXT, volume_identifier TEXT, last_known_path TEXT, name TEXT, is_directory INTEGER, size INTEGER, bookmark_data BLOB, updated_at REAL)")
+            try execute(db, "CREATE TABLE metadata_fields (id TEXT PRIMARY KEY, folder_identity TEXT, name TEXT, kind TEXT, options_json TEXT, position INTEGER)")
             try execute(db, "CREATE TABLE metadata_values (file_identity TEXT NOT NULL, field_id TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(file_identity, field_id))")
             try execute(db, "CREATE TRIGGER reject_invalid_metadata BEFORE INSERT ON metadata_values WHEN NEW.value = '__INVALID__' BEGIN SELECT RAISE(ABORT, 'invalid test value'); END")
-            try execute(db, "CREATE TABLE file_content (file_identity TEXT PRIMARY KEY, extracted_text TEXT, ocr_used INTEGER NOT NULL, content_hash TEXT, extracted_at REAL, index_state TEXT NOT NULL)")
+            try execute(db, "CREATE TABLE file_content (file_identity TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT '', extracted_text TEXT, ocr_used INTEGER NOT NULL, content_hash TEXT, extracted_at REAL, index_state TEXT NOT NULL)")
             try execute(db, "CREATE VIRTUAL TABLE content_fts USING fts5(file_identity UNINDEXED, name, body)")
             try execute(db, "CREATE TABLE content_chunks (id INTEGER PRIMARY KEY AUTOINCREMENT, file_identity TEXT NOT NULL, ordinal INTEGER NOT NULL, text TEXT NOT NULL)")
             try execute(db, "CREATE TABLE chunk_vectors (chunk_id INTEGER PRIMARY KEY, provider_id TEXT NOT NULL CHECK(length(provider_id) > 0), dimension INTEGER NOT NULL, vector BLOB NOT NULL, norm REAL NOT NULL)")

@@ -21,7 +21,9 @@ private struct LegacyMetadataDocument: Codable {
 @MainActor
 final class MetadataStore: ObservableObject {
     private static let performanceLog = Logger(subsystem: "com.paolosturbini.folderbase", category: "Performance")
-    @Published private(set) var fieldsByFolder: [String: [MetadataField]] = [:]
+    @Published private(set) var fieldsByFolder: [String: [MetadataField]] = [:] {
+        didSet { effectiveFieldsCache.removeAll(keepingCapacity: true) }
+    }
 
     /// Non-@Published: la notifica a SwiftUI è gestita manualmente (vedi
     /// `notifyMetadataChanged`) così le modifiche "per tasto" vengono coalizzate invece
@@ -33,9 +35,11 @@ final class MetadataStore: ObservableObject {
     let metadataStructureChanges = PassthroughSubject<Void, Never>()
 
     private let dbURL: URL
+    private let indexDBURL: URL
     private let legacyMetadataURL: URL
     private var db: OpaquePointer?
     private var databaseActor: SQLiteDatabaseActor?
+    private var indexDatabaseActor: SQLiteDatabaseActor?
 
     /// Cache di prepared statement riusabili (chiave = SQL) per i percorsi caldi a SQL fisso
     /// come `persistValue`, invocato ad ogni flush di digitazione. Evita la ricompilazione del
@@ -66,22 +70,28 @@ final class MetadataStore: ObservableObject {
     /// Identità richieste dalla vista corrente. I valori metadata vengono caricati solo per
     /// questo working set, invece di materializzare l'intero archivio a ogni refresh.
     private var activeMetadataIdentities: Set<String> = []
+    /// Lo schema ereditato cambia solo con una mutazione strutturale, non durante la navigazione.
+    /// Evita di ricostruire antenati, collisioni e opzioni a ogni body pass della Table/sidebar.
+    private var effectiveFieldsCache: [String: [MetadataField]] = [:]
 
-    init(fileManager: FileManager = .default) {
-        let supportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    init(fileManager: FileManager = .default, supportURLOverride: URL? = nil) {
+        let supportURL = supportURLOverride ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("FolderBase", isDirectory: true)
 
         self.dbURL = supportURL.appendingPathComponent("folderbase.sqlite")
+        self.indexDBURL = supportURL.appendingPathComponent("folderbase-index.sqlite")
         self.legacyMetadataURL = supportURL.appendingPathComponent("metadata.json")
 
         do {
             try fileManager.createDirectory(at: supportURL, withIntermediateDirectories: true)
+            try Self.prepareContentDatabase(at: indexDBURL)
             try openDatabase()
             try migrateSchema()
             try migrateLegacyJSONIfNeeded()
             registeredIdentities = (try? loadRegisteredIdentities()) ?? []
             refreshPublishedState()
             databaseActor = try SQLiteDatabaseActor(url: dbURL)
+            configureSeparatedIndex()
         } catch {
             assertionFailure("Failed to initialize metadata store: \(error)")
             fieldsByFolder = [:]
@@ -95,6 +105,82 @@ final class MetadataStore: ObservableObject {
         for statement in statementCache.values { sqlite3_finalize(statement) }
         sqlite3_close(db)
     }
+
+    /// Prepara il DB AI separato. Se esiste un indice legacy, la copia avviene in background e
+    /// nel frattempo le ricerche continuano a usare il DB storico; al termine il routing passa
+    /// atomicamente al nuovo actor.
+    private func configureSeparatedIndex() {
+        let source = dbURL
+        let destination = indexDBURL
+        let needsMigration = Self.contentRowCount(at: destination) == 0 && Self.contentRowCount(at: source) > 0
+        if !needsMigration {
+            try? Self.prepareContentDatabase(at: destination)
+            indexDatabaseActor = try? SQLiteDatabaseActor(url: destination)
+            return
+        }
+        Task { [weak self] in
+            let migrated = await Task.detached(priority: .utility) {
+                (try? Self.migrateContentDatabase(from: source, to: destination)) != nil
+            }.value
+            guard migrated, let self else { return }
+            self.indexDatabaseActor = try? SQLiteDatabaseActor(url: destination)
+        }
+    }
+
+    private nonisolated static func contentRowCount(at url: URL) -> Int {
+        guard FileManager.default.fileExists(atPath: url.path) else { return 0 }
+        var connection: OpaquePointer?
+        guard sqlite3_open_v2(url.path, &connection, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { sqlite3_close(connection); return 0 }
+        defer { sqlite3_close(connection) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(connection, "SELECT count(*) FROM file_content", -1, &statement, nil) == SQLITE_OK,
+              sqlite3_step(statement) == SQLITE_ROW else { sqlite3_finalize(statement); return 0 }
+        defer { sqlite3_finalize(statement) }
+        return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    private nonisolated static func prepareContentDatabase(at url: URL) throws {
+        var connection: OpaquePointer?
+        guard sqlite3_open(url.path, &connection) == SQLITE_OK, let connection else { throw StoreError.sqlite(message: "Index DB open failed") }
+        defer { sqlite3_close(connection) }
+        let sql = """
+        PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
+        CREATE TABLE IF NOT EXISTS file_content (file_identity TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT '', extracted_text TEXT, ocr_used INTEGER NOT NULL DEFAULT 0, content_hash TEXT, extracted_at REAL, index_state TEXT NOT NULL DEFAULT 'pending');
+        CREATE VIRTUAL TABLE IF NOT EXISTS content_fts USING fts5(file_identity UNINDEXED, name, body, tokenize='unicode61 remove_diacritics 2');
+        CREATE TABLE IF NOT EXISTS content_chunks (id INTEGER PRIMARY KEY AUTOINCREMENT, file_identity TEXT NOT NULL, ordinal INTEGER NOT NULL, text TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_chunks_file ON content_chunks(file_identity);
+        CREATE TABLE IF NOT EXISTS chunk_vectors (chunk_id INTEGER PRIMARY KEY, provider_id TEXT NOT NULL, dimension INTEGER NOT NULL, vector BLOB NOT NULL, norm REAL NOT NULL DEFAULT 0);
+        CREATE INDEX IF NOT EXISTS idx_chunk_vectors_provider ON chunk_vectors(provider_id);
+        CREATE INDEX IF NOT EXISTS idx_chunk_vectors_provider_dim ON chunk_vectors(provider_id,dimension);
+        """
+        guard sqlite3_exec(connection, sql, nil, nil, nil) == SQLITE_OK else { throw StoreError.sqlite(message: String(cString: sqlite3_errmsg(connection))) }
+    }
+
+    private nonisolated static func migrateContentDatabase(from source: URL, to destination: URL) throws {
+        try prepareContentDatabase(at: destination)
+        var connection: OpaquePointer?
+        guard sqlite3_open(source.path, &connection) == SQLITE_OK, let connection else { throw StoreError.sqlite(message: "Legacy index open failed") }
+        defer { sqlite3_close(connection) }
+        var attach: OpaquePointer?
+        guard sqlite3_prepare_v2(connection, "ATTACH DATABASE ? AS separated_index", -1, &attach, nil) == SQLITE_OK else { throw StoreError.sqlite(message: "Index attach failed") }
+        sqlite3_bind_text(attach, 1, destination.path, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(attach) == SQLITE_DONE else { sqlite3_finalize(attach); throw StoreError.sqlite(message: "Index attach failed") }
+        sqlite3_finalize(attach)
+        let sql = """
+        BEGIN;
+        INSERT OR REPLACE INTO separated_index.file_content(file_identity,name,path,extracted_text,ocr_used,content_hash,extracted_at,index_state)
+        SELECT c.file_identity,COALESCE(f.name,''),COALESCE(f.last_known_path,''),c.extracted_text,c.ocr_used,c.content_hash,c.extracted_at,c.index_state FROM file_content c LEFT JOIN files f ON f.identity=c.file_identity;
+        DELETE FROM separated_index.content_fts;
+        INSERT INTO separated_index.content_fts(file_identity,name,body) SELECT file_identity,name,body FROM content_fts;
+        INSERT OR REPLACE INTO separated_index.content_chunks(id,file_identity,ordinal,text) SELECT id,file_identity,ordinal,text FROM content_chunks;
+        INSERT OR REPLACE INTO separated_index.chunk_vectors(chunk_id,provider_id,dimension,vector,norm) SELECT chunk_id,provider_id,dimension,vector,norm FROM chunk_vectors;
+        COMMIT;
+        DETACH DATABASE separated_index;
+        """
+        guard sqlite3_exec(connection, sql, nil, nil, nil) == SQLITE_OK else { throw StoreError.sqlite(message: String(cString: sqlite3_errmsg(connection))) }
+    }
+
+    private var contentDatabaseActor: SQLiteDatabaseActor? { indexDatabaseActor ?? databaseActor }
 
     /// Calcola l'identità stabile di un file SENZA toccare il database.
     /// Usata nei percorsi di sola lettura (es. `fields(for:)`), con cache per path.
@@ -174,12 +260,37 @@ final class MetadataStore: ObservableObject {
     /// caricamento da `FileBrowserService`, quindi qui basta risolvere l'identità dalla cache.
     func fields(for folderURL: URL?, configurationRootURL: URL? = nil) -> [MetadataField] {
         guard let folderURL else { return [] }
+        let rootPath = configurationRootURL?.standardizedFileURL.path ?? folderURL.standardizedFileURL.path
+        let cacheKey = rootPath + "\u{1F}" + folderURL.standardizedFileURL.path
+        if let cached = effectiveFieldsCache[cacheKey] { return cached }
         var groups: [[MetadataField]] = []
         for url in Self.ancestorURLs(from: configurationRootURL, through: folderURL) {
             guard let folderIdentity = identity(for: url) else { continue }
             groups.append(fieldsByFolder[folderIdentity] ?? [])
         }
-        return Self.mergeInheritedFields(groups)
+        let result = Self.mergeInheritedFields(groups)
+        effectiveFieldsCache[cacheKey] = result
+        return result
+    }
+
+    /// Verifica lo schema effettivamente visibile nella cartella, non soltanto l'esistenza di
+    /// campi sulla radice. Serve all'apertura di ogni sottocartella perché confini locali o una
+    /// radice appena aggiunta possono interrompere l'ereditarietà del template globale.
+    func isTemplateApplied(
+        _ template: MetadataTemplate,
+        to folderURL: URL,
+        configurationRootURL: URL?
+    ) -> Bool {
+        let effectiveFields = fields(for: folderURL, configurationRootURL: configurationRootURL)
+        return template.fields.allSatisfy { expected in
+            guard let actual = effectiveFields.first(where: {
+                Self.normalizedFieldName($0.name) == Self.normalizedFieldName(expected.name)
+                    && $0.kind == expected.kind
+            }) else { return false }
+            guard expected.kind.usesOptions else { return true }
+            let actualLabels = Set(actual.options.map { Self.normalizedFieldName($0.label) })
+            return expected.options.allSatisfy { actualLabels.contains(Self.normalizedFieldName($0.label)) }
+        }
     }
 
     static func mergeInheritedFields(_ groups: [[MetadataField]]) -> [MetadataField] {
@@ -289,7 +400,6 @@ final class MetadataStore: ObservableObject {
         if immediate {
             let changed = pendingChangedIdentities
             pendingChangedIdentities.removeAll()
-            objectWillChange.send()
             if !changed.isEmpty { metadataChanges.send(changed) }
             return
         }
@@ -299,7 +409,6 @@ final class MetadataStore: ObservableObject {
             self.pendingChangeNotification = nil
             let changed = self.pendingChangedIdentities
             self.pendingChangedIdentities.removeAll()
-            self.objectWillChange.send()
             if !changed.isEmpty { self.metadataChanges.send(changed) }
         }
         pendingChangeNotification = work
@@ -312,7 +421,6 @@ final class MetadataStore: ObservableObject {
         let changedIdentities = Set(items.map(\.identity))
         // SwiftUI deve sapere che la mutazione sta per avvenire; l'indice della tabella, invece,
         // va aggiornato solo dopo che tutti i nuovi valori sono leggibili in memoria.
-        objectWillChange.send()
         for item in items {
             ensureRegistered(item)
             setInMemoryValue(identity: item.identity, fieldID: field.id, value: value)
@@ -495,6 +603,76 @@ final class MetadataStore: ObservableObject {
         } catch {
             try? execute("ROLLBACK")
             assertionFailure("Failed to apply template: \(error)")
+        }
+    }
+
+    /// Rimappa i valori del file/cartella spostato e di tutte le righe registrate nel suo
+    /// sottoalbero dagli ID delle colonne di origine agli ID equivalenti della destinazione.
+    /// È necessario quando due radici usano lo stesso template ma hanno `metadata_fields.id`
+    /// diversi: senza questa migrazione i valori esistono ancora in SQLite ma le nuove colonne
+    /// non riescono a vederli.
+    func remapMetadataForMove(
+        subtreeAt sourceURL: URL,
+        from sourceFields: [MetadataField],
+        to destinationFields: [MetadataField]
+    ) throws {
+        flushPendingWrites()
+        let pairs: [(MetadataField, MetadataField, [String: String])] = try sourceFields.compactMap { source in
+            guard let destination = destinationFields.first(where: {
+                Self.normalizedFieldName($0.name) == Self.normalizedFieldName(source.name)
+                    && $0.kind == source.kind
+            }), source.id != destination.id,
+            let valueMapping = try compatibleValueMapping(from: source, to: destination) else { return nil }
+            return (source, destination, valueMapping)
+        }
+        guard !pairs.isEmpty else { return }
+
+        let sourcePath = sourceURL.standardizedFileURL.path
+        let descendantPrefix = sourcePath + "/"
+        do {
+            try execute("BEGIN IMMEDIATE TRANSACTION")
+            for (source, destination, valueMapping) in pairs {
+                for (oldValue, newValue) in valueMapping where oldValue != newValue {
+                    try execute(
+                        """
+                        UPDATE metadata_values SET value = ?
+                        WHERE field_id = ? AND value = ? AND file_identity IN (
+                            SELECT identity FROM files WHERE last_known_path = ? OR instr(last_known_path, ?) = 1
+                        )
+                        """,
+                        bindings: [.text(newValue), .text(source.id), .text(oldValue), .text(sourcePath), .text(descendantPrefix)]
+                    )
+                }
+                try execute(
+                    """
+                    INSERT OR IGNORE INTO metadata_values (file_identity, field_id, value)
+                    SELECT mv.file_identity, ?, mv.value
+                    FROM metadata_values mv JOIN files f ON f.identity = mv.file_identity
+                    WHERE mv.field_id = ? AND (f.last_known_path = ? OR instr(f.last_known_path, ?) = 1)
+                    """,
+                    bindings: [.text(destination.id), .text(source.id), .text(sourcePath), .text(descendantPrefix)]
+                )
+                try execute(
+                    """
+                    DELETE FROM metadata_values
+                    WHERE field_id = ? AND file_identity IN (
+                        SELECT identity FROM files WHERE last_known_path = ? OR instr(last_known_path, ?) = 1
+                    )
+                    """,
+                    bindings: [.text(source.id), .text(sourcePath), .text(descendantPrefix)]
+                )
+            }
+            try execute("COMMIT")
+            // Non usare refreshPublishedState(): quello ricarica solo l'active working set e
+            // può svuotare dalla cache proprio gli elementi trascinati da un altro ramo. È la
+            // causa per cui le colonne sembravano ricomparire solo selezionando la radice.
+            let cachedIdentities = Set(metadataByFileIdentity.keys)
+            metadataByFileIdentity = (try? loadMetadata(identities: cachedIdentities)) ?? [:]
+            pendingChangedIdentities.formUnion(cachedIdentities)
+            notifyMetadataChanged(immediate: true)
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
         }
     }
 
@@ -723,6 +901,8 @@ final class MetadataStore: ObservableObject {
             bindings: [.text(newIdentity), .text(previousIdentity), .text(newIdentity)]
         )
         try execute("DELETE FROM metadata_fields WHERE folder_identity = ?", bindings: [.text(previousIdentity)])
+        try execute("DELETE FROM files WHERE identity = ?", bindings: [.text(previousIdentity)])
+        registeredIdentities.remove(previousIdentity)
 
         if refreshingState { refreshPublishedState() }
         return newIdentity
@@ -1224,10 +1404,28 @@ final class MetadataStore: ObservableObject {
     /// - `content_fts`: indice FTS5 (unicode61, diacritici rimossi) per la ricerca testuale;
     ///   `file_identity` non è indicizzato, serve solo a ricondurre i match al file.
     private func migrateContentSchema() throws {
+        // Dalla separazione dell'indice, le tabelle pesanti vivono esclusivamente in
+        // folderbase-index.sqlite. Il DB operativo conserva solo lo stato per-cartella.
+        if FileManager.default.fileExists(atPath: indexDBURL.path) {
+            try execute(
+                """
+                CREATE TABLE IF NOT EXISTS folder_index_status (
+                    folder_path TEXT PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    indexed_count INTEGER NOT NULL,
+                    total_count INTEGER NOT NULL,
+                    checked_at REAL NOT NULL
+                )
+                """
+            )
+            return
+        }
         try execute(
             """
             CREATE TABLE IF NOT EXISTS file_content (
                 file_identity TEXT PRIMARY KEY,
+                name TEXT NOT NULL DEFAULT '',
+                path TEXT NOT NULL DEFAULT '',
                 extracted_text TEXT,
                 ocr_used INTEGER NOT NULL DEFAULT 0,
                 content_hash TEXT,
@@ -1237,6 +1435,9 @@ final class MetadataStore: ObservableObject {
             )
             """
         )
+        try addColumnIfMissing(table: "file_content", column: "name", definition: "TEXT NOT NULL DEFAULT ''")
+        try addColumnIfMissing(table: "file_content", column: "path", definition: "TEXT NOT NULL DEFAULT ''")
+        try? execute("UPDATE file_content SET name=COALESCE((SELECT name FROM files WHERE files.identity=file_content.file_identity),name), path=COALESCE((SELECT last_known_path FROM files WHERE files.identity=file_content.file_identity),path) WHERE name='' OR path=''")
 
         try execute(
             """
@@ -1454,7 +1655,7 @@ final class MetadataStore: ObservableObject {
     /// ritornano nil di proposito, così vengono riprovati (utile quando l'estrattore impara
     /// nuovi formati) senza doverli modificare.
     func contentHash(for identity: String) async -> String? {
-        if let databaseActor { return await databaseActor.contentHash(identity: identity) }
+        if let contentDatabaseActor { return await contentDatabaseActor.contentHash(identity: identity) }
         var statement: OpaquePointer?
         guard (try? prepare("SELECT content_hash FROM file_content WHERE file_identity = ? AND index_state = 'indexed'", statement: &statement)) != nil else { return nil }
         defer { sqlite3_finalize(statement) }
@@ -1502,7 +1703,7 @@ final class MetadataStore: ObservableObject {
     /// Identità dei file che hanno almeno un embedding con provider che inizia per `providerPrefix`
     /// (es. "apple-nl-", "ollama-<model>", "openai-<model>"). Serve a legare lo stato al motore AI.
     func identitiesWithVectors(providerPrefix: String) async -> Set<String> {
-        if let databaseActor { return await databaseActor.identitiesWithVectors(providerPrefix: providerPrefix) }
+        if let contentDatabaseActor { return await contentDatabaseActor.identitiesWithVectors(providerPrefix: providerPrefix) }
         var result: Set<String> = []
         var statement: OpaquePointer?
         let sql = "SELECT DISTINCT c.file_identity FROM chunk_vectors v JOIN content_chunks c ON c.id = v.chunk_id WHERE v.provider_id LIKE ?"
@@ -1543,11 +1744,11 @@ final class MetadataStore: ObservableObject {
         defer {
             Self.performanceLog.debug("semanticChunksAsync candidati=\(candidates.count) durata_ms=\((CFAbsoluteTimeGetCurrent() - startedAt) * 1000, format: .fixed(precision: 1))")
         }
-        guard let databaseActor else {
+        guard let contentDatabaseActor else {
             return semanticChunks(query: query, queries: queries, candidates: candidates, limit: limit)
         }
         let querySpaces = Set(queries.filter { !$0.vector.isEmpty }.map(\.providerID))
-        let rows = await databaseActor.semanticRows(candidates: candidates, querySpaces: querySpaces)
+        let rows = await contentDatabaseActor.semanticRows(candidates: candidates, querySpaces: querySpaces)
         guard !rows.isEmpty else { return [] }
         return await Task.detached(priority: .userInitiated) {
             Self.rankSemanticChunks(query: query, queries: queries, rows: rows, limit: limit)
@@ -1738,14 +1939,14 @@ final class MetadataStore: ObservableObject {
 
     /// Variante async: legge gli spazi sulla connessione di background, senza toccare il main.
     func indexedProviderIDsAsync() async -> [String] {
-        if let databaseActor { return await databaseActor.distinctProviderIDs() }
+        if let contentDatabaseActor { return await contentDatabaseActor.distinctProviderIDs() }
         return indexedProviderIDs()
     }
 
     /// Mappa identità→hash di TUTTI i file indicizzati con successo. Usata per calcolare la
     /// copertura di indicizzazione di una cartella (stato verde/arancione).
     func indexedHashes() async -> [String: String] {
-        if let databaseActor { return await databaseActor.indexedHashes(state: "indexed") }
+        if let contentDatabaseActor { return await contentDatabaseActor.indexedHashes(state: "indexed") }
         var result: [String: String] = [:]
         var statement: OpaquePointer?
         let sql = "SELECT file_identity, content_hash FROM file_content WHERE index_state = 'indexed' AND content_hash IS NOT NULL"
@@ -1760,7 +1961,7 @@ final class MetadataStore: ObservableObject {
     /// Mappa identità→hash dei file processati ma SENZA contenuto indicizzabile (index_state
     /// = 'unsupported': testo non estraibile). Usata dallo stato per contarli come "coperti".
     func unsupportedHashes() async -> [String: String] {
-        if let databaseActor { return await databaseActor.indexedHashes(state: "unsupported") }
+        if let contentDatabaseActor { return await contentDatabaseActor.indexedHashes(state: "unsupported") }
         var result: [String: String] = [:]
         var statement: OpaquePointer?
         let sql = "SELECT file_identity, content_hash FROM file_content WHERE index_state = 'unsupported' AND content_hash IS NOT NULL"
@@ -1777,8 +1978,8 @@ final class MetadataStore: ObservableObject {
     /// caldo di navigazione.
     func storeExtractedText(for item: FileItem, text: String, ocrUsed: Bool, hash: String) async {
         _ = try? registerFile(at: item.url)
-        if let databaseActor {
-            try? await databaseActor.storeContent(identity: item.identity, name: item.name, text: text, ocrUsed: ocrUsed, hash: hash, state: "indexed", chunks: nil)
+        if let contentDatabaseActor {
+            try? await contentDatabaseActor.storeContent(identity: item.identity, name: item.name, path: item.url.path, text: text, ocrUsed: ocrUsed, hash: hash, state: "indexed", chunks: nil)
             return
         }
         do {
@@ -1824,8 +2025,8 @@ final class MetadataStore: ObservableObject {
         chunks: [(ordinal: Int, text: String, providerID: String, vector: [Float])]
     ) async {
         _ = try? registerFile(at: item.url)
-        if let databaseActor {
-            try? await databaseActor.storeContent(identity: item.identity, name: item.name, text: text, ocrUsed: ocrUsed, hash: hash, state: "indexed", chunks: chunks)
+        if let contentDatabaseActor {
+            try? await contentDatabaseActor.storeContent(identity: item.identity, name: item.name, path: item.url.path, text: text, ocrUsed: ocrUsed, hash: hash, state: "indexed", chunks: chunks)
             return
         }
         do {
@@ -1868,8 +2069,8 @@ final class MetadataStore: ObservableObject {
     /// così l'indicizzazione non lo riprova finché il file non cambia.
     func markContentUnsupported(for item: FileItem, hash: String) async {
         _ = try? registerFile(at: item.url)
-        if let databaseActor {
-            try? await databaseActor.storeContent(identity: item.identity, name: item.name, text: nil, ocrUsed: false, hash: hash, state: "unsupported", chunks: nil)
+        if let contentDatabaseActor {
+            try? await contentDatabaseActor.storeContent(identity: item.identity, name: item.name, path: item.url.path, text: nil, ocrUsed: false, hash: hash, state: "unsupported", chunks: nil)
             return
         }
         _ = try? registerFile(at: item.url)
@@ -1909,8 +2110,8 @@ final class MetadataStore: ObservableObject {
     /// con quello semantico via Reciprocal Rank Fusion.
     func searchFileContentRanked(_ rawQuery: String) async -> [String] {
         guard let matchQuery = Self.ftsMatchQuery(from: rawQuery) else { return [] }
-        guard let databaseActor else { return [] }
-        return (try? await databaseActor.searchFileContentRanked(matchQuery: matchQuery)) ?? []
+        guard let contentDatabaseActor else { return [] }
+        return (try? await contentDatabaseActor.searchFileContentRanked(matchQuery: matchQuery)) ?? []
     }
 
     /// Costruisce una query MATCH FTS5 sicura: estrae solo token alfanumerici (così eventuali
@@ -1980,7 +2181,7 @@ final class MetadataStore: ObservableObject {
 
     /// Testo estratto già salvato per un file (usato per rigenerare i vettori senza ri-estrarre).
     func extractedText(for identity: String) async -> String? {
-        if let databaseActor { return await databaseActor.extractedText(identity: identity) }
+        if let contentDatabaseActor { return await contentDatabaseActor.extractedText(identity: identity) }
         var statement: OpaquePointer?
         guard (try? prepare("SELECT extracted_text FROM file_content WHERE file_identity = ?", statement: &statement)) != nil else { return nil }
         defer { sqlite3_finalize(statement) }
@@ -2003,7 +2204,7 @@ final class MetadataStore: ObservableObject {
     /// Vero se tutti i chunk del file hanno embedding del MOTORE indicato.
     /// Serve a evitare di saltare file che hanno vettori di un altro motore quando si cambia provider.
     func hasVectors(for identity: String, providerPrefix: String) async -> Bool {
-        if let databaseActor { return await databaseActor.hasVectors(identity: identity, providerPrefix: providerPrefix) }
+        if let contentDatabaseActor { return await contentDatabaseActor.hasVectors(identity: identity, providerPrefix: providerPrefix) }
         var statement: OpaquePointer?
         let sql = """
             SELECT 1 FROM content_chunks c
@@ -2020,8 +2221,8 @@ final class MetadataStore: ObservableObject {
 
     /// Sostituisce i chunk e i vettori di un file (elimina i precedenti in cascata, poi inserisce).
     func replaceChunks(for identity: String, chunks: [(ordinal: Int, text: String, providerID: String, vector: [Float])]) async {
-        if let databaseActor {
-            try? await databaseActor.replaceChunks(identity: identity, chunks: chunks)
+        if let contentDatabaseActor {
+            try? await contentDatabaseActor.replaceChunks(identity: identity, chunks: chunks)
             return
         }
         do {
@@ -2092,6 +2293,22 @@ final class MetadataStore: ObservableObject {
             .map { (identity: $0.key, score: $0.value) }
     }
 
+    func semanticSearchAsync(queryVector: [Float], providerID: String, candidates: Set<String>, limit: Int) async -> [(identity: String, score: Float)] {
+        guard let contentDatabaseActor, !queryVector.isEmpty, !candidates.isEmpty else { return [] }
+        let rows = await contentDatabaseActor.semanticRows(candidates: candidates, querySpaces: [providerID])
+            .filter { $0.providerID == providerID && $0.vector.count == queryVector.count }
+        return await Task.detached(priority: .userInitiated) {
+            let queryNorm = Self.norm(queryVector)
+            guard queryNorm > 0 else { return [] }
+            var best: [String: Float] = [:]
+            for row in rows {
+                let score = Self.cosine(queryVector, row.vector, aNorm: queryNorm, bNorm: row.storedNorm)
+                best[row.identity] = max(best[row.identity] ?? -.greatestFiniteMagnitude, score)
+            }
+            return best.sorted { $0.value > $1.value }.prefix(limit).map { (identity: $0.key, score: $0.value) }
+        }.value
+    }
+
     /// "Trova simili a questo": usa i vettori del file dato come query. Prende il centroide dei
     /// chunk del provider DOMINANTE del file (coerente per dimensione), poi riusa `semanticSearch`
     /// per trovare i file più simili tra i candidati, escluso il file stesso.
@@ -2132,6 +2349,28 @@ final class MetadataStore: ObservableObject {
 
         return semanticSearch(queryVector: centroid, providerID: providerID,
                               candidates: candidates.subtracting([identity]), limit: limit)
+    }
+
+    func similarFilesAsync(to identity: String, providerPrefix: String, candidates: Set<String>, limit: Int) async -> [(identity: String, score: Float)] {
+        guard let contentDatabaseActor else { return [] }
+        let providers = await contentDatabaseActor.distinctProviderIDs().filter { $0.hasPrefix(providerPrefix) }
+        guard !providers.isEmpty else { return [] }
+        let rows = await contentDatabaseActor.semanticRows(candidates: candidates.union([identity]), querySpaces: Set(providers))
+        let grouped = Dictionary(grouping: rows.filter { $0.identity == identity && !$0.vector.isEmpty }, by: \.providerID)
+        guard let (providerID, ownRows) = grouped.max(by: { $0.value.count < $1.value.count }),
+              let dimension = ownRows.first?.vector.count, dimension > 0 else { return [] }
+        var centroid = [Float](repeating: 0, count: dimension)
+        var count: Float = 0
+        for row in ownRows where row.vector.count == dimension {
+            for index in centroid.indices { centroid[index] += row.vector[index] }
+            count += 1
+        }
+        guard count > 0 else { return [] }
+        for index in centroid.indices { centroid[index] /= count }
+        return await semanticSearchAsync(
+            queryVector: centroid, providerID: providerID,
+            candidates: candidates.subtracting([identity]), limit: limit
+        )
     }
 
     // MARK: - Utility vettori

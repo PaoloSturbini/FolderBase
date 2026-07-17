@@ -136,6 +136,7 @@ extension Color {
 struct SidebarView: View {
     let selectedFolderURL: URL?
     let recentFolderURLs: [URL]
+    let managedFolderURLs: [URL]
     let treeRootURL: URL?
     @Binding var sidebarFontSize: Double
     @Binding var contentFontSize: Double
@@ -153,11 +154,13 @@ struct SidebarView: View {
     let chooseFolder: () -> Void
     let navigateTo: (URL) -> Void
     let moveItems: ([String], URL) -> Void
+    let directoryAction: (URL, DirectoryTreeAction) -> Void
     @ObservedObject var templateStore: TemplateStore
     @ObservedObject var metadataStore: MetadataStore
     @ObservedObject var backupService: BackupService
     @ObservedObject var indexingService: IndexingService
     @ObservedObject var directoryCache: DirectorySnapshotCache
+    let chatService: ChatService
     /// Item selezionato nella tabella: ne mostriamo la nota nel pannello in fondo alla sidebar.
     let selectedNoteItem: FileItem?
     @ObservedObject private var loc = LocalizationManager.shared
@@ -210,6 +213,9 @@ struct SidebarView: View {
     @AppStorage("notesPanelHeight") private var notesPanelHeight = 160.0
     /// Altezza di partenza catturata all'inizio del trascinamento dell'handle di resize.
     @State private var notesDragBaseline: Double?
+    /// Aggiorna il pannello note solo quando cambia il file selezionato. I caricamenti metadata
+    /// delle altre righe non devono più invalidare tutto l'albero delle cartelle.
+    @State private var selectedMetadataRevision = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -241,6 +247,10 @@ struct SidebarView: View {
                                         onSelect: navigateTo,
                                         onMoveItems: moveItems,
                                         onRemoveRoot: removeFolder,
+                                        configurationRootURL: treeRootURL,
+                                        onAction: directoryAction,
+                                        metadataStore: metadataStore,
+                                        chatService: chatService,
                                         directoryCache: directoryCache
                                     )
                                     .id(rootURL.path)
@@ -276,6 +286,10 @@ struct SidebarView: View {
         }
         .font(.system(size: sidebarFontSize))
         .navigationTitle("FolderBase")
+        .onReceive(metadataStore.metadataChanges) { identities in
+            guard let identity = selectedNoteItem?.identity, identities.contains(identity) else { return }
+            selectedMetadataRevision &+= 1
+        }
     }
 
     private func sectionHeader(_ title: String) -> some View {
@@ -502,6 +516,9 @@ struct SidebarView: View {
         }
         .sheet(item: $templatePendingEdit) { template in
             TemplateEditorView(title: L("templateEditor.edit"), template: template) { updated in
+                if templateStore.activeTemplateID == updated.id {
+                    propagateTemplateUpdate(from: template, to: updated)
+                }
                 templateStore.update(updated)
                 templatePendingEdit = nil
             } cancel: {
@@ -1653,6 +1670,33 @@ struct SidebarView: View {
     private var templatesSettings: some View {
         VStack(alignment: .leading, spacing: 18) {
             GroupBox {
+                VStack(alignment: .leading, spacing: 10) {
+                    Picker(L("templates.active"), selection: Binding(
+                        get: { templateStore.activeTemplateID },
+                        set: { newValue in
+                            templateStore.activeTemplateID = newValue
+                            applyActiveTemplateToAllRoots()
+                        }
+                    )) {
+                        Text(L("templates.noneActive")).tag(String?.none)
+                        ForEach(templateStore.templates) { template in
+                            Text(template.name).tag(Optional(template.id))
+                        }
+                    }
+                    .pickerStyle(.menu)
+
+                    Text(L("templates.activeNote"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+            } label: {
+                settingsCardLabel(L("templates.globalCard"), systemImage: "square.stack.3d.up.fill")
+            }
+
+            GroupBox {
                 VStack(alignment: .leading, spacing: 8) {
                     if templateStore.templates.isEmpty {
                         Text(L("templates.emptyNote"))
@@ -1718,10 +1762,76 @@ struct SidebarView: View {
                 settingsCardLabel(L("templates.card"), systemImage: "rectangle.stack")
             }
 
-            Text(L("templates.footerNote"))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            GroupBox {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(L("templates.cleanupNote"))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 10) {
+                        Button(action: cleanMetadataDatabase) {
+                            Label(L("templates.cleanup"), systemImage: "wand.and.stars")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isReconciling)
+                        if isReconciling { ProgressView().controlSize(.small) }
+                        if let maintenanceMessage {
+                            Text(maintenanceMessage).font(.callout).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+            } label: {
+                settingsCardLabel(L("templates.cleanupCard"), systemImage: "cylinder.split.1x2")
+            }
+        }
+    }
+
+    private func applyActiveTemplateToAllRoots() {
+        guard let template = templateStore.activeTemplate else { return }
+        for root in managedFolderURLs { metadataStore.applyTemplate(template, to: root) }
+    }
+
+    /// Usa gli ID stabili dei `FieldTemplate` per riconoscere lo stesso campo anche quando viene
+    /// rinominato. Aggiorna ogni radice; le sottocartelle ricevono immediatamente il risultato
+    /// tramite ereditarietà. Le vecchie opzioni vengono mantenute per non invalidare valori già
+    /// assegnati.
+    private func propagateTemplateUpdate(from previous: MetadataTemplate, to updated: MetadataTemplate) {
+        for root in managedFolderURLs {
+            let currentFields = metadataStore.fields(for: root, configurationRootURL: root)
+            for updatedField in updated.fields {
+                guard let previousField = previous.fields.first(where: { $0.id == updatedField.id }),
+                      let existing = currentFields.first(where: {
+                          $0.name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                              == previousField.name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                      }) else { continue }
+                var options = updatedField.options
+                var labels = Set(options.map { $0.label.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current) })
+                for option in existing.options {
+                    let key = option.label.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                    if labels.insert(key).inserted { options.append(option) }
+                }
+                metadataStore.updateField(
+                    folderURL: root,
+                    field: existing,
+                    name: updatedField.name,
+                    kind: updatedField.kind,
+                    options: options
+                )
+            }
+            metadataStore.applyTemplate(updated, to: root)
+        }
+    }
+
+    private func cleanMetadataDatabase() {
+        isReconciling = true
+        metadataStore.reconcileManagedFiles { relocated, missingIdentities in
+            let removed = metadataStore.purge(identities: missingIdentities)
+            isReconciling = false
+            maintenanceOrphans = 0
+            maintenanceOrphanIdentities = []
+            maintenanceMessage = "\(L("maint.updated")) \(relocated) · \(L("maint.removedPrefix")) \(removed) \(L("maint.orphanMetadataSuffix"))"
         }
     }
 

@@ -325,6 +325,13 @@ enum LocalizedStrings {
         "templates.newTemplate": ("Nuovo template", "New template"),
         "templates.card": ("Template", "Templates"),
         "templates.footerNote": ("Quando apri una cartella senza colonne FolderBase, usa il pulsante con l'icona dei template in alto a sinistra per generarle automaticamente da un template.", "When you open a folder without FolderBase columns, use the template button at the top left to generate them automatically from a template."),
+        "templates.active": ("Template globale", "Global template"),
+        "templates.noneActive": ("Nessun template", "No template"),
+        "templates.globalCard": ("Template usato da FolderBase", "Template used by FolderBase"),
+        "templates.activeNote": ("Un solo template viene applicato a tutte le cartelle gestite e alle loro sottocartelle. Cambiandolo, colonne e opzioni compatibili vengono riallineate senza eliminare i dati esistenti.", "One template is applied to every managed folder and its subfolders. Changing it realigns compatible columns and options without deleting existing data."),
+        "templates.cleanupCard": ("Bonifica database SQLite", "Clean up SQLite database"),
+        "templates.cleanup": ("Ricollega e bonifica", "Relink and clean up"),
+        "templates.cleanupNote": ("Ritrova file e cartelle spostati, ricollega i metadata alla loro identità corrente e rimuove i metadata realmente orfani.", "Finds moved files and folders, reconnects metadata to their current identity, and removes truly orphaned metadata."),
         "templates.noColumns": ("Nessuna colonna", "No columns"),
 
         // MARK: Info / supporto
@@ -414,6 +421,7 @@ enum LocalizedStrings {
         "ctx.open": ("Apri", "Open"),
         "ctx.quickLook": ("Anteprima rapida", "Quick Look"),
         "ctx.revealFinder": ("Mostra nel Finder", "Reveal in Finder"),
+        "ctx.openNewWindow": ("Apri come radice in una nuova finestra", "Open as Root in New Window"),
         "ctx.copyMarkdownLink": ("Copia link Markdown", "Copy Markdown Link"),
         "ctx.chatFile": ("Chatta con questo file", "Chat with this file"),
         "ctx.chatFolder": ("Chatta con questa cartella", "Chat with this folder"),

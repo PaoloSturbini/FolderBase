@@ -2,6 +2,13 @@ import AppKit
 import Darwin
 import SwiftUI
 
+/// Dati necessari per aprire una directory in una finestra indipendente senza perdere la
+/// gerarchia metadata della vista di origine.
+struct FolderWindowRequest: Codable, Hashable {
+    let folderPath: String
+    let configurationRootPath: String
+}
+
 /// Assicura che i descriptor standard 0/1/2 (stdin/stdout/stderr) siano validi, puntandoli a
 /// /dev/null se risultano chiusi. In un'app GUI lanciata dal Finder lo stdin (fd 0) può essere
 /// chiuso: in quel caso i framework di sistema (FSEvents, Process/NSTask, …) "raccolgono" fd 0 per
@@ -50,6 +57,15 @@ struct FolderBaseApp: App {
         // L'id "main" permette al menu della barra dei menu di ritrovare/riaprire la finestra.
         WindowGroup(id: "main") {
             MainWindowView()
+        }
+
+        // Finestre indipendenti aperte dal menu contestuale di una directory. Il valore è il
+        // path della radice, così macOS può creare più istanze con navigazione separata.
+        WindowGroup("FolderBase", for: FolderWindowRequest.self) { $request in
+            MainWindowView(
+                initialFolderURL: request.map { URL(fileURLWithPath: $0.folderPath) },
+                inheritedConfigurationRootURL: request.map { URL(fileURLWithPath: $0.configurationRootPath) }
+            )
         }
 
         MenuBarExtra(isInserted: $showMenuBarIcon) {

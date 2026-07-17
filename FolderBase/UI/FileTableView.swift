@@ -3,12 +3,14 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct FileTableView: View {
+    @Environment(\.openWindow) private var openWindow
     @Binding var items: [FileItem]
     let metadataStore: MetadataStore
     @ObservedObject private var loc = LocalizationManager.shared
 
     let selectedFolderURL: URL?
     let configurationRootURL: URL?
+    let activeTemplate: MetadataTemplate?
     let errorMessage: String?
     let canGoBack: Bool
     let canGoForward: Bool
@@ -28,8 +30,6 @@ struct FileTableView: View {
     let isLoading: Bool
     let contentFontSize: Double
     let showFileExtensions: Bool
-    let templates: [MetadataTemplate]
-    let applyTemplate: (MetadataTemplate) -> Void
     /// Riporta al contenitore l'unico item selezionato (o nil se la selezione è vuota o
     /// multipla): serve al pannello note nella sidebar, che mostra la nota della riga scelta.
     var onSelectItem: (FileItem?) -> Void = { _ in }
@@ -84,6 +84,8 @@ struct FileTableView: View {
     @State private var boardFieldID: String?
     @State private var hiddenByFolder: [String: Set<String>] = [:]
     @AppStorage("hiddenColumnsByFolder") private var hiddenColumnsData = Data()
+    @State private var globallyHiddenTemplateFieldIDs: Set<String> = []
+    @AppStorage("globallyHiddenTemplateFieldIDs") private var globallyHiddenTemplateFieldsData = Data()
 
     /// Cache di indice metadata ed elenco visibile (filtrato+ordinato): ricalcolati SOLO
     /// quando cambiano dati, ricerca, filtri o ordinamento (vedi `refreshDisplayCache`),
@@ -91,6 +93,7 @@ struct FileTableView: View {
     @State private var cachedIndex: [String: [String: String]] = [:]
     @State private var cachedSearchText: [String: String] = [:]
     @State private var cachedVisibleItems: [FileItem] = []
+    @State private var indexRebuildTask: Task<Void, Never>?
     /// Indici della base corrente usati dagli aggiornamenti metadata incrementali. Vengono
     /// ricostruiti insieme a `cachedIndex`, evitando una scansione di `searchSource` per ogni
     /// notifica (e una seconda scansione per ogni identita modificata).
@@ -215,7 +218,13 @@ struct FileTableView: View {
             subtreeLoadedForPath = nil
             // Un evento filesystem normalmente tocca poche righe: aggiorna gli indici per
             // differenza e riserva la ricostruzione completa ai cambi cartella/dataset estesi.
-            updateItemsIndex(from: oldItems, to: newItems)
+            indexRebuildTask?.cancel()
+            indexRebuildTask = Task { @MainActor in
+                // Accorpa items + metadata/colonne pubblicati nello stesso ciclo UI.
+                await Task.yield()
+                guard !Task.isCancelled else { return }
+                updateItemsIndex(from: oldItems, to: newItems)
+            }
             if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 relevanceRank = nil
             } else {
@@ -337,8 +346,8 @@ struct FileTableView: View {
             // Elenco semantico (se l'embedding è disponibile: Ollama/OpenAI raggiungibili o Apple).
             var semanticRanked: [String] = []
             if let embedding {
-                semanticRanked = metadataStore
-                    .semanticSearch(queryVector: embedding.vector, providerID: embedding.providerID, candidates: candidates, limit: 300)
+                semanticRanked = await metadataStore
+                    .semanticSearchAsync(queryVector: embedding.vector, providerID: embedding.providerID, candidates: candidates, limit: 300)
                     .map { $0.identity }
             }
 
@@ -380,11 +389,13 @@ struct FileTableView: View {
     private func findSimilar(to file: FileItem) {
         let prefix = IndexingService.activeProviderPrefix()
         let pool = Set(items.map { $0.id })
-        let ranked = metadataStore.similarFiles(to: file.identity, providerPrefix: prefix, candidates: pool, limit: 300)
-        searchText = ""
-        similarRank = Dictionary(uniqueKeysWithValues: ranked.enumerated().map { ($0.element.identity, $0.offset) })
-        similarToName = file.name
-        refreshDisplayCache()
+        Task {
+            let ranked = await metadataStore.similarFilesAsync(to: file.identity, providerPrefix: prefix, candidates: pool, limit: 300)
+            searchText = ""
+            similarRank = Dictionary(uniqueKeysWithValues: ranked.enumerated().map { ($0.element.identity, $0.offset) })
+            similarToName = file.name
+            refreshDisplayCache()
+        }
     }
 
     /// Azzera la modalità "Trova simili".
@@ -448,10 +459,6 @@ struct FileTableView: View {
 
             Button(action: goUp) {
                 Image(systemName: "arrow.up")
-            }
-
-            if isInsideSelectedConfigurationRoot {
-                templateMenu
             }
 
             Divider()
@@ -744,35 +751,6 @@ struct FileTableView: View {
         }
     }
 
-    /// Disponibile nella cartella principale e in ogni sottocartella della radice selezionata,
-    /// anche quando sono già presenti colonne ereditate.
-    private var templateMenu: some View {
-        Menu {
-            if templates.isEmpty {
-                Text(L("templateMenu.empty"))
-            } else {
-                Section(L("templateMenu.apply")) {
-                    ForEach(templates) { template in
-                        Button {
-                            applyTemplate(template)
-                        } label: {
-                            Label("\(template.name) (\(template.fields.count) \(L("templateMenu.columnsWord")))", systemImage: "rectangle.stack")
-                        }
-                    }
-                }
-            }
-        } label: {
-            Label(L("templateMenu.apply"), systemImage: "rectangle.stack.badge.plus")
-        }
-        .labelStyle(.iconOnly)
-    }
-
-    private var isInsideSelectedConfigurationRoot: Bool {
-        guard let selected = selectedFolderURL?.standardizedFileURL,
-              let root = configurationRootURL?.standardizedFileURL else { return false }
-        return selected.path == root.path || selected.path.hasPrefix(root.path + "/")
-    }
-
     // MARK: - Data shaping
 
     private var metadataFields: [MetadataField] {
@@ -846,6 +824,16 @@ struct FileTableView: View {
         let added = Set(newByID.keys).subtracting(oldByID.keys)
         let modified = Set(newByID.keys).intersection(oldByID.keys).filter { newByID[$0] != oldByID[$0] }
         let changed = added.union(modified)
+
+        // L'arricchimento progressivo cambia solo attributi (data/dimensione/tipo), non il
+        // dataset né i metadata. Aggiorna i riferimenti delle righe senza ricostruire gli indici
+        // campo×file e la cache di ricerca.
+        if removed.isEmpty, added.isEmpty, oldByID.keys.count == newByID.keys.count {
+            cachedItemsByID = newByID
+            cachedSourceIDs = Set(newByID.keys)
+            refreshDisplayCache()
+            return
+        }
 
         // Un cambio molto ampio è tipicamente navigazione verso un'altra cartella: in quel
         // caso il percorso lineare è più semplice e veloce delle molte mutazioni copy-on-write.
@@ -1029,10 +1017,20 @@ struct FileTableView: View {
 
     /// Colonne nascoste nella cartella corrente (lo stato è indipendente per ogni cartella).
     private var hiddenColumnIDs: Set<String> {
+        var result: Set<String> = []
         for key in configurationAncestorKeys {
-            if let hidden = hiddenByFolder[key] { return hidden }
+            if let hidden = hiddenByFolder[key] {
+                result.formUnion(hidden)
+                break
+            }
         }
-        return []
+        for field in metadataFields {
+            if let templateID = templateFieldID(for: field),
+               globallyHiddenTemplateFieldIDs.contains(templateID) {
+                result.insert(field.id)
+            }
+        }
+        return result
     }
 
     private var configurationAncestorKeys: [String] {
@@ -1087,9 +1085,13 @@ struct FileTableView: View {
         }
         .onAppear {
             restoreHiddenColumns()
+            restoreGloballyHiddenTemplateFields()
         }
         .onChange(of: hiddenByFolder) {
             persistHiddenColumns()
+        }
+        .onChange(of: globallyHiddenTemplateFieldIDs) {
+            persistGloballyHiddenTemplateFields()
         }
         // Tasto Invio: rinomina l'elemento selezionato (come nel Finder). Nessun gesto sul
         // nome, quindi la selezione col clic resta nativa e affidabile.
@@ -1147,6 +1149,18 @@ struct FileTableView: View {
                 revealInFinder([single])
             } label: {
                 Label(L("ctx.revealFinder"), systemImage: "magnifyingglass")
+            }
+
+            if single.isFolder {
+                Button {
+                    let metadataRoot = configurationRootURL ?? selectedFolderURL ?? single.url
+                    openWindow(value: FolderWindowRequest(
+                        folderPath: single.url.standardizedFileURL.path,
+                        configurationRootPath: metadataRoot.standardizedFileURL.path
+                    ))
+                } label: {
+                    Label(L("ctx.openNewWindow"), systemImage: "macwindow.badge.plus")
+                }
             }
 
             if aiEnabled {
@@ -1257,6 +1271,15 @@ struct FileTableView: View {
     }
 
     private func toggleColumnVisibility(_ id: String) {
+        if let field = metadataFields.first(where: { $0.id == id }),
+           let templateID = templateFieldID(for: field) {
+            if globallyHiddenTemplateFieldIDs.contains(templateID) {
+                globallyHiddenTemplateFieldIDs.remove(templateID)
+            } else {
+                globallyHiddenTemplateFieldIDs.insert(templateID)
+            }
+            return
+        }
         var set = hiddenByFolder[folderKey] ?? []
         if set.contains(id) {
             set.remove(id)
@@ -1270,6 +1293,27 @@ struct FileTableView: View {
         // Anche l'insieme vuoto è una configurazione esplicita: impedisce a una vecchia
         // configurazione della sottocartella di prevalere sulla scelta del genitore.
         hiddenByFolder[folderKey] = []
+        globallyHiddenTemplateFieldIDs.removeAll()
+    }
+
+    private func templateFieldID(for field: MetadataField) -> String? {
+        activeTemplate?.fields.first(where: {
+            $0.name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                == field.name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                && $0.kind == field.kind
+        })?.id
+    }
+
+    private func restoreGloballyHiddenTemplateFields() {
+        guard !globallyHiddenTemplateFieldsData.isEmpty,
+              let decoded = try? JSONDecoder().decode(Set<String>.self, from: globallyHiddenTemplateFieldsData) else { return }
+        globallyHiddenTemplateFieldIDs = decoded
+    }
+
+    private func persistGloballyHiddenTemplateFields() {
+        if let data = try? JSONEncoder().encode(globallyHiddenTemplateFieldIDs) {
+            globallyHiddenTemplateFieldsData = data
+        }
     }
 
     // MARK: - Cells

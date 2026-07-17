@@ -1,9 +1,10 @@
+import AppKit
 import SwiftUI
 
-/// Albero espandibile delle sottocartelle a partire da una cartella radice.
-/// Ogni nodo (radice inclusa) usa ESATTAMENTE la stessa riga, così la spaziatura è uniforme.
-/// Il percorso della cartella selezionata si auto-espande. Trascinando file su un nodo
-/// li si sposta in quella cartella.
+enum DirectoryTreeAction { case copy, rename, move, reveal, markdown, trash }
+
+/// Albero virtualizzato: mantiene un solo elenco piatto delle righe visibili. In questo modo
+/// cambiare selezione non ricostruisce ricorsivamente tutti i nodi già visitati.
 struct DirectoryTreeView: View {
     let rootURL: URL
     let selectedFolderURL: URL?
@@ -11,105 +12,185 @@ struct DirectoryTreeView: View {
     let onSelect: (URL) -> Void
     let onMoveItems: ([String], URL) -> Void
     let onRemoveRoot: (URL) -> Void
+    let configurationRootURL: URL?
+    let onAction: (URL, DirectoryTreeAction) -> Void
+    let metadataStore: MetadataStore
+    let chatService: ChatService
     @ObservedObject var directoryCache: DirectorySnapshotCache
+    @Environment(\.openWindow) private var openWindow
+
+    @State private var expandedPaths: Set<String> = []
+    @State private var childrenByPath: [String: [URL]] = [:]
+    @State private var loadingPaths: Set<String> = []
+    @State private var chatFolder: ChatFolder?
+
+    fileprivate struct Row: Identifiable, Equatable {
+        let url: URL
+        let depth: Int
+        let isExpanded: Bool
+        let isLoaded: Bool
+        let hasChildren: Bool
+        var id: String { url.standardizedFileURL.path }
+    }
+
+    private struct ChatFolder: Identifiable {
+        let url: URL
+        var id: String { url.path }
+    }
+
+    private var rootPath: String { rootURL.standardizedFileURL.path }
+
+    private var visibleRows: [Row] {
+        var result: [Row] = []
+        func append(_ url: URL, depth: Int) {
+            let path = url.standardizedFileURL.path
+            let expanded = expandedPaths.contains(path)
+            let children = childrenByPath[path]
+            result.append(Row(url: url, depth: depth, isExpanded: expanded, isLoaded: children != nil, hasChildren: children?.isEmpty == false))
+            guard expanded, let children = childrenByPath[path] else { return }
+            for child in children { append(child, depth: depth + 1) }
+        }
+        append(rootURL, depth: 0)
+        return result
+    }
 
     var body: some View {
-        DirectoryNodeView(
-            url: rootURL,
-            depth: 0,
-            selectedFolderURL: selectedFolderURL,
-            fontSize: fontSize,
-            onSelect: onSelect,
-            onMoveItems: onMoveItems,
-            onRemoveRoot: onRemoveRoot,
-            directoryCache: directoryCache
-        )
-        .id(rootURL.path)
+        LazyVStack(alignment: .leading, spacing: 2) {
+            ForEach(visibleRows) { row in
+                DirectoryTreeRow(
+                    row: row,
+                    isSelected: selectedFolderURL?.standardizedFileURL.path == row.id,
+                    fontSize: fontSize,
+                    onSelect: { onSelect(row.url) },
+                    onToggle: { toggle(row.url) },
+                    onMoveItems: { onMoveItems($0, row.url) },
+                    onRemoveRoot: row.depth == 0 ? { onRemoveRoot(row.url) } : nil,
+                    onAction: { action in onAction(row.url, action) },
+                    onOpenWindow: openInNewWindow,
+                    onChat: { chatFolder = ChatFolder(url: row.url) }
+                )
+                .equatable()
+            }
+        }
+        .onAppear { expandPathToSelection() }
+        .onChange(of: selectedFolderURL?.standardizedFileURL.path) { expandPathToSelection() }
+        .onChange(of: directoryCache.invalidationGeneration) { reloadInvalidatedBranches() }
+        .sheet(item: $chatFolder) { request in
+            ChatView(chatService: chatService, store: metadataStore, focusedFile: nil) {
+                chatFolder = nil
+            }
+            .onAppear {
+                let folder = request.url
+                let candidates = Set(IndexingService.fileItems(under: folder, limit: 20_000).map(\.identity))
+                chatService.configure(candidates: candidates, scopeLabel: "\(L("chat.scope.folder")): \(folder.lastPathComponent)")
+            }
+        }
+    }
+
+    private func openInNewWindow(_ url: URL) {
+        openWindow(value: FolderWindowRequest(
+            folderPath: url.path,
+            configurationRootPath: (configurationRootURL ?? rootURL).path
+        ))
+    }
+
+    private func toggle(_ url: URL) {
+        let path = url.standardizedFileURL.path
+        if expandedPaths.contains(path) {
+            expandedPaths.remove(path)
+        } else {
+            expandedPaths.insert(path)
+            loadChildren(of: url)
+        }
+    }
+
+    private func expandPathToSelection() {
+        expandedPaths.insert(rootPath)
+        loadChildren(of: rootURL)
+        guard let selected = selectedFolderURL?.standardizedFileURL,
+              selected.path == rootPath || selected.path.hasPrefix(rootPath + "/") else { return }
+
+        var ancestors: [URL] = []
+        var current = selected
+        while current.path != rootPath {
+            current = current.deletingLastPathComponent().standardizedFileURL
+            guard current.path == rootPath || current.path.hasPrefix(rootPath + "/") else { break }
+            ancestors.append(current)
+        }
+        for ancestor in ancestors.reversed() {
+            expandedPaths.insert(ancestor.path)
+            loadChildren(of: ancestor)
+        }
+    }
+
+    private func reloadInvalidatedBranches() {
+        let invalidated = directoryCache.lastInvalidatedPaths.map {
+            URL(fileURLWithPath: $0).standardizedFileURL.path
+        }
+        guard !invalidated.isEmpty else { return }
+        for path in expandedPaths where invalidated.contains(where: { changed in
+            path == changed || path == URL(fileURLWithPath: changed).deletingLastPathComponent().standardizedFileURL.path
+        }) {
+            childrenByPath[path] = nil
+            loadChildren(of: URL(fileURLWithPath: path))
+        }
+    }
+
+    private func loadChildren(of url: URL) {
+        let path = url.standardizedFileURL.path
+        guard childrenByPath[path] == nil, loadingPaths.insert(path).inserted else { return }
+        if let cached = directoryCache.snapshot(for: url, allowStale: true) {
+            childrenByPath[path] = cached.childDirectories
+        }
+        Task {
+            let preview = try? await DirectoryLoadCoordinator.shared.preview(at: url, showHiddenFiles: false)
+            let loaded = preview?.items ?? []
+            guard !Task.isCancelled else { return }
+            directoryCache.store(loaded, for: url)
+            childrenByPath[path] = loaded.lazy.filter(\.isFolder).map(\.url)
+            loadingPaths.remove(path)
+        }
     }
 }
 
-private struct DirectoryNodeView: View {
-    let url: URL
-    let depth: Int
-    let selectedFolderURL: URL?
+private struct DirectoryTreeRow: View, Equatable {
+    let row: DirectoryTreeView.Row
+    let isSelected: Bool
     let fontSize: Double
-    let onSelect: (URL) -> Void
-    let onMoveItems: ([String], URL) -> Void
-    let onRemoveRoot: (URL) -> Void
-    @ObservedObject var directoryCache: DirectorySnapshotCache
+    let onSelect: () -> Void
+    let onToggle: () -> Void
+    let onMoveItems: ([String]) -> Void
+    let onRemoveRoot: (() -> Void)?
+    let onAction: (DirectoryTreeAction) -> Void
+    let onOpenWindow: (URL) -> Void
+    let onChat: () -> Void
 
-    @State private var isExpanded = false
-    @State private var children: [URL] = []
-    @State private var didLoad = false
     @State private var isDropTargeted = false
+    @AppStorage(AIProviderSettings.Keys.enabled) private var aiEnabled = true
     @AppStorage(AppAccentColor.storageKey) private var appAccentRaw = AppAccentColor.blue.rawValue
     @AppStorage(AppAccentColor.customHexKey) private var appAccentCustomHex = ""
     private var accent: Color { AppAccentColor.color(forRaw: appAccentRaw, customHex: appAccentCustomHex) }
 
-    private var isSelected: Bool {
-        let selectedPath = selectedFolderURL?.standardizedFileURL.path
-        let nodePath = url.standardizedFileURL.path
-        return selectedPath == nodePath
-    }
-
-    /// Vero se la cartella selezionata è questa o una sua discendente.
-    private var containsSelection: Bool {
-        guard let selected = selectedFolderURL?.standardizedFileURL.path else { return false }
-        let base = url.standardizedFileURL.path
-        return selected == base || selected.hasPrefix(base + "/")
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.row == rhs.row && lhs.isSelected == rhs.isSelected && lhs.fontSize == rhs.fontSize
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            row
-
-            if isExpanded {
-                ForEach(children, id: \.path) { child in
-                    DirectoryNodeView(
-                        url: child,
-                        depth: depth + 1,
-                        selectedFolderURL: selectedFolderURL,
-                        fontSize: fontSize,
-                        onSelect: onSelect,
-                        onMoveItems: onMoveItems,
-                        onRemoveRoot: onRemoveRoot,
-                        directoryCache: directoryCache
-                    )
-                }
-            }
-        }
-        .onAppear { autoExpandIfNeeded() }
-        .onChange(of: directoryCache.invalidationGeneration) {
-            let nodePath = url.standardizedFileURL.path
-            guard directoryCache.lastInvalidatedPaths.isEmpty || directoryCache.lastInvalidatedPaths.contains(where: {
-                let changed = URL(fileURLWithPath: $0).standardizedFileURL
-                return changed.path == nodePath || changed.deletingLastPathComponent().path == nodePath
-            }) else { return }
-            reload()
-        }
-        .onChange(of: selectedFolderURL) { autoExpandIfNeeded() }
-    }
-
-    private var row: some View {
-        HStack(spacing: 4) {
-            Button {
-                toggleExpand()
-            } label: {
-                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+        let content = HStack(spacing: 4) {
+            Button(action: onToggle) {
+                Image(systemName: row.isExpanded ? "chevron.down" : "chevron.right")
                     .font(.system(size: max(fontSize - 4, 8)))
                     .foregroundStyle(.secondary)
                     .frame(width: 12)
-                    .opacity(didLoad && children.isEmpty ? 0 : 1)
+                    .opacity(row.isLoaded && !row.hasChildren ? 0 : 1)
             }
             .buttonStyle(.plain)
 
-            Button {
-                onSelect(url)
-            } label: {
+            Button(action: onSelect) {
                 HStack(spacing: 6) {
                     Image(systemName: isSelected ? "folder.fill" : "folder")
                         .foregroundStyle(isSelected ? accent : .secondary)
-                    Text(url.lastPathComponent)
+                    Text(row.url.lastPathComponent)
                         .foregroundStyle(isSelected ? accent : .primary)
                         .lineLimit(1)
                     Spacer(minLength: 0)
@@ -118,78 +199,39 @@ private struct DirectoryNodeView: View {
             }
             .buttonStyle(.plain)
 
-            if depth == 0 {
-                Button {
-                    onRemoveRoot(url)
-                } label: {
-                    Image(systemName: "minus.circle")
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.secondary)
+            if let onRemoveRoot {
+                Button(action: onRemoveRoot) { Image(systemName: "minus.circle") }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
             }
         }
         .font(.system(size: fontSize))
         .padding(.vertical, 3)
         .padding(.trailing, 6)
-        .padding(.leading, 6 + CGFloat(depth) * 14)
-        .background(
-            RoundedRectangle(cornerRadius: 5)
-                .fill(isSelected ? accent.opacity(0.15) : (isDropTargeted ? accent.opacity(0.10) : Color.clear))
-        )
+        .padding(.leading, 6 + CGFloat(row.depth) * 14)
+        .background(RoundedRectangle(cornerRadius: 5).fill(isSelected ? accent.opacity(0.15) : (isDropTargeted ? accent.opacity(0.10) : .clear)))
         .contentShape(Rectangle())
-        .dropDestination(for: URL.self) { urls, _ in
-            onMoveItems(urls.map(\.path), url)
-            return true
-        } isTargeted: { targeted in
-            isDropTargeted = targeted
-        }
+        .dropDestination(for: URL.self) { urls, _ in onMoveItems(urls.map(\.path)); return true } isTargeted: { isDropTargeted = $0 }
+        .contextMenu { contextMenu }
+
+        if row.depth > 0 { content.draggable(row.url) } else { content }
     }
 
-    private func toggleExpand() {
-        isExpanded.toggle()
-        if isExpanded { loadChildrenIfNeeded() }
-    }
-
-    /// La radice parte aperta; i nodi lungo il percorso selezionato si espandono da soli.
-    /// Senza animazione, per non far "scivolare" l'albero durante la navigazione.
-    private func autoExpandIfNeeded() {
-        if depth == 0 || containsSelection {
-            if !isExpanded {
-                var transaction = Transaction()
-                transaction.disablesAnimations = true
-                withTransaction(transaction) { isExpanded = true }
-            }
-            loadChildrenIfNeeded()
+    @ViewBuilder private var contextMenu: some View {
+        Button(action: onSelect) { Label(L("ctx.open"), systemImage: "folder") }
+        Button { onAction(.reveal) } label: { Label(L("ctx.revealFinder"), systemImage: "magnifyingglass") }
+        Button { onOpenWindow(row.url) } label: { Label(L("ctx.openNewWindow"), systemImage: "macwindow.badge.plus") }
+        if aiEnabled {
+            Divider()
+            Button(action: onChat) { Label(L("ctx.chatFolder"), systemImage: "bubble.left.and.bubble.right") }
         }
-    }
-
-    private func reload() {
-        didLoad = false
-        if isExpanded { loadChildrenIfNeeded() }
-    }
-
-    /// Legge le sottocartelle su un thread di background: su cartelle grandi o volumi
-    /// di rete la lettura sincrona bloccava il main thread a ogni espansione del nodo.
-    private func loadChildrenIfNeeded() {
-        guard !didLoad else { return }
-        didLoad = true
-
-        if let cached = directoryCache.snapshot(for: url, allowStale: true) {
-            children = cached.childDirectories
-        }
-
-        let targetURL = url
-        Task {
-            let loaded = await Task.detached(priority: .userInitiated) {
-                try? FileBrowserService().contentsOfDirectory(at: targetURL, showHiddenFiles: false)
-            }.value ?? []
-            guard !Task.isCancelled, url == targetURL else { return }
-            directoryCache.store(loaded, for: targetURL)
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                children = loaded.lazy.filter(\.isFolder).map(\.url)
-            }
-        }
+        Divider()
+        Button { onAction(.copy) } label: { Label(L("ctx.copy"), systemImage: "doc.on.doc") }
+        Button { onAction(.rename) } label: { Label(L("ctx.rename"), systemImage: "pencil") }
+        Button { onAction(.move) } label: { Label(L("ctx.move"), systemImage: "folder") }
+        Divider()
+        Button { onAction(.markdown) } label: { Label(L("ctx.copyMarkdownLink"), systemImage: "link") }
+        Divider()
+        Button(role: .destructive) { onAction(.trash) } label: { Label(L("ctx.trash"), systemImage: "trash") }
     }
 }

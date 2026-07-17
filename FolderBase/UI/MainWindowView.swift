@@ -2,6 +2,8 @@ import SwiftUI
 import os
 
 struct MainWindowView: View {
+    private let initialFolderURL: URL?
+    private let inheritedConfigurationRootURL: URL?
     private static let performanceLog = OSLog(subsystem: "com.paolosturbini.folderbase", category: .pointsOfInterest)
     @ObservedObject private var loc = LocalizationManager.shared
     // Riferimento stabile ma non osservato dalla finestra intera: sono tabella e sidebar a
@@ -40,9 +42,29 @@ struct MainWindowView: View {
     /// Lettura della cartella corrente: cancellata quando l'utente naviga altrove, così una
     /// directory lenta non continua a consumare I/O dopo essere diventata irrilevante.
     @State private var folderLoadTask: Task<Void, Never>?
+    @State private var templateVerificationTask: Task<Void, Never>?
+    @State private var verifiedTemplateFolders: Set<String> = []
     /// Popolato all'avvio (se il controllo automatico è attivo) quando GitHub segnala una
     /// versione più recente: pilota l'alert che propone di scaricarla.
     @State private var availableUpdate: AvailableUpdate?
+
+    init(initialFolderURL: URL? = nil, inheritedConfigurationRootURL: URL? = nil) {
+        let root = initialFolderURL?.standardizedFileURL
+        self.initialFolderURL = root
+        self.inheritedConfigurationRootURL = inheritedConfigurationRootURL?.standardizedFileURL
+        _selectedFolderURL = State(initialValue: root)
+        _treeRootURL = State(initialValue: root)
+    }
+
+    private var displayedRootURLs: [URL] {
+        initialFolderURL.map { [$0] } ?? recentFoldersStore.folderURLs
+    }
+
+    /// Nelle finestre secondarie la radice visuale è la directory scelta, ma la risoluzione
+    /// delle colonne continua dalla radice della finestra di origine.
+    private var metadataConfigurationRootURL: URL? {
+        inheritedConfigurationRootURL ?? treeRootURL
+    }
 
     var body: some View {
         // HSplitView nativo invece di NavigationSplitView: niente animazioni di colonna
@@ -50,8 +72,9 @@ struct MainWindowView: View {
         HSplitView {
             SidebarView(
                 selectedFolderURL: selectedFolderURL,
-                recentFolderURLs: recentFoldersStore.folderURLs,
-                treeRootURL: treeRootURL,
+                recentFolderURLs: displayedRootURLs,
+                managedFolderURLs: recentFoldersStore.folderURLs,
+                treeRootURL: metadataConfigurationRootURL,
                 sidebarFontSize: $sidebarFontSize,
                 contentFontSize: $contentFontSize,
                 appearanceMode: $appearanceMode,
@@ -63,11 +86,13 @@ struct MainWindowView: View {
                 chooseFolder: chooseFolder,
                 navigateTo: navigate,
                 moveItems: moveItemsByPath,
+                directoryAction: performDirectoryAction,
                 templateStore: templateStore,
                 metadataStore: metadataStore,
                 backupService: backupService,
                 indexingService: indexingService,
                 directoryCache: directoryCache,
+                chatService: chatService,
                 selectedNoteItem: selectedNoteItem
             )
             .frame(minWidth: 220, idealWidth: 260, maxWidth: 380, maxHeight: .infinity)
@@ -76,7 +101,8 @@ struct MainWindowView: View {
                 items: $items,
                 metadataStore: metadataStore,
                 selectedFolderURL: selectedFolderURL,
-                configurationRootURL: treeRootURL,
+                configurationRootURL: metadataConfigurationRootURL,
+                activeTemplate: templateStore.activeTemplate,
                 errorMessage: errorMessage,
                 canGoBack: !backStack.isEmpty,
                 canGoForward: !forwardStack.isEmpty,
@@ -92,8 +118,6 @@ struct MainWindowView: View {
                 isLoading: isLoading,
                 contentFontSize: contentFontSize,
                 showFileExtensions: showFileExtensions,
-                templates: templateStore.templates,
-                applyTemplate: applyTemplate,
                 onSelectItem: { selectedNoteItem = $0 },
                 chatService: chatService
             )
@@ -104,12 +128,16 @@ struct MainWindowView: View {
         .preferredColorScheme(AppearanceMode(rawValue: appearanceMode)?.colorScheme)
         .onAppear {
             loadInitialFolderIfNeeded()
+            scheduleManagedTemplateVerification()
             performInitialSync()
             checkForUpdatesIfEnabled()
             backupService.configure(store: metadataStore)
         }
         .onChange(of: showHiddenFiles) { _, _ in
             reloadCurrentFolder()
+        }
+        .onReceive(metadataStore.metadataStructureChanges) {
+            verifiedTemplateFolders.removeAll(keepingCapacity: true)
         }
         // Richieste dal menu della barra dei menu: carica la cartella scelta. Il publisher
         // emette il valore corrente anche alla sottoscrizione, così funziona pure quando la
@@ -184,12 +212,15 @@ struct MainWindowView: View {
 
         // FSEvents osserva ricorsivamente: bastano le radici scelte dall'utente. Aggiungere ogni
         // sottocartella costringeva a ricreare lo stream durante la navigazione.
-        managedWatcher?.watch(paths: recentFoldersStore.folderURLs.map(\.path))
+        managedWatcher?.watch(paths: displayedRootURLs.map(\.path))
     }
 
     private func loadInitialFolderIfNeeded() {
-        guard selectedFolderURL == nil,
-              let recent = recentFoldersStore.folderURLs.first else { return }
+        if let selectedFolderURL, items.isEmpty {
+            loadFolder(selectedFolderURL)
+            return
+        }
+        guard let recent = recentFoldersStore.folderURLs.first else { return }
 
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: recent.path, isDirectory: &isDirectory),
@@ -216,6 +247,7 @@ struct MainWindowView: View {
         selectedFolderURL = url
         treeRootURL = url
         recentFoldersStore.add(url)
+        applyActiveTemplate(to: url)
         refreshManagedWatcher()
         backStack = []
         forwardStack = []
@@ -248,6 +280,14 @@ struct MainWindowView: View {
     /// Mantiene stabile la radice dell'albero finché si naviga DENTRO il suo sottoalbero;
     /// la ri-ancora solo se si esce (es. risalendo sopra la radice). Evita ricostruzioni.
     private func updateTreeRoot(for url: URL) {
+        // Se la destinazione appartiene a una delle cartelle gestite, la radice di
+        // configurazione deve essere SEMPRE quella cartella. Prima, passando direttamente da
+        // un altro ramo a una sottocartella (es. “3. risorse”), `treeRootURL` diventava la
+        // sottocartella stessa e le colonne ereditate sparivano finché non si cliccava la radice.
+        if let managed = managedRoot(containing: url) {
+            treeRootURL = managed
+            return
+        }
         if let root = treeRootURL {
             let rootPath = root.standardizedFileURL.path
             let targetPath = url.standardizedFileURL.path
@@ -258,9 +298,14 @@ struct MainWindowView: View {
         treeRootURL = url
     }
 
-    private func applyTemplate(_ template: MetadataTemplate) {
-        guard let selectedFolderURL else { return }
-        metadataStore.applyTemplate(template, to: selectedFolderURL)
+    private func applyActiveTemplate(to rootURL: URL) {
+        guard let template = templateStore.activeTemplate else { return }
+        metadataStore.applyTemplate(template, to: rootURL)
+    }
+
+    private func applyActiveTemplateToManagedRoots() {
+        guard let template = templateStore.activeTemplate else { return }
+        for root in recentFoldersStore.folderURLs { metadataStore.applyTemplate(template, to: root) }
     }
 
     private func openItem(_ item: FileItem) {
@@ -316,6 +361,65 @@ struct MainWindowView: View {
 
     private func loadFolder(_ url: URL) {
         fetchItems(at: url, useCachedSnapshot: true)
+        scheduleTemplateVerification(for: url)
+    }
+
+    private func scheduleManagedTemplateVerification() {
+        templateVerificationTask?.cancel()
+        templateVerificationTask = Task(priority: .utility) {
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            for root in recentFoldersStore.folderURLs {
+                guard !Task.isCancelled else { return }
+                ensureActiveTemplate(for: root)
+                await Task.yield()
+            }
+        }
+    }
+
+    private func scheduleTemplateVerification(for url: URL) {
+        templateVerificationTask?.cancel()
+        guard let template = templateStore.activeTemplate else { return }
+        let verificationKey = templateVerificationKey(template: template, folderURL: url)
+        guard !verifiedTemplateFolders.contains(verificationKey) else { return }
+        templateVerificationTask = Task(priority: .utility) {
+            // Lascia completare prima il frame di navigazione e il primo snapshot.
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled, selectedFolderURL == url else { return }
+            ensureActiveTemplate(for: url)
+            verifiedTemplateFolders.insert(verificationKey)
+        }
+    }
+
+    private func templateVerificationKey(template: MetadataTemplate, folderURL: URL) -> String {
+        let structure = template.fields.map { field in
+            field.name + ":" + field.kind.rawValue + ":" + field.options.map(\.label).joined(separator: ",")
+        }.joined(separator: "|")
+        return template.id + "\u{1F}" + structure + "\u{1F}" + folderURL.standardizedFileURL.path
+    }
+
+    /// Ogni apertura è un punto di consistenza: la cartella deve mostrare subito tutte le
+    /// colonne del template globale, anche se l'utente l'ha selezionata prima nell'albero o se
+    /// appartiene a una radice appena aggiunta.
+    private func ensureActiveTemplate(for folderURL: URL) {
+        guard let template = templateStore.activeTemplate else { return }
+        let managed = managedRoot(containing: folderURL)
+        let inherited = metadataConfigurationRootURL.flatMap { root -> URL? in
+            let path = folderURL.standardizedFileURL.path
+            return path == root.path || path.hasPrefix(root.path + "/") ? root : nil
+        }
+        let configurationRoot = managed ?? inherited ?? folderURL
+        guard !metadataStore.isTemplateApplied(
+            template,
+            to: folderURL,
+            configurationRootURL: configurationRoot
+        ) else { return }
+
+        metadataStore.applyTemplate(template, to: configurationRoot)
+        // Se una struttura locale interrompe l'ereditarietà, completa anche la cartella aperta.
+        if !metadataStore.isTemplateApplied(template, to: folderURL, configurationRootURL: configurationRoot) {
+            metadataStore.applyTemplate(template, to: folderURL)
+        }
     }
 
     private func reloadCurrentFolder(preservingCurrentSnapshot: Bool = false) {
@@ -344,12 +448,16 @@ struct MainWindowView: View {
     /// i risultati arrivati in ritardo se nel frattempo si è navigato altrove.
     private func fetchItems(at url: URL, useCachedSnapshot: Bool, allowStaleSnapshot: Bool = false) {
         folderLoadTask?.cancel()
-        if useCachedSnapshot, let cached = directoryCache.snapshot(for: url, allowStale: allowStaleSnapshot) {
+        if useCachedSnapshot, let cached = directoryCache.snapshot(for: url, allowStale: true) {
             items = cached.items
             metadataStore.loadMetadata(for: cached.items)
             errorMessage = nil
             isLoading = false
         } else {
+            // Non mostrare le righe della cartella precedente con le colonne della nuova:
+            // quella combinazione costringe SwiftUI a costruire e poi scartare un'intera Table.
+            if !items.isEmpty { items = [] }
+            metadataStore.loadMetadata(for: [])
             isLoading = true
         }
         let includeHidden = showHiddenFiles
@@ -358,19 +466,9 @@ struct MainWindowView: View {
             let signpostID = OSSignpostID(log: Self.performanceLog)
             os_signpost(.begin, log: Self.performanceLog, name: "DirectoryRefresh", signpostID: signpostID, "%{public}s", url.path)
             defer { os_signpost(.end, log: Self.performanceLog, name: "DirectoryRefresh", signpostID: signpostID) }
-            let worker = Task.detached(priority: .userInitiated) { () -> (preview: FileBrowserService.Preview?, error: String?) in
-                guard !Task.isCancelled else { return (nil, nil) }
-                do {
-                    return (try FileBrowserService().previewOfDirectory(at: url, showHiddenFiles: includeHidden), nil)
-                } catch {
-                    return (nil, error.localizedDescription)
-                }
-            }
-            let outcome = await withTaskCancellationHandler {
-                await worker.value
-            } onCancel: {
-                worker.cancel()
-            }
+            let outcome: (preview: FileBrowserService.Preview?, error: String?)
+            do { outcome = (try await DirectoryLoadCoordinator.shared.preview(at: url, showHiddenFiles: includeHidden), nil) }
+            catch { outcome = (nil, error.localizedDescription) }
             guard !Task.isCancelled, selectedFolderURL == url else { return }
 
             // Aggiornamento senza animazioni: evita artefatti di transizione durante la navigazione.
@@ -393,10 +491,7 @@ struct MainWindowView: View {
             // Nelle directory grandi l'anteprima è già interattiva. Completa attributi e
             // content type senza trattenere il main actor né modificare le identità delle righe.
             if outcome.preview?.needsEnrichment == true {
-                let enrichment = Task.detached(priority: .utility) {
-                    try? FileBrowserService().contentsOfDirectory(at: url, showHiddenFiles: includeHidden)
-                }
-                let detailed = await withTaskCancellationHandler { await enrichment.value } onCancel: { enrichment.cancel() }
+                let detailed = try? await DirectoryLoadCoordinator.shared.details(at: url, showHiddenFiles: includeHidden)
                 guard !Task.isCancelled, selectedFolderURL == url, let detailed else { return }
                 directoryCache.store(detailed, for: url)
                 if detailed != items { items = detailed }
@@ -459,6 +554,43 @@ struct MainWindowView: View {
         let trimmedName = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let destinationURL = destinationURLForRename(item: item, newName: trimmedName) else { return }
         moveItemOnDisk(item, to: destinationURL)
+    }
+
+    private func performDirectoryAction(_ url: URL, _ action: DirectoryTreeAction) {
+        guard let item = itemForDirectory(at: url) else { return }
+        switch action {
+        case .copy:
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.writeObjects([url as NSURL])
+        case .rename:
+            let alert = NSAlert()
+            alert.messageText = L("ctx.rename")
+            let input = NSTextField(string: url.lastPathComponent)
+            input.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+            alert.accessoryView = input
+            alert.addButton(withTitle: L("common.save"))
+            alert.addButton(withTitle: L("common.cancel"))
+            if alert.runModal() == .alertFirstButtonReturn { renameItem(item, newName: input.stringValue) }
+        case .move:
+            moveItem(item)
+        case .reveal:
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        case .markdown:
+            let escaped = url.lastPathComponent.replacingOccurrences(of: "]", with: "\\]")
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString("[\(escaped)](\(url.absoluteString))", forType: .string)
+        case .trash:
+            trashItems([item])
+            if recentFoldersStore.folderURLs.contains(where: { $0.standardizedFileURL.path == url.standardizedFileURL.path }) {
+                removeRecentFolder(url)
+            }
+        }
+    }
+
+    private func itemForDirectory(at url: URL) -> FileItem? {
+        try? FileBrowserService().contentsOfDirectory(at: url.deletingLastPathComponent(), showHiddenFiles: true)
+            .first { $0.url.standardizedFileURL.path == url.standardizedFileURL.path }
     }
 
     private func moveItem(_ item: FileItem) {
@@ -527,11 +659,24 @@ struct MainWindowView: View {
             guard let resolution else { continue }
 
             let previousIdentity = metadataStore.identity(for: sourceURL)
+            let metadataContext = prepareMetadataMove(from: sourceURL, to: destinationFolder)
             do {
                 try performTransfer(from: sourceURL, resolution: resolution, copy: shouldCopy)
                 if !shouldCopy, let previousIdentity {
                     do {
+                        try metadataStore.remapMetadataForMove(
+                            subtreeAt: sourceURL,
+                            from: metadataContext.sourceFields,
+                            to: metadataContext.destinationFields
+                        )
                         try metadataStore.reconcileMovedItem(previousIdentity: previousIdentity, newURL: resolution.destination)
+                        if isDirectory {
+                            // La cartella porta con sé l'intero sottoalbero: aggiorna subito anche
+                            // path e bookmark dei discendenti già registrati. Le loro identità e i
+                            // relativi metadata restano invariati sullo stesso volume; se cambiano,
+                            // la riconciliazione li riaggancia atomicamente.
+                            metadataStore.reconcileManagedFiles { _, _ in }
+                        }
                     } catch {
                         errorMessage = error.localizedDescription
                     }
@@ -544,6 +689,39 @@ struct MainWindowView: View {
         }
 
         if didTransfer { reloadCurrentFolder() }
+    }
+
+    private func managedRoot(containing url: URL) -> URL? {
+        let path = url.standardizedFileURL.path
+        return recentFoldersStore.folderURLs
+            .map(\.standardizedFileURL)
+            .filter { path == $0.path || path.hasPrefix($0.path + "/") }
+            .max { $0.path.count < $1.path.count }
+    }
+
+    private struct MetadataMoveContext {
+        let sourceFields: [MetadataField]
+        let destinationFields: [MetadataField]
+    }
+
+    /// Eseguita da ogni percorso di spostamento (drag nell'albero, drag nella tabella e pannello
+    /// “Sposta”). Verifica prima lo schema della destinazione e cattura le due serie di ID da
+    /// rimappare solo dopo che l'operazione filesystem è riuscita.
+    private func prepareMetadataMove(from sourceURL: URL, to destinationFolder: URL) -> MetadataMoveContext {
+        let sourceRoot = managedRoot(containing: sourceURL)
+        let destinationRoot = managedRoot(containing: destinationFolder)
+        let sourceFields = metadataStore.fields(
+            for: sourceURL.deletingLastPathComponent(),
+            configurationRootURL: sourceRoot
+        )
+        if let template = templateStore.activeTemplate {
+            metadataStore.applyTemplate(template, to: destinationRoot ?? destinationFolder)
+        }
+        let destinationFields = metadataStore.fields(
+            for: destinationFolder,
+            configurationRootURL: destinationRoot ?? destinationFolder
+        )
+        return MetadataMoveContext(sourceFields: sourceFields, destinationFields: destinationFields)
     }
 
     /// Risolve una collisione come Finder. "Sostituisci" conserva l'identità dell'elemento
@@ -621,10 +799,20 @@ struct MainWindowView: View {
     }
 
     private func moveItemOnDisk(_ item: FileItem, resolution: CollisionResolution) {
+        let metadataContext = prepareMetadataMove(
+            from: item.url,
+            to: resolution.destination.deletingLastPathComponent()
+        )
         do {
             try performTransfer(from: item.url, resolution: resolution, copy: false)
             do {
+                try metadataStore.remapMetadataForMove(
+                    subtreeAt: item.url,
+                    from: metadataContext.sourceFields,
+                    to: metadataContext.destinationFields
+                )
                 try metadataStore.reconcileMovedItem(previousIdentity: item.identity, newURL: resolution.destination)
+                if item.isFolder { metadataStore.reconcileManagedFiles { _, _ in } }
             } catch {
                 errorMessage = error.localizedDescription
             }

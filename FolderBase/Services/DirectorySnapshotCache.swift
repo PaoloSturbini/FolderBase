@@ -24,7 +24,7 @@ final class DirectorySnapshotCache: ObservableObject {
     private var clock: UInt64 = 0
     private let capacity: Int
 
-    init(capacity: Int = 40) { self.capacity = max(5, capacity) }
+    init(capacity: Int = 120) { self.capacity = max(5, capacity) }
 
     func snapshot(for url: URL, allowStale: Bool = false) -> DirectorySnapshot? {
         let key = url.standardizedFileURL.path

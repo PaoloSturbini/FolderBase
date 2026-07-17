@@ -23,10 +23,18 @@ final class FileBrowserService {
         let urls = try FileManager.default.contentsOfDirectory(
             at: url, includingPropertiesForKeys: Array(Self.identityKeys), options: options
         )
-        guard urls.count > detailedThreshold else {
-            return Preview(items: try makeItems(urls: urls, resourceKeys: Self.resourceKeys, detailed: true), needsEnrichment: false)
+        // Per le cartelle normali una sola lettura completa è più rapida di due pubblicazioni
+        // SwiftUI consecutive. Solo oltre la soglia usiamo il primo paint leggero.
+        if urls.count <= detailedThreshold {
+            return Preview(
+                items: try makeItems(urls: urls, resourceKeys: Self.resourceKeys, detailed: true),
+                needsEnrichment: false
+            )
         }
-        return Preview(items: try makeItems(urls: urls, resourceKeys: Self.identityKeys, detailed: false), needsEnrichment: true)
+        return Preview(
+            items: try makeItems(urls: urls, resourceKeys: Self.identityKeys, detailed: false),
+            needsEnrichment: !urls.isEmpty
+        )
     }
 
     func contentsOfDirectory(at url: URL, showHiddenFiles: Bool = false) throws -> [FileItem] {

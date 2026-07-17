@@ -144,6 +144,7 @@ actor SQLiteDatabaseActor {
                     AND NOT EXISTS (SELECT 1 FROM metadata_fields e WHERE e.folder_identity = ? AND e.id = metadata_fields.id)
                     """, texts: [move.newIdentity, move.previousIdentity, move.newIdentity])
                 try execute("DELETE FROM metadata_fields WHERE folder_identity = ?", texts: [move.previousIdentity])
+                try execute("DELETE FROM files WHERE identity = ?", texts: [move.previousIdentity])
             }
         }
     }
@@ -344,10 +345,10 @@ actor SQLiteDatabaseActor {
     func semanticRows(candidates: Set<String>, querySpaces: Set<String>) -> [SemanticRow] {
         if !candidates.isEmpty, !prepareCandidateTable(candidates) { return [] }
         let sql = """
-            SELECT c.file_identity, f.last_known_path, f.name, c.text, v.provider_id, v.vector, v.norm
+            SELECT c.file_identity, fc.path, fc.name, c.text, v.provider_id, v.vector, v.norm
             FROM chunk_vectors v
             JOIN content_chunks c ON c.id = v.chunk_id
-            JOIN files f ON f.identity = c.file_identity
+            LEFT JOIN file_content fc ON fc.file_identity = c.file_identity
             \(candidates.isEmpty ? "" : "JOIN temp.semantic_candidates sc ON sc.identity = c.file_identity")
             """
         var statement: OpaquePointer?
@@ -395,22 +396,24 @@ actor SQLiteDatabaseActor {
         }
     }
 
-    func storeContent(identity: String, name: String, text body: String?, ocrUsed: Bool, hash: String, state: String, chunks: [ChunkVector]?) throws {
+    func storeContent(identity: String, name: String, path: String = "", text body: String?, ocrUsed: Bool, hash: String, state: String, chunks: [ChunkVector]?) throws {
         try transaction {
             let contentSQL = """
-                INSERT INTO file_content (file_identity, extracted_text, ocr_used, content_hash, extracted_at, index_state)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO file_content (file_identity, name, path, extracted_text, ocr_used, content_hash, extracted_at, index_state)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(file_identity) DO UPDATE SET extracted_text=excluded.extracted_text,
-                ocr_used=excluded.ocr_used, content_hash=excluded.content_hash,
+                name=excluded.name, path=excluded.path, ocr_used=excluded.ocr_used, content_hash=excluded.content_hash,
                 extracted_at=excluded.extracted_at, index_state=excluded.index_state
                 """
             let statement = try cachedStatement(contentSQL)
             bindText(statement, 1, identity)
-            if let body { bindText(statement, 2, body) } else { sqlite3_bind_null(statement, 2) }
-            sqlite3_bind_int(statement, 3, ocrUsed ? 1 : 0)
-            bindText(statement, 4, hash)
-            sqlite3_bind_double(statement, 5, Date().timeIntervalSince1970)
-            bindText(statement, 6, state)
+            bindText(statement, 2, name)
+            bindText(statement, 3, path)
+            if let body { bindText(statement, 4, body) } else { sqlite3_bind_null(statement, 4) }
+            sqlite3_bind_int(statement, 5, ocrUsed ? 1 : 0)
+            bindText(statement, 6, hash)
+            sqlite3_bind_double(statement, 7, Date().timeIntervalSince1970)
+            bindText(statement, 8, state)
             try stepDone(statement)
             sqlite3_reset(statement)
 
