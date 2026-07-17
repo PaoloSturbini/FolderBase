@@ -150,6 +150,15 @@ struct MainWindowView: View {
                   isDirectory.boolValue else { return }
             selectFolder(url)
         }
+        // Deep link folderbase://open?id=…: risolve l'identità nel percorso attuale (via bookmark,
+        // quindi valido anche se il file è stato spostato/rinominato) e apre il file nell'app
+        // predefinita del sistema. La finestra di FolderBase non viene portata in primo piano.
+        .onReceive(MenuBarBridge.shared.$requestedFileID) { id in
+            guard let id, !id.isEmpty else { return }
+            MenuBarBridge.shared.requestedFileID = nil
+            guard let url = metadataStore.resolveURL(forIdentity: id) else { return }
+            NSWorkspace.shared.open(url)
+        }
         .alert(
             L("update.available.title"),
             isPresented: Binding(

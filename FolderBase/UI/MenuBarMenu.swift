@@ -11,6 +11,11 @@ import SwiftUI
 final class MenuBarBridge: ObservableObject {
     static let shared = MenuBarBridge()
     @Published var requestedFolder: URL?
+    /// Identità (stabile) di un file da aprire, richiesta da un deep link `folderbase://open?id=…`.
+    /// `MainWindowView` la osserva, la risolve tramite lo store (bookmark → percorso attuale) e apre
+    /// il file nell'app predefinita. Come per `requestedFolder`, il publisher recapita il valore
+    /// anche a una finestra appena ricreata (apertura da app chiusa).
+    @Published var requestedFileID: String?
     private init() {}
 }
 

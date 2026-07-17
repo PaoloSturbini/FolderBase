@@ -1173,6 +1173,36 @@ final class MetadataStore: ObservableObject {
         )
     }
 
+    /// Ritrova la posizione ATTUALE di un file dato il suo `identity` stabile, usando il bookmark
+    /// memorizzato (segue spostamenti/rinomini, anche tra volumi) con fallback sull'ultimo percorso
+    /// noto. Usato dai deep link `folderbase://open?id=…` per aprire il file anche dopo che è stato
+    /// spostato. Ritorna nil se il file non è più trovabile o il volume non è montato.
+    func resolveURL(forIdentity identity: String) -> URL? {
+        guard let row = try? loadFileRow(identity: identity) else { return nil }
+        switch Self.resolve(row) {
+        case .present(let url), .relocated(let url):
+            return url
+        case .missing, .volumeUnavailable:
+            return nil
+        }
+    }
+
+    private func loadFileRow(identity: String) throws -> FileRow? {
+        var statement: OpaquePointer?
+        try prepare("SELECT identity, bookmark_data, last_known_path, name, is_directory, size FROM files WHERE identity = ? LIMIT 1", statement: &statement)
+        defer { sqlite3_finalize(statement) }
+        try bind([.text(identity)], to: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return FileRow(
+            identity: columnText(statement, 0),
+            bookmark: columnBlob(statement, 1),
+            lastKnownPath: columnText(statement, 2),
+            name: columnText(statement, 3),
+            isDirectory: sqlite3_column_int(statement, 4) != 0,
+            size: columnInt64Optional(statement, 5)
+        )
+    }
+
     private func loadFileRows() throws -> [FileRow] {
         var rows: [FileRow] = []
         var statement: OpaquePointer?

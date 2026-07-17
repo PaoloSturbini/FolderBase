@@ -1236,6 +1236,12 @@ struct FileTableView: View {
                 Label(L("ctx.copyMarkdownLink"), systemImage: "link")
             }
 
+            Button {
+                copyStableLinks([single])
+            } label: {
+                Label(L("ctx.copyStableLink"), systemImage: "link.badge.plus")
+            }
+
             Divider()
 
             Button(role: .destructive) {
@@ -1263,6 +1269,12 @@ struct FileTableView: View {
                 copyMarkdownLinks(targets)
             } label: {
                 Label(L("ctx.copyMarkdownLink"), systemImage: "link")
+            }
+
+            Button {
+                copyStableLinks(targets)
+            } label: {
+                Label(L("ctx.copyStableLink"), systemImage: "link.badge.plus")
             }
 
             Divider()
@@ -1654,6 +1666,30 @@ struct FileTableView: View {
                 .replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "]", with: "\\]")
             return "[\(escapedName)](\(item.url.absoluteString))"
+        }.joined(separator: "\n")
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(markdown, forType: .string)
+    }
+
+    /// Copia uno o più collegamenti Markdown "stabili" con schema `folderbase://open?id=<identità>`.
+    /// A differenza del link `file://`, questo punta al RECORD nel database (identità + bookmark):
+    /// cliccandolo in Obsidian/altre app, FolderBase risolve il percorso attuale e apre il file
+    /// nell'app predefinita anche se nel frattempo è stato spostato o rinominato.
+    /// Registra prima ogni file (così il bookmark esiste) e usa l'identità restituita.
+    private func copyStableLinks(_ items: [FileItem]) {
+        guard !items.isEmpty else { return }
+        let markdown = items.map { item -> String in
+            // Garantisce che il file sia registrato nella tabella `files` (bookmark presente),
+            // condizione necessaria perché il link sia risolvibile dopo uno spostamento.
+            let identity = (try? metadataStore.registerFile(at: item.url)) ?? item.identity
+            let escapedName = item.name
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "]", with: "\\]")
+            // Percent-encoding conservativo (solo alfanumerici): l'identità può contenere ":",
+            // "/", spazi (es. fallback "path:/…"); così l'URL resta valido e ridecodificabile.
+            let encodedID = identity.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? identity
+            return "[\(escapedName)](folderbase://open?id=\(encodedID))"
         }.joined(separator: "\n")
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()

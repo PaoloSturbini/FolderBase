@@ -423,6 +423,7 @@ enum LocalizedStrings {
         "ctx.revealFinder": ("Mostra nel Finder", "Reveal in Finder"),
         "ctx.openNewWindow": ("Apri come radice in una nuova finestra", "Open as Root in New Window"),
         "ctx.copyMarkdownLink": ("Copia link Markdown", "Copy Markdown Link"),
+        "ctx.copyStableLink": ("Copia link stabile", "Copy Stable Link"),
         "ctx.chatFile": ("Chatta con questo file", "Chat with this file"),
         "ctx.chatFolder": ("Chatta con questa cartella", "Chat with this folder"),
         "ctx.findSimilar": ("Trova simili a questo", "Find similar to this"),

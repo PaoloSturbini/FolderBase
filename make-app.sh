@@ -40,8 +40,8 @@ cat > "${APP}/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key>         <string>${BUNDLE_ID}</string>
     <key>CFBundleExecutable</key>         <string>${APP_NAME}</string>
     <key>CFBundlePackageType</key>        <string>APPL</string>
-    <key>CFBundleShortVersionString</key> <string>1.5.10</string>
-    <key>CFBundleVersion</key>            <string>17</string>
+    <key>CFBundleShortVersionString</key> <string>1.5.11</string>
+    <key>CFBundleVersion</key>            <string>18</string>
     <key>CFBundleIconFile</key>           <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>     <string>14.4</string>
     <key>NSHighResolutionCapable</key>    <true/>
@@ -50,6 +50,17 @@ cat > "${APP}/Contents/Info.plist" <<PLIST
     <dict>
         <key>NSAllowsLocalNetworking</key> <true/>
     </dict>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>       <string>${BUNDLE_ID}</string>
+            <key>CFBundleTypeRole</key>      <string>Viewer</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>folderbase</string>
+            </array>
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST

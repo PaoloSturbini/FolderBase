@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import Darwin
 import SwiftUI
 
@@ -38,9 +39,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ensureStandardFileDescriptors()
         NSApp.setActivationPolicy(.regular)
 
+        // Gestiamo NOI gli URL folderbase:// a livello di Apple Event, invece del `.onOpenURL`
+        // di SwiftUI: quest'ultimo apriva una FINESTRA nuova del WindowGroup per recapitare
+        // l'URL. Registrando il gestore qui (dopo l'avvio di SwiftUI) diventiamo l'handler
+        // effettivo e riusiamo l'istanza già aperta senza creare finestre intermedie.
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleGetURLEvent(_:withReplyEvent:)),
+            forEventClass: AEEventClass(kInternetEventClass),
+            andEventID: AEEventID(kAEGetURL)
+        )
+
         DispatchQueue.main.async {
             NSApp.windows.first?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    /// Riceve gli URL con schema personalizzato (folderbase://open?id=…). Estrae l'identità e la
+    /// inoltra al bridge; `MainWindowView` (istanza già aperta) la risolve e apre il file nell'app
+    /// predefinita. Nessuna finestra nuova viene creata.
+    @objc private func handleGetURLEvent(_ event: NSAppleEventDescriptor, withReplyEvent reply: NSAppleEventDescriptor) {
+        guard let string = event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.stringValue,
+              let url = URL(string: string),
+              url.scheme == "folderbase",
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let id = components.queryItems?.first(where: { $0.name == "id" })?.value,
+              !id.isEmpty else { return }
+        // Gli Apple Event sono recapitati sul main thread: possiamo assumere l'isolamento MainActor.
+        MainActor.assumeIsolated {
+            MenuBarBridge.shared.requestedFileID = id
         }
     }
 }
@@ -55,6 +83,8 @@ struct FolderBaseApp: App {
 
     var body: some Scene {
         // L'id "main" permette al menu della barra dei menu di ritrovare/riaprire la finestra.
+        // I deep link folderbase:// sono gestiti nell'AppDelegate (Apple Event), non con
+        // `.onOpenURL`, per non far creare a SwiftUI una finestra intermedia.
         WindowGroup(id: "main") {
             MainWindowView()
         }
