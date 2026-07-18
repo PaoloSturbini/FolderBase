@@ -228,7 +228,7 @@ La Configurazione è organizzata in sezioni:
 - **Template** — insiemi di colonne riutilizzabili (§4.5).
 - **Funzioni di A.I.** — interruttore generale, indicizzazione, motore embedding, chat ed esclusioni delle fonti (§5).
 - **Manutenzione** — riallineamento dei metadata e pulizia degli **orfani**, con opzione di pulizia automatica.
-- **Backup** — backup e ripristino del database (§8).
+- **Backup** — backup completo e ripristino di dati e configurazione (§8).
 - **Aiuto** — apre la guida d'uso nel browser, nella lingua selezionata.
 - **Info su FolderBase** — versione, controllo aggiornamenti su GitHub e link **Ko-fi** per sostenere lo sviluppo.
 
@@ -236,11 +236,19 @@ La Configurazione è organizzata in sezioni:
 
 ## 8. Backup e ripristino
 
-FolderBase salva i metadata (colonne e valori) nel database SQLite. Da **Configurazione → Backup** puoi:
+Da **Configurazione → Backup** puoi creare un unico file `.sqlite` che contiene lo stato completo di FolderBase:
 
-- Fare un **backup manuale** del database.
-- Pianificare **backup automatici** in una cartella di destinazione, con intervallo e numero di copie da mantenere (oltre il limite, i più vecchi vengono eliminati). I file di backup hanno data e ora nel nome.
-- **Ripristinare** uno stato precedente da un file di backup. Prima del ripristino, FolderBase salva automaticamente una copia di sicurezza del database corrente.
+- database dei metadata, colonne e cartelle gestite;
+- template e template attivo;
+- preferenze di aspetto, lingua, tabella e comportamento;
+- configurazione AI, modelli scelti ed esclusioni di file e cartelle;
+- impostazioni del backup automatico e avvio al login.
+
+Puoi fare un **backup manuale** oppure pianificare **backup automatici** in una cartella di destinazione, scegliendo intervallo e numero di copie da mantenere. I file hanno data e ora nel nome; oltre il limite configurato vengono eliminate soltanto le copie automatiche più vecchie.
+
+Il ripristino verifica prima l'integrità del file e crea una copia di sicurezza completa dello stato corrente. Se l'operazione non termina correttamente, FolderBase prova a ripristinare automaticamente quella copia. I vecchi backup contenenti solo il database restano utilizzabili: in quel caso vengono ripristinati i metadata e la configurazione attuale non viene modificata.
+
+L'indice dei contenuti AI non viene incluso perché può essere ricostruito con la reindicizzazione. Le chiavi API non vengono mai esportate in chiaro: restano protette nel Portachiavi di macOS. Anche il percorso di destinazione dei backup resta quello del Mac corrente, per evitare riferimenti a dischi o cartelle non disponibili su un altro computer.
 
 ---
 
@@ -272,7 +280,7 @@ FolderBase/
     │               FolderWatcher.swift        # watcher legacy su vnode (DispatchSource)
     │               RecentFoldersStore.swift   # cartelle recenti (UserDefaults)
     │               TemplateStore.swift        # persistenza dei template
-    │               BackupService.swift        # backup manuali/automatici e ripristino del DB
+    │               BackupService.swift        # backup completi manuali/automatici e ripristino
     │               LaunchAtLoginService.swift # avvio al login (SMAppService)
     │               HelpService.swift          # apertura della guida nel browser
     │               UpdateService.swift        # controllo aggiornamenti su GitHub

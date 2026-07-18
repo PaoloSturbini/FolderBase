@@ -109,6 +109,7 @@
       <li><a href="#files">File operations</a></li>
       <li><a href="#templates">Templates</a></li>
       <li><a href="#settings">Settings</a></li>
+      <li><a href="#backup">Backup and restore</a></li>
       <li><a href="#data">Where your data lives</a></li>
       <li><a href="#faq">FAQ</a></li>
     </ol>
@@ -214,9 +215,16 @@
       <li><strong>Templates</strong> — manage reusable sets of columns.</li>
       <li><strong>AI features</strong> — indexing, search/chat engines and <strong>Excluded AI sources</strong>. You can exclude individual files or folders and scan managed roots for hidden or generated-directory suggestions; suggestions are never applied automatically.</li>
       <li><strong>Maintenance</strong> — metadata realignment and cleanup.</li>
+      <li><strong>Backup</strong> — complete manual or scheduled copies and restore.</li>
       <li><strong>Help</strong> — this guide.</li>
       <li><strong>About FolderBase</strong> — version and support.</li>
     </ul>
+  </section>
+
+  <section id="backup">
+    <h2>Backup and restore</h2>
+    <p>Each new backup is a single <code>.sqlite</code> file containing the metadata database, managed folders, templates and preferences, including AI settings and exclusions. You can create one immediately or schedule automatic copies with a configurable interval and retention limit.</p>
+    <p>Before restoring, FolderBase checks file integrity and creates a complete safety copy of the current state. Older database-only backups remain compatible. The rebuildable AI index is not copied; API keys remain protected in Keychain.</p>
   </section>
 
   <section id="data">

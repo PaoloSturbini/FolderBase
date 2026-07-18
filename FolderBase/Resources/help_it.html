@@ -109,6 +109,7 @@
       <li><a href="#file">Operazioni sui file</a></li>
       <li><a href="#template">Template</a></li>
       <li><a href="#impostazioni">Impostazioni</a></li>
+      <li><a href="#backup">Backup e ripristino</a></li>
       <li><a href="#dati">Dove finiscono i dati</a></li>
       <li><a href="#faq">FAQ</a></li>
     </ol>
@@ -214,9 +215,16 @@
       <li><strong>Template</strong> — gestione degli insiemi di colonne riutilizzabili.</li>
       <li><strong>Funzioni di A.I.</strong> — indicizzazione, motori di ricerca/chat e <strong>Fonti escluse dall'AI</strong>. Puoi escludere singoli file o cartelle e analizzare le radici gestite per ricevere suggerimenti su directory nascoste o tecniche; nessun suggerimento viene applicato automaticamente.</li>
       <li><strong>Manutenzione</strong> — riallineamento e pulizia dei metadata.</li>
+      <li><strong>Backup</strong> — copie complete manuali o automatiche e ripristino.</li>
       <li><strong>Aiuto</strong> — questa guida.</li>
       <li><strong>Info su FolderBase</strong> — versione e supporto.</li>
     </ul>
+  </section>
+
+  <section id="backup">
+    <h2>Backup e ripristino</h2>
+    <p>Ogni nuovo backup è un singolo file <code>.sqlite</code> che contiene database dei metadata, cartelle gestite, template e preferenze, incluse impostazioni ed esclusioni AI. Puoi crearne uno subito o pianificare copie automatiche con intervallo e numero massimo configurabili.</p>
+    <p>Prima del ripristino FolderBase verifica l'integrità del file e crea una copia di sicurezza completa dello stato corrente. I vecchi backup contenenti solo il database restano compatibili. L'indice AI, ricostruibile, non viene copiato; le chiavi API restano protette nel Portachiavi.</p>
   </section>
 
   <section id="dati">

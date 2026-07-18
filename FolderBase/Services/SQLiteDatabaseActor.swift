@@ -231,24 +231,47 @@ actor SQLiteDatabaseActor {
         } while result == SQLITE_OK || result == SQLITE_BUSY || result == SQLITE_LOCKED
         let finish = sqlite3_backup_finish(handle)
         guard result == SQLITE_DONE, finish == SQLITE_OK else { throw prepareError() }
+
+        // La pagina 1 copiata dal database sorgente conserva la modalità WAL. Un backup
+        // autonomo però non ha (e non deve richiedere) file `-wal`/`-shm`: riportarlo a DELETE
+        // prima di chiudere la destinazione lo rende apribile anche in sola lettura e quando
+        // viene spostato su un altro volume o computer.
+        let portableResult = sqlite3_exec(destination, "PRAGMA journal_mode = DELETE", nil, nil, nil)
+        guard portableResult == SQLITE_OK else {
+            let message = destination.map { String(cString: sqlite3_errmsg($0)) } ?? "SQLite backup finalization failed"
+            throw DatabaseError.prepare(message)
+        }
     }
 
     nonisolated static func validateBackup(at url: URL, thorough: Bool) throws {
         var connection: OpaquePointer?
-        guard sqlite3_open_v2(url.path, &connection, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+        // `immutable=1` consente di verificare anche i backup storici creati quando il DB
+        // sorgente era in WAL: non cerca sidecar mancanti e non modifica mai il file scelto.
+        let readOnlyURI = url.absoluteString + (url.query == nil ? "?immutable=1" : "&immutable=1")
+        guard sqlite3_open_v2(readOnlyURI, &connection, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK else {
             sqlite3_close(connection)
             throw DatabaseError.invalidBackup("Il file non è un database SQLite valido")
         }
         defer { sqlite3_close(connection) }
         let check = thorough ? "PRAGMA integrity_check" : "PRAGMA quick_check"
         var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(connection, check, -1, &statement, nil) == SQLITE_OK,
-              sqlite3_step(statement) == SQLITE_ROW,
-              sqlite3_column_text(statement, 0).map({ String(cString: $0) }) == "ok" else {
+        let prepareResult = sqlite3_prepare_v2(connection, check, -1, &statement, nil)
+        guard prepareResult == SQLITE_OK else {
             sqlite3_finalize(statement)
-            throw DatabaseError.invalidBackup("Controllo di integrità non superato")
+            let message = connection.map { String(cString: sqlite3_errmsg($0)) } ?? "errore SQLite \(prepareResult)"
+            throw DatabaseError.invalidBackup("Impossibile avviare il controllo di integrità: \(message)")
         }
+        let stepResult = sqlite3_step(statement)
+        guard stepResult == SQLITE_ROW else {
+            sqlite3_finalize(statement)
+            let message = connection.map { String(cString: sqlite3_errmsg($0)) } ?? "errore SQLite \(stepResult)"
+            throw DatabaseError.invalidBackup("Controllo di integrità non superato: \(message)")
+        }
+        let checkResult = sqlite3_column_text(statement, 0).map { String(cString: $0) } ?? "risultato mancante"
         sqlite3_finalize(statement)
+        guard checkResult == "ok" else {
+            throw DatabaseError.invalidBackup("Controllo di integrità non superato: \(checkResult)")
+        }
         let required = ["files", "metadata_fields", "metadata_values"]
         for table in required {
             guard sqlite3_prepare_v2(connection, "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", -1, &statement, nil) == SQLITE_OK else {

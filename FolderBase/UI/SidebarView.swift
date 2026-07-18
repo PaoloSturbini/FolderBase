@@ -1418,9 +1418,21 @@ struct SidebarView: View {
                         .disabled(backupService.destinationPath.isEmpty)
                     }
 
+                    Text(L("backup.contentsNote"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
                     Text("\(L("backup.lastPrefix")) \(lastBackupText)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+
+                    if let automaticError = backupService.lastBackupError {
+                        Text("\(L("backup.errorPrefix")) \(automaticError)")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
 
                     if let backupMessage {
                         Text(backupMessage)

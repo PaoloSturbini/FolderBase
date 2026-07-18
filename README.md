@@ -67,8 +67,8 @@ FolderBase takes a different approach:
 
 ### System integration
 
-- Local SQLite database, backup and restore.
-- Optional scheduled backups and database maintenance.
+- Complete single-file backups of metadata, managed folders, templates and application preferences, with restore support for older database-only copies.
+- Optional scheduled backups with retention, integrity checks and automatic safety rollback before restore.
 - Launch at login and menu-bar access.
 - Light, dark and automatic appearance.
 - Adjustable text size and accent color.

@@ -43,6 +43,12 @@ final class LocalizationManager: ObservableObject {
             language = .italian
         }
     }
+
+    func reloadFromDefaults() {
+        let restored = UserDefaults.standard.string(forKey: Self.storageKey)
+            .flatMap(AppLanguage.init(rawValue:)) ?? .italian
+        language = restored
+    }
 }
 
 /// Traduce una chiave nella lingua corrente. Se la chiave non esiste, restituisce la
@@ -235,7 +241,7 @@ enum LocalizedStrings {
         "chat.msg.regenerate": ("Rigenera risposta", "Regenerate answer"),
         "chat.provider.pick": ("Motore di chat", "Chat engine"),
         "chat.provider.appleUnavailable": ("Su questo Mac (Apple): non disponibile per la chat", "On this Mac (Apple): not available for chat"),
-        "settings.backup.subtitle": ("Backup e ripristino del database", "Database backup and restore"),
+        "settings.backup.subtitle": ("Backup completo di dati e configurazione", "Complete data and settings backup"),
         "settings.help.subtitle": ("Guida all'uso di FolderBase", "FolderBase user guide"),
         "settings.support.subtitle": ("Versione, informazioni e supporto", "Version, information and support"),
 
@@ -287,12 +293,13 @@ enum LocalizedStrings {
         "maint.autoCard": ("Pulizia automatica", "Automatic cleanup"),
 
         // MARK: Backup
-        "backup.intro": ("FolderBase salva i metadata (colonne e valori) in un database SQLite. Da qui puoi farne un backup, pianificare backup automatici e ripristinare uno stato precedente.", "FolderBase stores metadata (columns and values) in a SQLite database. Here you can back it up, schedule automatic backups and restore a previous state."),
+        "backup.intro": ("Crea una copia completa dello stato di FolderBase: database dei metadata, cartelle gestite, template e preferenze. Puoi eseguire backup manuali, pianificarli e ripristinare uno stato precedente.", "Create a complete copy of FolderBase state: metadata database, managed folders, templates and preferences. You can run backups manually, schedule them and restore a previous state."),
         "backup.manualCard": ("Backup su richiesta", "On-demand backup"),
         "backup.destinationLabel": ("Cartella di destinazione", "Destination folder"),
         "backup.noDestination": ("Nessuna cartella scelta", "No folder chosen"),
         "backup.chooseFolder": ("Scegli cartella…", "Choose folder…"),
         "backup.runNow": ("Esegui backup ora", "Back up now"),
+        "backup.contentsNote": ("Include metadata, template, cartelle, aspetto, lingua, impostazioni AI ed esclusioni. L’indice AI è ricostruibile e non viene copiato; le chiavi API restano protette nel Portachiavi.", "Includes metadata, templates, folders, appearance, language, AI settings and exclusions. The rebuildable AI index is not copied; API keys remain protected in Keychain."),
         "backup.lastPrefix": ("Ultimo backup:", "Last backup:"),
         "backup.never": ("mai", "never"),
         "backup.donePrefix": ("Backup creato:", "Backup created:"),
@@ -303,16 +310,19 @@ enum LocalizedStrings {
         "backup.keepLabel": ("Backup da mantenere", "Backups to keep"),
         "backup.autoNote": ("I backup automatici vengono salvati nella cartella di destinazione con data e ora nel nome. Oltre il numero da mantenere, i più vecchi vengono eliminati.", "Automatic backups are saved to the destination folder with date and time in the name. Beyond the number to keep, the oldest ones are deleted."),
         "backup.restoreCard": ("Ripristino", "Restore"),
-        "backup.restoreIntro": ("Sostituisci il database attuale con quello di un file di backup. Prima del ripristino viene salvata automaticamente una copia di sicurezza del database corrente.", "Replace the current database with one from a backup file. Before restoring, a safety copy of the current database is automatically saved."),
+        "backup.restoreIntro": ("Ripristina database e configurazione da un backup completo. I vecchi backup SQLite restano compatibili e ripristinano solo i metadata. Prima dell’operazione viene creata una copia di sicurezza completa dello stato corrente.", "Restore the database and settings from a complete backup. Older SQLite backups remain compatible and restore metadata only. A complete safety copy of the current state is created first."),
         "backup.restoreButton": ("Ripristina da file…", "Restore from file…"),
         "backup.restore.confirmTitle": ("Confermi il ripristino?", "Confirm restore?"),
         "backup.restore.confirmButton": ("Ripristina", "Restore"),
-        "backup.restore.confirmMessage": ("Il database attuale verrà sostituito con quello selezionato. Una copia di sicurezza dello stato corrente viene salvata automaticamente. Continuare?", "The current database will be replaced with the selected one. A safety copy of the current state is saved automatically. Continue?"),
+        "backup.restore.confirmMessage": ("Database e configurazione verranno sostituiti con lo stato selezionato. Una copia di sicurezza completa dello stato corrente viene salvata automaticamente. Continuare?", "The database and settings will be replaced with the selected state. A complete safety copy of the current state is saved automatically. Continue?"),
         "backup.restore.done": ("Ripristino completato.", "Restore completed."),
         "backup.errorPrefix": ("Errore:", "Error:"),
         "backup.error.notReady": ("Database non pronto.", "Database not ready."),
         "backup.error.noDestination": ("Scegli prima una cartella di destinazione.", "Choose a destination folder first."),
         "backup.error.destinationMissing": ("La cartella di destinazione non esiste più.", "The destination folder no longer exists."),
+        "backup.error.invalidConfiguration": ("Il backup contiene una configurazione non valida o danneggiata.", "The backup contains invalid or damaged settings."),
+        "backup.error.unsupportedVersion": ("Il backup è stato creato da una versione più recente di FolderBase.", "The backup was created by a newer version of FolderBase."),
+        "backup.error.archive": ("Impossibile leggere o scrivere la configurazione del backup:", "Could not read or write the backup settings:"),
         "backup.panel.chooseFolderPrompt": ("Scegli", "Choose"),
         "backup.panel.restorePrompt": ("Ripristina", "Restore"),
 

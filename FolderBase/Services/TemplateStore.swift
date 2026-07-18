@@ -13,15 +13,18 @@ final class TemplateStore: ObservableObject {
     private let defaults: UserDefaults
     private static let activeTemplateKey = "activeMetadataTemplateID"
 
-    init(fileManager: FileManager = .default, defaults: UserDefaults = .standard) {
+    init(
+        fileManager: FileManager = .default,
+        defaults: UserDefaults = .standard,
+        supportURLOverride: URL? = nil
+    ) {
         self.defaults = defaults
         self.activeTemplateID = defaults.string(forKey: Self.activeTemplateKey)
-        let supportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let supportURL = supportURLOverride ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("FolderBase", isDirectory: true)
         try? fileManager.createDirectory(at: supportURL, withIntermediateDirectories: true)
         self.fileURL = supportURL.appendingPathComponent("templates.json")
-        load()
-        if activeTemplateID != nil, activeTemplate == nil { activeTemplateID = nil }
+        reloadFromDisk()
     }
 
     var activeTemplate: MetadataTemplate? {
@@ -49,10 +52,15 @@ final class TemplateStore: ObservableObject {
         save()
     }
 
-    private func load() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let decoded = try? JSONDecoder().decode([MetadataTemplate].self, from: data) else { return }
-        templates = decoded
+    func reloadFromDisk() {
+        activeTemplateID = defaults.string(forKey: Self.activeTemplateKey)
+        if let data = try? Data(contentsOf: fileURL),
+           let decoded = try? JSONDecoder().decode([MetadataTemplate].self, from: data) {
+            templates = decoded
+        } else {
+            templates = []
+        }
+        if activeTemplateID != nil, activeTemplate == nil { activeTemplateID = nil }
     }
 
     private func save() {

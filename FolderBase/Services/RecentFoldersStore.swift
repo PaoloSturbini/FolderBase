@@ -38,6 +38,10 @@ final class RecentFoldersStore: ObservableObject {
         folderURLs = paths.map { URL(fileURLWithPath: $0) }
     }
 
+    func reloadFromDefaults() {
+        load()
+    }
+
     private func save() {
         defaults.set(folderURLs.map(\.path), forKey: key)
     }

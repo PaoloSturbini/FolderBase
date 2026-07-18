@@ -131,7 +131,11 @@ struct MainWindowView: View {
             scheduleManagedTemplateVerification()
             performInitialSync()
             checkForUpdatesIfEnabled()
-            backupService.configure(store: metadataStore)
+            backupService.configure(
+                store: metadataStore,
+                templateStore: templateStore,
+                recentFoldersStore: recentFoldersStore
+            )
         }
         .onChange(of: showHiddenFiles) { _, _ in
             reloadCurrentFolder()
