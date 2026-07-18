@@ -14,6 +14,10 @@
 
 FolderBase enriches the real files and folders already stored on your Mac with custom metadata, Kanban views, OCR, hybrid search and optional AI document chat. Its metadata layer works without importing your documents into a proprietary library or modifying their contents.
 
+<p align="center">
+  <img src="marketing-assets/folderbase-demo.gif" alt="FolderBase table, metadata status picker and Kanban workflow" width="1000">
+</p>
+
 The interface is available in **English and Italian**. FolderBase is MIT licensed and can be used, inspected, forked and built freely.
 
 **[Visit the website and watch the demo](https://folderbase.pst.my)** · **[Download the latest release](https://github.com/PaoloSturbini/FolderBase/releases/latest)**
