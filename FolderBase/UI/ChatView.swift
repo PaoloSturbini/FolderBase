@@ -239,7 +239,14 @@ struct ChatView: View {
     @ViewBuilder
     private func messageRow(_ message: ChatService.Message) -> some View {
         VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 6) {
-            Text(message.text.isEmpty && message.role == .assistant ? "…" : message.text)
+            Group {
+                let displayedText = message.text.isEmpty && message.role == .assistant ? "…" : message.text
+                if message.role == .assistant {
+                    MarkdownMessageView(markdown: displayedText)
+                } else {
+                    Text(verbatim: displayedText)
+                }
+            }
                 .textSelection(.enabled)
                 .padding(10)
                 .background(
