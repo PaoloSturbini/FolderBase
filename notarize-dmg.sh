@@ -15,7 +15,10 @@ cd "$(dirname "$0")"
 APP_NAME="FolderBase"
 VERSION="1.5.15"
 NOTARY_PROFILE="${NOTARY_PROFILE:-folderbase-notary}"
-DMG="dist/${APP_NAME}-${VERSION}.dmg"
+DMG="${DIST_DIR:-dist}/${APP_NAME}-${VERSION}.dmg"
+if [ ! -f "${DMG}" ] && [ -f "/tmp/folderbase-dist/${APP_NAME}-${VERSION}.dmg" ]; then
+    DMG="/tmp/folderbase-dist/${APP_NAME}-${VERSION}.dmg"
+fi
 
 if [ ! -f "${DMG}" ]; then
     echo "Errore: ${DMG} non trovato. Esegui prima ./make-dmg.sh."

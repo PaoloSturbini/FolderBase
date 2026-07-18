@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Compila FolderBase in RELEASE, assembla il bundle .app e lo impacchetta in un
 # .dmg distribuibile (con collegamento ad /Applications per il drag&drop classico).
-# Output:  dist/FolderBase-<versione>.dmg
+# Output: dist/FolderBase-<versione>.dmg; se macOS blocca `dist/` per l'attributo
+# com.apple.provenance, usa automaticamente /tmp/folderbase-dist.
 #
 # Uso:  ./make-dmg.sh
 set -euo pipefail
@@ -13,7 +14,7 @@ BUILD_PATH="/tmp/folderbase-run"
 ICON_PNG="AppIcon.png"
 BUNDLE_ID="com.paolosturbini.folderbase"
 VERSION="1.5.15"
-DIST_DIR="dist"
+DIST_DIR="${DIST_DIR:-dist}"
 SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: PAOLO ANTONIO STURBIN (F9SXX7XX48)}"
 
 echo ">> Compilo in ${CONFIG}..."
@@ -102,7 +103,18 @@ codesign --verify --deep --strict --verbose=2 "${APP}"
 # --- Layout del DMG: app + collegamento ad /Applications ---
 ln -s /Applications "${STAGE}/Applications"
 
+# Su alcune cartelle dentro Documents macOS rende `dist/` non scrivibile anche per il
+# proprietario a causa di com.apple.provenance. Verifica davvero la creazione di un file e
+# usa una destinazione temporanea stabile come fallback, così build e release non si fermano.
 mkdir -p "${DIST_DIR}"
+WRITE_PROBE="${DIST_DIR}/.folderbase-write-probe"
+if ! ( : > "${WRITE_PROBE}" ) 2>/dev/null; then
+    DIST_DIR="/tmp/folderbase-dist"
+    mkdir -p "${DIST_DIR}"
+    echo "Attenzione: dist/ non è scrivibile; salvo il DMG in ${DIST_DIR}."
+else
+    rm -f "${WRITE_PROBE}"
+fi
 DMG="${DIST_DIR}/${APP_NAME}-${VERSION}.dmg"
 rm -f "${DMG}"
 DMG_WORK="$(mktemp -d)"
