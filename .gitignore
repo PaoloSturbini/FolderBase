@@ -9,6 +9,7 @@ DerivedData/
 *.xccheckout
 *.xcscmblueprint
 dist/
+downloads/
 COME_TROVARE_E_USARE.md
 
 # Artefatti sito/landing e zip spuri

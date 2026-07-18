@@ -21,6 +21,7 @@ final class TableDataPipelineTests: XCTestCase {
 
         XCTAssertEqual(built.index["status"]?["Beta"], "Urgente")
         XCTAssertTrue(built.searchText["Beta"]?.contains("urgente") == true)
+        XCTAssertEqual(built.sourceIDs, Set(["Alpha", "Beta"]))
     }
 
     func testVisibleItemsFiltersAndSortsSnapshot() throws {
@@ -35,5 +36,26 @@ final class TableDataPipelineTests: XCTestCase {
         ))
 
         XCTAssertEqual(visible.map(\.name), ["Charlie", "Bravo", "Alpha"])
+    }
+
+    func testMetadataLoadForNewFolderRequiresFullRebuild() {
+        let previousFolderIDs: Set<String> = ["old-a", "old-b"]
+        let newFolderIDs: Set<String> = ["new-a", "new-b"]
+
+        XCTAssertTrue(TableDataPipeline.metadataUpdateNeedsFullRebuild(
+            changedIDs: newFolderIDs,
+            sourceIDs: newFolderIDs,
+            cachedSourceIDs: previousFolderIDs
+        ))
+        XCTAssertFalse(TableDataPipeline.metadataUpdateNeedsFullRebuild(
+            changedIDs: ["old-a"],
+            sourceIDs: newFolderIDs,
+            cachedSourceIDs: previousFolderIDs
+        ))
+        XCTAssertFalse(TableDataPipeline.metadataUpdateNeedsFullRebuild(
+            changedIDs: ["new-a"],
+            sourceIDs: newFolderIDs,
+            cachedSourceIDs: newFolderIDs
+        ))
     }
 }

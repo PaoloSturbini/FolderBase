@@ -40,8 +40,9 @@ FolderBase takes a different approach:
 - Reusable column templates that reconcile existing subtree metadata and merge configured Select/Kanban options without losing values.
 - Persistent inherited column order and visibility, with parent-folder configuration taking precedence on conflicts.
 - Faster folder navigation with stale-while-revalidate snapshots, immediate FSEvents refresh and background SQLite reconciliation.
-- Progressive loading for very large folders, incremental table updates, precomputed sort keys and adaptive search debounce.
+- Progressive loading above 300 entries, incremental table updates, precomputed sort keys and adaptive search debounce.
 - Cancellable background table processing: metadata indexes, filtering and sorting no longer block the main UI thread, and stale results are discarded when the folder or query changes.
+- A weighted LRU snapshot cache limits both folder count and total retained rows, preventing large directories from causing unbounded memory growth.
 - Multi-root sidebar trees with persistent manual root ordering and exact selected-subfolder highlighting.
 - Finder-style internal drag and drop: drag files or folders from the table onto a folder row to move them into that folder; hold Option to copy.
 - Native table and Kanban board views, with lazy card rendering and single-pass grouping for large boards.
@@ -57,6 +58,7 @@ FolderBase takes a different approach:
 - Hybrid search combining exact full-text matches and semantic similarity.
 - RAG document chat with cited sources and selectable scope.
 - Folder-chat scopes are collected recursively in the background before the conversation opens, keeping navigation responsive on large trees.
+- Per-file and per-folder AI source exclusions, plus opt-in suggestions for hidden and generated directories; excluded content is filtered from indexing, search and chat even when it was indexed previously.
 - Interchangeable providers:
   - Apple on-device embeddings;
   - Ollama for local embeddings and chat;

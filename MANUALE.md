@@ -54,10 +54,11 @@ In alternativa puoi aprire `Package.swift` con Xcode e premere ▶︎.
 
 ## 3. Dove vengono salvati i dati
 
-Tutti i metadata, l'indice dei file e — se attive le funzioni AI — testo estratto ed embedding stanno in un singolo database SQLite locale:
+FolderBase separa i dati operativi dall'indice AI derivato in due database SQLite locali:
 
 ```
 ~/Library/Application Support/FolderBase/folderbase.sqlite
+~/Library/Application Support/FolderBase/folderbase-index.sqlite
 ```
 
 Punti importanti:
@@ -65,7 +66,8 @@ Punti importanti:
 - Le **cartelle osservate non vengono mai modificate**: FolderBase non scrive file nascosti dentro le tue directory.
 - Per ripartire "puliti" basta cancellare quel file: verrà ricreato vuoto al successivo avvio.
 - Se esiste un vecchio `metadata.json` (formato legacy), viene importato **una sola volta** in SQLite quando il database è ancora vuoto, poi non è più usato.
-- I contenuti indicizzati per l'AI e gli embedding restano **in locale** nello stesso database. Solo se scegli un motore *cloud* (OpenAI) alcuni testi vengono inviati al provider (vedi §6).
+- Colonne, valori e identità dei file vivono in `folderbase.sqlite`; testo estratto, indice full-text, chunk ed embedding vivono in `folderbase-index.sqlite`, che può essere rigenerato.
+- I contenuti indicizzati per l'AI e gli embedding restano **in locale**. Solo se scegli un motore *cloud* (OpenAI) alcuni testi vengono inviati al provider (vedi §6).
 
 ---
 
@@ -86,7 +88,7 @@ Punti importanti:
 
 La tabella si **aggiorna da sola** quando aggiungi, rimuovi o rinomini file nella cartella corrente dall'esterno (Finder, terminale…), grazie al watcher basato su **FSEvents**.
 
-L'aggiornamento visibile è immediato e non attende la riconciliazione del database. Nelle cartelle molto grandi FolderBase mostra prima nomi e cartelle, quindi completa in background dimensione, data e tipo dei file mantenendo stabile selezione e metadata.
+L'aggiornamento visibile è immediato e non attende la riconciliazione del database. Nelle cartelle con più di 300 elementi FolderBase mostra prima nomi e cartelle, quindi completa in background dimensione, data e tipo dei file mantenendo stabile selezione e metadata.
 
 Anche la preparazione della tabella avviene in background: costruzione degli indici metadata, filtri e ordinamenti sono cancellabili e i risultati appartenenti a una cartella o ricerca ormai superata vengono ignorati. La raccolta ricorsiva dei documenti per la chat di una cartella non blocca più la navigazione e la chat viene aperta solo quando il suo ambito è pronto.
 
@@ -195,6 +197,15 @@ La chat risponde alle domande sui tuoi documenti indicizzati basandosi sui conte
 - **Cross-lingua**: il retrieval funziona su più spazi (lingue/motori diversi).
 - Il **modello di chat** è a parte rispetto all'embedding: scegli Ollama (locale) oppure OpenAI (cloud). Su questo Mac non è integrato un modello di chat. Puoi regolare quante fonti recuperare per domanda e testare il modello con **Prova chat**.
 
+### 5.4 Escludere file e cartelle dalle fonti AI
+
+In **Configurazione → Funzioni di A.I. → Fonti escluse dall'AI** puoi indicare singoli file o intere cartelle che non devono essere usati dall'indicizzazione, dalla ricerca per contenuto, da “Trova simili” o dalla chat.
+
+- **Aggiungi file** e **Aggiungi cartelle** permettono una scelta esplicita; ogni voce può essere rimossa separatamente.
+- **Analizza le cartelle gestite** propone, senza applicarle automaticamente, directory nascoste o tecniche come `.git`, `.obsidian`, `node_modules`, `build`, cache e ambienti virtuali.
+- Le cartelle nascoste restano escluse automaticamente dalla normale indicizzazione.
+- L'esclusione ha effetto immediato anche sui contenuti già indicizzati: FolderBase li filtra prima di scegliere le fonti della risposta.
+
 ---
 
 ## 6. Privacy delle funzioni AI
@@ -215,7 +226,7 @@ La Configurazione è organizzata in sezioni:
 - **Avvio** — **apertura automatica al login** del Mac (via `SMAppService`).
 - **Lingua** — interfaccia in **Italiano / English** (cambio immediato).
 - **Template** — insiemi di colonne riutilizzabili (§4.5).
-- **Funzioni di A.I.** — interruttore generale, indicizzazione, motore embedding e chat (§5).
+- **Funzioni di A.I.** — interruttore generale, indicizzazione, motore embedding, chat ed esclusioni delle fonti (§5).
 - **Manutenzione** — riallineamento dei metadata e pulizia degli **orfani**, con opzione di pulizia automatica.
 - **Backup** — backup e ripristino del database (§8).
 - **Aiuto** — apre la guida d'uso nel browser, nella lingua selezionata.

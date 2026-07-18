@@ -212,6 +212,7 @@
       <li><strong>Appearance</strong> — automatic / light / dark theme and font size.</li>
       <li><strong>Language</strong> — Italian or English, applied immediately.</li>
       <li><strong>Templates</strong> — manage reusable sets of columns.</li>
+      <li><strong>AI features</strong> — indexing, search/chat engines and <strong>Excluded AI sources</strong>. You can exclude individual files or folders and scan managed roots for hidden or generated-directory suggestions; suggestions are never applied automatically.</li>
       <li><strong>Maintenance</strong> — metadata realignment and cleanup.</li>
       <li><strong>Help</strong> — this guide.</li>
       <li><strong>About FolderBase</strong> — version and support.</li>
@@ -220,8 +221,8 @@
 
   <section id="data">
     <h2>Where your data lives</h2>
-    <p>All metadata and the file index live in a single local SQLite database:</p>
-    <p><code>~/Library/Application Support/FolderBase/folderbase.sqlite</code></p>
+    <p>Operational metadata and the derived AI index live in two separate local SQLite databases:</p>
+    <p><code>~/Library/Application Support/FolderBase/folderbase.sqlite</code><br><code>~/Library/Application Support/FolderBase/folderbase-index.sqlite</code></p>
     <ul>
       <li>The <strong>watched folders are never modified</strong>: FolderBase writes no hidden files inside your directories.</li>
       <li>To start fresh, just delete that file: it will be recreated empty on the next launch.</li>

@@ -203,8 +203,12 @@ struct SidebarView: View {
     @AppStorage(AIProviderSettings.Keys.ollamaChatModel) private var aiOllamaChatModel = AIProviderSettings.defaultOllamaChatModel
     @AppStorage(AIProviderSettings.Keys.openAIChatModel) private var aiOpenAIChatModel = AIProviderSettings.defaultOpenAIChatModel
     @AppStorage(AIProviderSettings.Keys.chatContextChunks) private var aiChatContextChunks = AIProviderSettings.defaultChatContextChunks
+    @AppStorage(AIProviderSettings.Keys.excludedSourcePaths) private var aiExcludedSourcePathsData = Data()
     @State private var chatTesting = false
     @State private var chatTestMessage: String?
+    @State private var aiExclusionSuggestions: [AIExclusionSuggestion] = []
+    @State private var aiExclusionScanning = false
+    @State private var aiExclusionScanToken = UUID()
     /// Altezza del pannello note in fondo alla sidebar, regolabile dall'utente e persistita.
     @AppStorage(AppAccentColor.storageKey) private var appAccentRaw = AppAccentColor.blue.rawValue
     @AppStorage(AppAccentColor.customHexKey) private var appAccentCustomHex = ""
@@ -975,6 +979,108 @@ struct SidebarView: View {
             } label: {
                 settingsCardLabel(L("ai.chat.card"), systemImage: "bubble.left.and.bubble.right")
             }
+
+            GroupBox {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(L("ai.exclusions.intro"))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(spacing: 10) {
+                        Button {
+                            chooseAIExclusions(directories: false)
+                        } label: {
+                            Label(L("ai.exclusions.addFiles"), systemImage: "doc.badge.plus")
+                        }
+                        Button {
+                            chooseAIExclusions(directories: true)
+                        } label: {
+                            Label(L("ai.exclusions.addFolders"), systemImage: "folder.badge.plus")
+                        }
+                    }
+
+                    if aiExcludedSourcePaths.isEmpty {
+                        Text(L("ai.exclusions.empty"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(aiExcludedSourcePaths, id: \.self) { path in
+                                aiExclusionRow(path: path)
+                                if path != aiExcludedSourcePaths.last { Divider() }
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                    }
+
+                    Divider()
+
+                    HStack(spacing: 10) {
+                        Button {
+                            analyzeAIExclusionSuggestions()
+                        } label: {
+                            Label(L("ai.exclusions.analyze"), systemImage: "wand.and.stars")
+                        }
+                        .disabled(aiExclusionScanning || managedFolderURLs.isEmpty)
+
+                        if aiExclusionScanning {
+                            ProgressView().controlSize(.small)
+                            Text(L("ai.exclusions.analyzing"))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer()
+
+                        if !aiExclusionSuggestions.isEmpty {
+                            Button(L("ai.exclusions.addAllSuggestions")) {
+                                addAIExclusionPaths(aiExclusionSuggestions.map(\.path))
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                    }
+
+                    Text(L("ai.exclusions.suggestionNote"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if !aiExclusionSuggestions.isEmpty {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(aiExclusionSuggestions) { suggestion in
+                                HStack(spacing: 8) {
+                                    Image(systemName: "folder.fill")
+                                        .foregroundStyle(.secondary)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(URL(fileURLWithPath: suggestion.path).lastPathComponent)
+                                            .lineLimit(1)
+                                        Text(suggestion.reason + " · " + suggestion.path)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                    }
+                                    Spacer()
+                                    Button(L("common.add")) {
+                                        addAIExclusionPaths([suggestion.path])
+                                    }
+                                    .buttonStyle(.borderless)
+                                }
+                                .padding(.vertical, 7)
+                                if suggestion.id != aiExclusionSuggestions.last?.id { Divider() }
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+            } label: {
+                settingsCardLabel(L("ai.exclusions.card"), systemImage: "eye.slash")
+            }
             } // if aiEnabled
         }
         .task(id: selectedFolderURL?.path ?? "") {
@@ -1003,6 +1109,77 @@ struct SidebarView: View {
         KeychainStore.save(openAIKeyInput, account: AIProviderSettings.openAIKeyAccount)
         hasOpenAIKey = !openAIKeyInput.isEmpty
         openAIKeyInput = ""
+    }
+
+    private var aiExcludedSourcePaths: [String] {
+        AIExclusionPolicy.decode(aiExcludedSourcePathsData)
+    }
+
+    private func aiExclusionRow(path: String) -> some View {
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+        return HStack(spacing: 8) {
+            Image(systemName: isDirectory.boolValue ? "folder.fill" : "doc.fill")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(URL(fileURLWithPath: path).lastPathComponent)
+                    .lineLimit(1)
+                Text(exists ? path : "\(L("ai.exclusions.missing")) · \(path)")
+                    .font(.caption2)
+                    .foregroundStyle(exists ? Color.secondary : Color.orange)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+            Button {
+                removeAIExclusionPath(path)
+            } label: {
+                Image(systemName: "minus.circle")
+            }
+            .buttonStyle(.borderless)
+            .help(L("ai.exclusions.remove"))
+        }
+        .padding(.vertical, 7)
+    }
+
+    private func chooseAIExclusions(directories: Bool) {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = directories
+        panel.canChooseFiles = !directories
+        panel.canCreateDirectories = false
+        panel.prompt = L("common.add")
+        guard panel.runModal() == .OK else { return }
+        addAIExclusionPaths(panel.urls.map(\.path))
+    }
+
+    private func addAIExclusionPaths(_ paths: [String]) {
+        aiExcludedSourcePathsData = AIExclusionPolicy.encode(aiExcludedSourcePaths + paths)
+        let excluded = Set(aiExcludedSourcePaths)
+        aiExclusionSuggestions.removeAll { excluded.contains($0.path) }
+        Task { await recomputeStatus() }
+    }
+
+    private func removeAIExclusionPath(_ path: String) {
+        aiExcludedSourcePathsData = AIExclusionPolicy.encode(aiExcludedSourcePaths.filter { $0 != path })
+        Task { await recomputeStatus() }
+    }
+
+    private func analyzeAIExclusionSuggestions() {
+        let roots = managedFolderURLs
+        let excluded = aiExcludedSourcePaths
+        let token = UUID()
+        aiExclusionScanToken = token
+        aiExclusionScanning = true
+        aiExclusionSuggestions = []
+        Task {
+            let suggestions = await Task.detached(priority: .utility) {
+                AIExclusionPolicy.suggestions(under: roots, excluding: excluded)
+            }.value
+            guard aiExclusionScanToken == token else { return }
+            aiExclusionSuggestions = suggestions
+            aiExclusionScanning = false
+        }
     }
 
     private func testEngine() {

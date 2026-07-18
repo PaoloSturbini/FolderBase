@@ -140,6 +140,7 @@ final class ChatService: ObservableObject {
         let assistantID = assistant.id
         let chunkCount = AIProviderSettings.chatContextChunks
         let scope = restrictedTo ?? self.candidates
+        let excludedPaths = AIExclusionPolicy.excludedPaths()
 
         task = Task { [weak self] in
             guard let self else { return }
@@ -160,8 +161,15 @@ final class ChatService: ObservableObject {
             // riconoscere versioni dello stesso documento e rilevare ambiguità.
             // Non si fallisce se manca l'embedding: il recupero per parole chiave è comunque possibile.
             // La scansione vettoriale + scoring girano fuori dal main thread (vedi semanticChunksAsync).
-            let poolLimit = max(chunkCount * 4, 24)
-            let pool = await store.semanticChunksAsync(query: question, queries: queries, candidates: scope, limit: poolLimit)
+            // Recupera un margine più ampio: le esclusioni sono applicate anche ai contenuti già
+            // presenti nell'indice, quindi alcuni risultati iniziali possono essere scartati.
+            let poolLimit = max(chunkCount * 8, 48)
+            let retrieved = await store.semanticChunksAsync(
+                query: question, queries: queries, candidates: scope, limit: poolLimit
+            )
+            let pool = retrieved.filter {
+                !AIExclusionPolicy.isExcluded(path: $0.path, excludedPaths: excludedPaths)
+            }
             guard !pool.isEmpty else {
                 self.fail(L("chat.noContext"), id: assistantID)
                 return

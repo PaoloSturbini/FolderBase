@@ -64,7 +64,8 @@ final class IndexingService: ObservableObject {
     /// Indicizza i file (non le cartelle) della lista fornita — es. la cartella corrente (flat).
     func index(items: [FileItem], store: MetadataStore) {
         guard !isIndexing else { return }
-        let files = items.filter { !$0.isFolder }
+        let exclusions = AIExclusionPolicy.excludedPaths()
+        let files = items.filter { !$0.isFolder && !AIExclusionPolicy.isExcluded($0.url, excludedPaths: exclusions) }
         guard !files.isEmpty else { return }
 
         isIndexing = true
@@ -351,23 +352,33 @@ final class IndexingService: ObservableObject {
     ///   (vedi `TextExtractor.isIndexableCandidate`). Usato dalla pipeline di indicizzazione per non
     ///   accodare né contare file inutili (video, archivi, binari…). La ricerca per nome lascia il
     ///   default `false`, così continua a trovare TUTTI i file del sottoalbero.
-    nonisolated static func indexableURLs(under root: URL, limit: Int, contentOnly: Bool = false) -> [URL] {
-        guard !FileSystemPolicy.isInTrash(root) else { return [] }
+    nonisolated static func indexableURLs(
+        under root: URL,
+        limit: Int,
+        contentOnly: Bool = false,
+        excludedPaths: [String] = AIExclusionPolicy.excludedPaths()
+    ) -> [URL] {
+        guard !FileSystemPolicy.isInTrash(root),
+              !AIExclusionPolicy.isExcluded(root, excludedPaths: excludedPaths) else { return [] }
         let fileManager = FileManager.default
         guard let enumerator = fileManager.enumerator(
             at: root,
-            includingPropertiesForKeys: [.isRegularFileKey, .isPackageKey],
+            includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .isPackageKey],
             options: [.skipsHiddenFiles],
             errorHandler: nil
         ) else { return [] }
 
         var urls: [URL] = []
         for case let url as URL in enumerator {
+            if AIExclusionPolicy.isExcluded(url, excludedPaths: excludedPaths) {
+                enumerator.skipDescendants()
+                continue
+            }
             if FileSystemPolicy.isInTrash(url) {
                 enumerator.skipDescendants()
                 continue
             }
-            let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isPackageKey])
+            let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey, .isPackageKey])
             if values?.isPackage == true {
                 enumerator.skipDescendants()
                 if indexablePackageExtensions.contains(url.pathExtension.lowercased()) {
@@ -381,8 +392,15 @@ final class IndexingService: ObservableObject {
         return urls
     }
 
-    nonisolated static func fileItems(under root: URL, limit: Int, contentOnly: Bool = false) -> [FileItem] {
-        indexableURLs(under: root, limit: limit, contentOnly: contentOnly).compactMap { fileItem(for: $0) }
+    nonisolated static func fileItems(
+        under root: URL,
+        limit: Int,
+        contentOnly: Bool = false,
+        excludedPaths: [String] = AIExclusionPolicy.excludedPaths()
+    ) -> [FileItem] {
+        indexableURLs(
+            under: root, limit: limit, contentOnly: contentOnly, excludedPaths: excludedPaths
+        ).compactMap { fileItem(for: $0) }
     }
 
     nonisolated static func fileItem(for url: URL) -> FileItem? {
@@ -406,8 +424,15 @@ final class IndexingService: ObservableObject {
     /// (identità, hash) per ogni file del sottoalbero: usato per calcolare lo stato di copertura.
     /// `contentOnly` allinea il denominatore della copertura all'insieme che l'indicizzazione
     /// processa davvero (solo file con contenuto estraibile).
-    nonisolated static func fingerprints(under root: URL, limit: Int, contentOnly: Bool = false) -> [(identity: String, hash: String)] {
-        indexableURLs(under: root, limit: limit, contentOnly: contentOnly).compactMap { url in
+    nonisolated static func fingerprints(
+        under root: URL,
+        limit: Int,
+        contentOnly: Bool = false,
+        excludedPaths: [String] = AIExclusionPolicy.excludedPaths()
+    ) -> [(identity: String, hash: String)] {
+        indexableURLs(
+            under: root, limit: limit, contentOnly: contentOnly, excludedPaths: excludedPaths
+        ).compactMap { url in
             guard let hash = changeHash(for: url),
                   let values = try? url.resourceValues(forKeys: [.fileResourceIdentifierKey, .volumeIdentifierKey]) else { return nil }
             return (MetadataStore.identity(for: url, resourceValues: values), hash)

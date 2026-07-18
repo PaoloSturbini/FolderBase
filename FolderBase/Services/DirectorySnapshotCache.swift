@@ -23,8 +23,15 @@ final class DirectorySnapshotCache: ObservableObject {
     private var staleKeys: Set<String> = []
     private var clock: UInt64 = 0
     private let capacity: Int
+    private let itemCapacity: Int
+    private var cachedItemCount = 0
 
-    init(capacity: Int = 120) { self.capacity = max(5, capacity) }
+    /// Il limite per numero di snapshot evita troppe entry; quello pesato per numero di righe
+    /// impedisce che poche directory enormi trattengano centinaia di migliaia di `FileItem`.
+    init(capacity: Int = 120, itemCapacity: Int = 50_000) {
+        self.capacity = max(5, capacity)
+        self.itemCapacity = max(1, itemCapacity)
+    }
 
     func snapshot(for url: URL, allowStale: Bool = false) -> DirectorySnapshot? {
         let key = url.standardizedFileURL.path
@@ -39,10 +46,12 @@ final class DirectorySnapshotCache: ObservableObject {
     func store(_ items: [FileItem], for url: URL) {
         let key = url.standardizedFileURL.path
         clock &+= 1
+        cachedItemCount -= entries[key]?.snapshot.items.count ?? 0
         entries[key] = Entry(
             snapshot: DirectorySnapshot(items: items, loadedAt: Date()),
             lastAccess: clock
         )
+        cachedItemCount += items.count
         staleKeys.remove(key)
         trimIfNeeded()
     }
@@ -63,15 +72,20 @@ final class DirectorySnapshotCache: ObservableObject {
     func invalidateAll() {
         entries.removeAll()
         staleKeys.removeAll()
+        cachedItemCount = 0
         lastInvalidatedPaths = []
         invalidationGeneration &+= 1
     }
 
     private func trimIfNeeded() {
-        guard entries.count > capacity else { return }
-        let excess = entries.count - capacity
-        for key in entries.sorted(by: { $0.value.lastAccess < $1.value.lastAccess }).prefix(excess).map(\.key) {
-            entries[key] = nil
+        guard entries.count > capacity || (cachedItemCount > itemCapacity && entries.count > 1) else { return }
+        let oldestKeys = entries.sorted { $0.value.lastAccess < $1.value.lastAccess }.map(\.key)
+        for key in oldestKeys {
+            guard entries.count > capacity || (cachedItemCount > itemCapacity && entries.count > 1) else { break }
+            if let removed = entries.removeValue(forKey: key) {
+                cachedItemCount -= removed.snapshot.items.count
+                staleKeys.remove(key)
+            }
         }
     }
 }

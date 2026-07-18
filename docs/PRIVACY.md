@@ -24,6 +24,10 @@ When OpenAI is selected, prompts and relevant document excerpts are sent to Open
 
 Users should not enable a cloud provider for documents they are not authorized to transmit.
 
+## AI source exclusions
+
+Users can exclude individual files or whole folders from AI indexing, content search, similarity search and document chat. FolderBase also offers optional suggestions for hidden and commonly generated directories; suggestions are never applied automatically. Exclusions are enforced at retrieval time as well, so excluded files are not used as sources even if an older copy is still present in the derived AI index.
+
 ## Logs and reports
 
 Before sharing logs, screenshots or bug reports, users should remove document names, file paths, personal content, tokens and API keys.

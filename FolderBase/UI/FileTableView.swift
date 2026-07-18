@@ -105,6 +105,9 @@ struct FileTableView: View {
     /// notifica (e una seconda scansione per ogni identita modificata).
     @State private var cachedItemsByID: [String: FileItem] = [:]
     @State private var cachedSourceIDs: Set<String> = []
+    /// Percorso a cui appartengono gli indici pubblicati. Permette di riconoscere subito un
+    /// cambio cartella senza costruire sul main actor due dizionari completi per confrontarli.
+    @State private var cachedFolderPath: String?
     @State private var noteLinkCache: [String: URL] = [:]
     @State private var missingNoteLinks: Set<String> = []
 
@@ -343,7 +346,10 @@ struct FileTableView: View {
         searchTask = Task {
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled, searchToken == token else { return }
-            let candidates = Set(searchSource.map { $0.id })
+            let exclusions = AIExclusionPolicy.excludedPaths()
+            let candidates = Set(searchSource.lazy.filter {
+                !AIExclusionPolicy.isExcluded($0.url, excludedPaths: exclusions)
+            }.map { $0.id })
             let ftsRanked = await metadataStore.searchFileContentRanked(rawNeedle).filter { candidates.contains($0) }
             let embedder = EmbeddingEngine.active()
             let embedding = await embedder.embed(rawNeedle)
@@ -404,7 +410,10 @@ struct FileTableView: View {
     /// (centroide dei suoi vettori). Esce da un'eventuale ricerca testuale e mostra un chip.
     private func findSimilar(to file: FileItem) {
         let prefix = IndexingService.activeProviderPrefix()
-        let pool = Set(items.map { $0.id })
+        let exclusions = AIExclusionPolicy.excludedPaths()
+        let pool = Set(items.lazy.filter {
+            !AIExclusionPolicy.isExcluded($0.url, excludedPaths: exclusions)
+        }.map { $0.id })
         Task {
             let ranked = await metadataStore.similarFilesAsync(to: file.identity, providerPrefix: prefix, candidates: pool, limit: 300)
             searchText = ""
@@ -801,6 +810,7 @@ struct FileTableView: View {
         let source = searchSource
         let fields = metadataFields
         let metadata = metadataStore.metadataByFileIdentity
+        let folderPath = selectedFolderURL?.standardizedFileURL.path
         indexRebuildTask?.cancel()
         displayRefreshTask?.cancel()
         let token = UUID()
@@ -811,11 +821,13 @@ struct FileTableView: View {
             ) else { return }
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                guard indexPipelineToken == token else { return }
+                guard indexPipelineToken == token,
+                      selectedFolderURL?.standardizedFileURL.path == folderPath else { return }
                 cachedIndex = built.index
                 cachedSearchText = built.searchText
                 cachedItemsByID = built.itemsByID
-                cachedSourceIDs = Set(built.itemsByID.keys)
+                cachedSourceIDs = built.sourceIDs
+                cachedFolderPath = folderPath
                 refreshDisplayCache()
             }
         }
@@ -830,6 +842,24 @@ struct FileTableView: View {
             rebuildMetadataIndex()
             return
         }
+
+        let folderPath = selectedFolderURL?.standardizedFileURL.path
+        guard cachedFolderPath == folderPath else {
+            // Non lasciare visibili per un frame le righe della directory precedente.
+            cachedVisibleItems = []
+            rebuildMetadataIndex()
+            return
+        }
+
+        // L'arricchimento progressivo conserva ordine e identità e cambia soltanto data,
+        // dimensione e tipo. In questo caso la pipeline di visualizzazione userà direttamente
+        // i nuovi item: non servono due Dictionary e tre Set costruiti sul thread dell'interfaccia.
+        if oldItems.count == newItems.count,
+           zip(oldItems, newItems).allSatisfy({ $0.id == $1.id }) {
+            refreshDisplayCache()
+            return
+        }
+
         let oldByID = Dictionary(uniqueKeysWithValues: oldItems.map { ($0.id, $0) })
         let newByID = Dictionary(uniqueKeysWithValues: newItems.map { ($0.id, $0) })
         let removed = Set(oldByID.keys).subtracting(newByID.keys)
@@ -837,9 +867,8 @@ struct FileTableView: View {
         let modified = Set(newByID.keys).intersection(oldByID.keys).filter { newByID[$0] != oldByID[$0] }
         let changed = added.union(modified)
 
-        // L'arricchimento progressivo cambia solo attributi (data/dimensione/tipo), non il
-        // dataset né i metadata. Aggiorna i riferimenti delle righe senza ricostruire gli indici
-        // campo×file e la cache di ricerca.
+        // Stesso insieme ma ordine diverso (ad esempio dopo una rinomina): aggiorna i riferimenti
+        // senza ricostruire gli indici campo×file e la cache di ricerca.
         if removed.isEmpty, added.isEmpty, oldByID.keys.count == newByID.keys.count {
             cachedItemsByID = newByID
             cachedSourceIDs = Set(newByID.keys)
@@ -886,6 +915,26 @@ struct FileTableView: View {
     /// Aggiorna solo le righe metadata realmente cambiate. Durante modifiche bulk o digitazione
     /// evita di rifare O(campi × file) quando è cambiato un solo file.
     private func updateMetadataIndex(changedIDs requestedIDs: Set<String>) {
+        let currentSourceIDs = Set(searchSource.map(\.id))
+
+        // Una lettura metadata può terminare dopo che l'utente ha già cambiato cartella: in tal
+        // caso non deve cancellare la ricostruzione valida della destinazione corrente.
+        guard !requestedIDs.isDisjoint(with: currentSourceIDs) else { return }
+
+        // Durante la navigazione gli item della nuova cartella arrivano prima dei metadata letti
+        // da SQLite. Se la cache appartiene ancora alla cartella precedente, un aggiornamento
+        // incrementale non è possibile: ricostruisci da zero usando lo snapshot metadata appena
+        // pubblicato. Prima questa notifica cancellava la build in corso e lasciava la tabella
+        // vuota, soprattutto con directory grandi.
+        if TableDataPipeline.metadataUpdateNeedsFullRebuild(
+            changedIDs: requestedIDs,
+            sourceIDs: currentSourceIDs,
+            cachedSourceIDs: cachedSourceIDs
+        ) {
+            rebuildMetadataIndex()
+            return
+        }
+
         // Un indice completo costruito da uno snapshot precedente non deve sovrascrivere questa
         // modifica incrementale più recente.
         indexRebuildTask?.cancel()
@@ -1890,6 +1939,7 @@ enum TableDataPipeline {
         let index: [String: [String: String]]
         let searchText: [String: String]
         let itemsByID: [String: FileItem]
+        let sourceIDs: Set<String>
     }
 
     static func buildIndex(
@@ -1925,7 +1975,23 @@ enum TableDataPipeline {
             }
             searchText[item.id] = components.joined(separator: "\u{1F}").localizedLowercase
         }
-        return BuiltIndex(index: index, searchText: searchText, itemsByID: itemsByID)
+        return BuiltIndex(
+            index: index,
+            searchText: searchText,
+            itemsByID: itemsByID,
+            sourceIDs: Set(itemsByID.keys)
+        )
+    }
+
+    /// Una notifica metadata relativa alla cartella corrente richiede una ricostruzione completa
+    /// finché la cache non rappresenta esattamente la stessa base di item. Le notifiche di altre
+    /// cartelle vengono filtrate dal chiamante e non devono interferire con la pipeline attiva.
+    static func metadataUpdateNeedsFullRebuild(
+        changedIDs: Set<String>,
+        sourceIDs: Set<String>,
+        cachedSourceIDs: Set<String>
+    ) -> Bool {
+        !changedIDs.isDisjoint(with: sourceIDs) && sourceIDs != cachedSourceIDs
     }
 
     static func visibleItems(

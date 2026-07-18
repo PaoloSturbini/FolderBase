@@ -212,6 +212,7 @@
       <li><strong>Aspetto</strong> — tema automatico / chiaro / scuro e dimensione dei caratteri.</li>
       <li><strong>Lingua</strong> — italiano o inglese, con effetto immediato.</li>
       <li><strong>Template</strong> — gestione degli insiemi di colonne riutilizzabili.</li>
+      <li><strong>Funzioni di A.I.</strong> — indicizzazione, motori di ricerca/chat e <strong>Fonti escluse dall'AI</strong>. Puoi escludere singoli file o cartelle e analizzare le radici gestite per ricevere suggerimenti su directory nascoste o tecniche; nessun suggerimento viene applicato automaticamente.</li>
       <li><strong>Manutenzione</strong> — riallineamento e pulizia dei metadata.</li>
       <li><strong>Aiuto</strong> — questa guida.</li>
       <li><strong>Info su FolderBase</strong> — versione e supporto.</li>
@@ -220,8 +221,8 @@
 
   <section id="dati">
     <h2>Dove finiscono i dati</h2>
-    <p>Tutti i metadata e l'indice dei file stanno in un singolo database SQLite locale:</p>
-    <p><code>~/Library/Application Support/FolderBase/folderbase.sqlite</code></p>
+    <p>I metadata operativi e l'indice AI derivato stanno in due database SQLite locali separati:</p>
+    <p><code>~/Library/Application Support/FolderBase/folderbase.sqlite</code><br><code>~/Library/Application Support/FolderBase/folderbase-index.sqlite</code></p>
     <ul>
       <li>Le <strong>cartelle osservate non vengono mai modificate</strong>: FolderBase non scrive file nascosti dentro le tue directory.</li>
       <li>Per ripartire da zero basta cancellare quel file: verrà ricreato vuoto al successivo avvio.</li>

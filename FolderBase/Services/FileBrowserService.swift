@@ -18,7 +18,7 @@ final class FileBrowserService {
 
     /// Per directory grandi restituisce prima nomi, tipo base e identità. Dimensione, data e
     /// content type arrivano con la lettura completa successiva, senza cambiare gli ID delle righe.
-    func previewOfDirectory(at url: URL, showHiddenFiles: Bool = false, detailedThreshold: Int = 800) throws -> Preview {
+    func previewOfDirectory(at url: URL, showHiddenFiles: Bool = false, detailedThreshold: Int = 300) throws -> Preview {
         let options: FileManager.DirectoryEnumerationOptions = showHiddenFiles ? [] : [.skipsHiddenFiles]
         let urls = try FileManager.default.contentsOfDirectory(
             at: url, includingPropertiesForKeys: Array(Self.identityKeys), options: options

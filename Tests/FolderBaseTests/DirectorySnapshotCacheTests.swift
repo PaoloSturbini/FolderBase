@@ -35,4 +35,37 @@ final class DirectorySnapshotCacheTests: XCTestCase {
         XCTAssertNil(cache.snapshot(for: urls[1]))
         XCTAssertNotNil(cache.snapshot(for: urls[5]))
     }
+
+    @MainActor
+    func testItemBudgetEvictsHeavyLeastRecentlyUsedSnapshots() {
+        let cache = DirectorySnapshotCache(capacity: 10, itemCapacity: 5)
+        let first = URL(fileURLWithPath: "/tmp/heavy-first")
+        let second = URL(fileURLWithPath: "/tmp/heavy-second")
+        let third = URL(fileURLWithPath: "/tmp/heavy-third")
+
+        cache.store(makeItems(count: 3, prefix: "a"), for: first)
+        cache.store(makeItems(count: 2, prefix: "b"), for: second)
+        cache.store(makeItems(count: 2, prefix: "c"), for: third)
+
+        XCTAssertNil(cache.snapshot(for: first))
+        XCTAssertNotNil(cache.snapshot(for: second))
+        XCTAssertNotNil(cache.snapshot(for: third))
+    }
+
+    private func makeItems(count: Int, prefix: String) -> [FileItem] {
+        (0..<count).map { index in
+            let name = "\(prefix)-\(index)"
+            return FileItem(
+                identity: name,
+                url: URL(fileURLWithPath: "/tmp/\(name)"),
+                name: name,
+                type: "TXT",
+                created: .distantPast,
+                size: 0,
+                isFolder: false,
+                sortNameKey: name,
+                sortTypeKey: "txt"
+            )
+        }
+    }
 }

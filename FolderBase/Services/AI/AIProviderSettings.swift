@@ -50,6 +50,7 @@ enum AIProviderSettings {
         static let ollamaChatModel = "aiOllamaChatModel"
         static let openAIChatModel = "aiOpenAIChatModel"
         static let chatContextChunks = "aiChatContextChunks"
+        static let excludedSourcePaths = AIExclusionPolicy.storageKey
     }
     static let openAIKeyAccount = "openai-api-key"
 
