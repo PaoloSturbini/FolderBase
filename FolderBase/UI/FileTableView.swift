@@ -96,7 +96,10 @@ struct FileTableView: View {
     @State private var cachedVisibleItems: [FileItem] = []
     @State private var indexRebuildTask: Task<Void, Never>?
     @State private var displayRefreshTask: Task<Void, Never>?
-    @State private var tablePipelineToken = UUID()
+    /// Le due fasi hanno generazioni indipendenti: un refresh di filtro/ordinamento non deve
+    /// invalidare una ricostruzione dell'indice ancora in corso.
+    @State private var indexPipelineToken = UUID()
+    @State private var displayPipelineToken = UUID()
     /// Indici della base corrente usati dagli aggiornamenti metadata incrementali. Vengono
     /// ricostruiti insieme a `cachedIndex`, evitando una scansione di `searchSource` per ogni
     /// notifica (e una seconda scansione per ogni identita modificata).
@@ -801,14 +804,14 @@ struct FileTableView: View {
         indexRebuildTask?.cancel()
         displayRefreshTask?.cancel()
         let token = UUID()
-        tablePipelineToken = token
+        indexPipelineToken = token
         indexRebuildTask = Task.detached(priority: .userInitiated) {
             guard let built = TableDataPipeline.buildIndex(
                 source: source, fields: fields, metadata: metadata
             ) else { return }
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                guard tablePipelineToken == token else { return }
+                guard indexPipelineToken == token else { return }
                 cachedIndex = built.index
                 cachedSearchText = built.searchText
                 cachedItemsByID = built.itemsByID
@@ -822,7 +825,7 @@ struct FileTableView: View {
     /// lavoro da O(campi × tutti i file) a O(campi × righe cambiate).
     private func updateItemsIndex(from oldItems: [FileItem], to newItems: [FileItem]) {
         indexRebuildTask?.cancel()
-        tablePipelineToken = UUID()
+        indexPipelineToken = UUID()
         guard !searchAllSubfolders else {
             rebuildMetadataIndex()
             return
@@ -886,7 +889,7 @@ struct FileTableView: View {
         // Un indice completo costruito da uno snapshot precedente non deve sovrascrivere questa
         // modifica incrementale più recente.
         indexRebuildTask?.cancel()
-        tablePipelineToken = UUID()
+        indexPipelineToken = UUID()
         let changedIDs = requestedIDs.intersection(cachedSourceIDs)
         guard !changedIDs.isEmpty else { return }
 
@@ -950,7 +953,7 @@ struct FileTableView: View {
         let comparator = tableSortOrder.first
         displayRefreshTask?.cancel()
         let token = UUID()
-        tablePipelineToken = token
+        displayPipelineToken = token
         displayRefreshTask = Task.detached(priority: .userInitiated) {
             guard let result = TableDataPipeline.visibleItems(
                 source: source, index: index, searchTextByID: searchIndex,
@@ -959,7 +962,7 @@ struct FileTableView: View {
             ) else { return }
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                guard tablePipelineToken == token else { return }
+                guard displayPipelineToken == token else { return }
                 cachedVisibleItems = result
                 reportSelectedItem()
             }
