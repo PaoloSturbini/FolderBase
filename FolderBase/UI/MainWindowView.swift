@@ -100,6 +100,7 @@ struct MainWindowView: View {
             FileTableView(
                 items: $items,
                 metadataStore: metadataStore,
+                indexingService: indexingService,
                 selectedFolderURL: selectedFolderURL,
                 configurationRootURL: metadataConfigurationRootURL,
                 activeTemplate: templateStore.activeTemplate,

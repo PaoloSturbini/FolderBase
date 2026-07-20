@@ -134,6 +134,10 @@ extension Color {
 }
 
 struct SidebarView: View {
+    /// Quando valorizzato questa istanza viene installata come radice della finestra AppKit di
+    /// configurazione. In questo modo tutti i DynamicProperty di SwiftUI sono realmente attivi
+    /// anche nella finestra separata (azioni, Task, @State e @ObservedObject).
+    var settingsOnlyDismiss: (() -> Void)?
     let selectedFolderURL: URL?
     let recentFolderURLs: [URL]
     let managedFolderURLs: [URL]
@@ -168,7 +172,45 @@ struct SidebarView: View {
     let selectedNoteItem: FileItem?
     @ObservedObject private var loc = LocalizationManager.shared
 
-    @State private var isShowingSettings = false
+    init(
+        selectedFolderURL: URL?, recentFolderURLs: [URL], managedFolderURLs: [URL], treeRootURL: URL?,
+        sidebarFontSize: Binding<Double>, contentFontSize: Binding<Double>,
+        appearanceMode: Binding<String>, showHiddenFiles: Binding<Bool>, showFileExtensions: Binding<Bool>,
+        selectFolder: @escaping (URL) -> Void, removeFolder: @escaping (URL) -> Void,
+        reorderFolder: @escaping (URL, Int) -> Void, chooseFolder: @escaping () -> Void,
+        navigateTo: @escaping (URL) -> Void, moveItems: @escaping ([String], URL) -> Void,
+        directoryAction: @escaping (URL, DirectoryTreeAction) -> Void,
+        templateStore: TemplateStore, metadataStore: MetadataStore, backupService: BackupService,
+        indexingService: IndexingService, directoryCache: DirectorySnapshotCache,
+        chatService: ChatService, selectedNoteItem: FileItem?,
+        settingsOnlyDismiss: (() -> Void)? = nil
+    ) {
+        self.settingsOnlyDismiss = settingsOnlyDismiss
+        self.selectedFolderURL = selectedFolderURL
+        self.recentFolderURLs = recentFolderURLs
+        self.managedFolderURLs = managedFolderURLs
+        self.treeRootURL = treeRootURL
+        self._sidebarFontSize = sidebarFontSize
+        self._contentFontSize = contentFontSize
+        self._appearanceMode = appearanceMode
+        self._showHiddenFiles = showHiddenFiles
+        self._showFileExtensions = showFileExtensions
+        self.selectFolder = selectFolder
+        self.removeFolder = removeFolder
+        self.reorderFolder = reorderFolder
+        self.chooseFolder = chooseFolder
+        self.navigateTo = navigateTo
+        self.moveItems = moveItems
+        self.directoryAction = directoryAction
+        self._templateStore = ObservedObject(wrappedValue: templateStore)
+        self._metadataStore = ObservedObject(wrappedValue: metadataStore)
+        self._backupService = ObservedObject(wrappedValue: backupService)
+        self._indexingService = ObservedObject(wrappedValue: indexingService)
+        self.directoryCache = directoryCache
+        self.chatService = chatService
+        self.selectedNoteItem = selectedNoteItem
+    }
+
     @State private var isAddingTemplate = false
     @State private var templatePendingEdit: MetadataTemplate?
     @State private var maintenanceMessage: String?
@@ -177,17 +219,17 @@ struct SidebarView: View {
     /// senza dover ri-risolvere tutti i file gestiti.
     @State private var maintenanceOrphanIdentities: [String] = []
     @State private var isReconciling = false
+    @State private var isCleaningIndexes = false
     @AppStorage("autoPurgeOrphans") private var autoPurgeOrphans = false
     @AppStorage("autoCheckUpdates") private var autoCheckUpdates = false
-    @State private var settingsSection: SettingsSection = .folders
     @State private var updateState: UpdateUIState = .idle
     @State private var backupMessage: String?
     @State private var backupFailed = false
     @State private var isConfirmingRestore = false
     @State private var pendingRestoreURL: URL?
-    @State private var indexStatus: FolderIndexStatus = .unknown
-    @State private var isCheckingIndexStatus = false
-    @State private var indexStatusCheckedAt: Date?
+    @State private var folderIndexStatuses: [String: FolderIndexSnapshot] = [:]
+    @State private var indexingRootPath: String?
+    @State private var exclusionRootPath = ""
     /// Interruttore generale dell'AI: quando è false l'indicizzazione, la chat e la ricerca per
     /// contenuto sono disattivate e le relative icone spariscono dall'interfaccia.
     @AppStorage(AIProviderSettings.Keys.enabled) private var aiEnabled = true
@@ -196,7 +238,7 @@ struct SidebarView: View {
     @AppStorage(AIProviderSettings.Keys.ollamaModel) private var aiOllamaModel = AIProviderSettings.defaultOllamaModel
     @AppStorage(AIProviderSettings.Keys.openAIModel) private var aiOpenAIModel = AIProviderSettings.defaultOpenAIModel
     @State private var openAIKeyInput = ""
-    @State private var hasOpenAIKey = false
+    @AppStorage(AIProviderSettings.Keys.hasOpenAIKey) private var hasOpenAIKey = false
     @State private var aiTesting = false
     @State private var aiTestMessage: String?
     @AppStorage(AIProviderSettings.Keys.chatProvider) private var aiChatProviderRaw = AIChatProvider.none.rawValue
@@ -221,7 +263,16 @@ struct SidebarView: View {
     /// Altezza di partenza catturata all'inizio del trascinamento dell'handle di resize.
     @State private var notesDragBaseline: Double?
 
+    @ViewBuilder
     var body: some View {
+        if let settingsOnlyDismiss {
+            settingsWindow(dismiss: settingsOnlyDismiss)
+        } else {
+            sidebarContent
+        }
+    }
+
+    private var sidebarContent: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Albero e cartelle in uno ScrollView (NON una List): evita i glitch di
             // layout/transizione del NavigationSplitView durante avanti/indietro.
@@ -273,16 +324,40 @@ struct SidebarView: View {
             Divider()
 
             Button {
-                isShowingSettings = true
+                SettingsWindowPresenter.show { dismiss in
+                    AnyView(SidebarView(
+                        selectedFolderURL: selectedFolderURL,
+                        recentFolderURLs: recentFolderURLs,
+                        managedFolderURLs: managedFolderURLs,
+                        treeRootURL: treeRootURL,
+                        sidebarFontSize: $sidebarFontSize,
+                        contentFontSize: $contentFontSize,
+                        appearanceMode: $appearanceMode,
+                        showHiddenFiles: $showHiddenFiles,
+                        showFileExtensions: $showFileExtensions,
+                        selectFolder: selectFolder,
+                        removeFolder: removeFolder,
+                        reorderFolder: reorderFolder,
+                        chooseFolder: chooseFolder,
+                        navigateTo: navigateTo,
+                        moveItems: moveItems,
+                        directoryAction: directoryAction,
+                        templateStore: templateStore,
+                        metadataStore: metadataStore,
+                        backupService: backupService,
+                        indexingService: indexingService,
+                        directoryCache: directoryCache,
+                        chatService: chatService,
+                        selectedNoteItem: selectedNoteItem,
+                        settingsOnlyDismiss: dismiss
+                    ))
+                }
             } label: {
                 Label(L("sidebar.configuration"), systemImage: "gearshape")
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(.bordered)
             .padding(12)
-            .sheet(isPresented: $isShowingSettings) {
-                settingsWindow
-            }
         }
         .font(.system(size: sidebarFontSize))
         .navigationTitle("FolderBase")
@@ -494,11 +569,9 @@ struct SidebarView: View {
 
     // MARK: - Finestra Configurazione (sidebar + dettaglio, stile Impostazioni di sistema)
 
-    private var settingsWindow: some View {
-        HStack(spacing: 0) {
-            settingsSidebar
-            Divider()
-            settingsDetail
+    private func settingsWindow(dismiss: @escaping () -> Void) -> some View {
+        SettingsWindowContainer(accent: accent, dismiss: dismiss) { section in
+            AnyView(settingsDetail(section: section, dismiss: dismiss))
         }
         .frame(width: 760, height: 540)
         .background(Color(nsColor: .windowBackgroundColor))
@@ -523,61 +596,18 @@ struct SidebarView: View {
         }
     }
 
-    private var settingsSidebar: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(L("sidebar.configuration"))
-                .font(.headline)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 10)
-                .padding(.top, 16)
-                .padding(.bottom, 10)
-
-            ForEach(SettingsSection.allCases) { section in
-                let isSelected = settingsSection == section
-                Button {
-                    settingsSection = section
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: section.systemImage)
-                            .font(.body)
-                            .frame(width: 20)
-                            .foregroundStyle(isSelected ? Color.white : accent)
-
-                        Text(section.title)
-                            .foregroundStyle(isSelected ? Color.white : Color.primary)
-
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .background(
-                        RoundedRectangle(cornerRadius: 7)
-                            .fill(isSelected ? accent : Color.clear)
-                    )
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-
-            Spacer()
-        }
-        .padding(8)
-        .frame(width: 210)
-        .background(Color(nsColor: .windowBackgroundColor))
-    }
-
-    private var settingsDetail: some View {
+    private func settingsDetail(section: SettingsSection, dismiss: @escaping () -> Void) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                Image(systemName: settingsSection.systemImage)
+                Image(systemName: section.systemImage)
                     .font(.title2)
                     .foregroundStyle(accent)
 
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(settingsSection.title)
+                    Text(section.title)
                         .font(.title2)
                         .fontWeight(.semibold)
-                    Text(settingsSection.subtitle)
+                    Text(section.subtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -585,7 +615,7 @@ struct SidebarView: View {
                 Spacer()
 
                 Button(L("common.done")) {
-                    isShowingSettings = false
+                    dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
             }
@@ -597,7 +627,7 @@ struct SidebarView: View {
 
             ScrollView {
                 Group {
-                    switch settingsSection {
+                    switch section {
                     case .folders:
                         foldersSettings
                     case .appearance:
@@ -610,6 +640,8 @@ struct SidebarView: View {
                         languageSettings
                     case .templates:
                         templatesSettings
+                    case .contentIndexing:
+                        contentIndexingSettings
                     case .indexing:
                         indexingSettings
                     case .maintenance:
@@ -736,109 +768,6 @@ struct SidebarView: View {
 
             if aiEnabled {
             GroupBox {
-                VStack(alignment: .leading, spacing: 14) {
-                    Text(L("indexing.intro"))
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    if let selectedFolderURL {
-                        HStack(spacing: 8) {
-                            Circle()
-                                .fill(indexStatusColor)
-                                .frame(width: 10, height: 10)
-                            Text(indexStatusLabel)
-                                .font(.callout)
-                            if isCheckingIndexStatus {
-                                ProgressView().controlSize(.mini)
-                            } else {
-                                Button {
-                                    Task { await recomputeStatus() }
-                                } label: {
-                                    Image(systemName: "arrow.clockwise")
-                                }
-                                .buttonStyle(.borderless)
-                                .foregroundStyle(.secondary)
-                                .disabled(indexingService.isIndexing)
-                            }
-                        }
-
-                        if let checkedAt = indexStatusCheckedAt {
-                            Text("\(L("indexing.checkedAt")) \(Self.statusDateFormatter.string(from: checkedAt))")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        HStack(spacing: 12) {
-                            Button {
-                                indexingService.indexRecursively(root: selectedFolderURL, store: metadataStore)
-                            } label: {
-                                Label(indexButtonTitle, systemImage: "sparkles")
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.large)
-                            .disabled(indexingService.isIndexing)
-
-                            if indexingService.isIndexing {
-                                ProgressView().controlSize(.small)
-                                Text(indexingProgressText)
-                                    .font(.callout)
-                                    .monospacedDigit()
-                                    .foregroundStyle(.secondary)
-                                Button {
-                                    indexingService.cancel()
-                                } label: {
-                                    Label(L("index.stop"), systemImage: "stop.circle")
-                                }
-                                .buttonStyle(.bordered)
-                            }
-                        }
-
-                        // Avviso NON silenzioso: l'ultima indicizzazione ha salvato i testi ma
-                        // l'embedding è fallito per N file. La diagnosi distingue le due cause:
-                        // motore non raggiungibile (i file sono a posto) vs problema dei file.
-                        if !indexingService.isIndexing, indexingService.embeddingFailures > 0 {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Label(
-                                    "\(L("indexing.embedFailures")) \(indexingService.embeddingFailures) file.",
-                                    systemImage: "exclamationmark.triangle.fill"
-                                )
-                                .foregroundStyle(.orange)
-
-                                switch indexingService.embeddingFailureDiagnosis {
-                                case let .engineUnreachable(detail):
-                                    Text("\(L("indexing.embedFailures.engineDown")) \(detail).")
-                                        .foregroundStyle(.orange)
-                                    Text(L("indexing.embedFailures.hint"))
-                                        .foregroundStyle(.secondary)
-                                case .fileSpecific:
-                                    Text(L("indexing.embedFailures.fileSpecific"))
-                                        .foregroundStyle(.secondary)
-                                    if !indexingService.embeddingFailedFiles.isEmpty {
-                                        Text("\(L("indexing.embedFailures.failedList")) \(failedFilesPreview)")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                case nil:
-                                    Text(L("indexing.embedFailures.hint"))
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            .font(.callout)
-                            .fixedSize(horizontal: false, vertical: true)
-                        }
-                    } else {
-                        Text(L("indexing.noFolder"))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(6)
-            } label: {
-                settingsCardLabel(L("indexing.card"), systemImage: "text.magnifyingglass")
-            }
-
-            GroupBox {
                 VStack(alignment: .leading, spacing: 12) {
                     Text(L("ai.engine.intro"))
                         .font(.callout)
@@ -891,6 +820,7 @@ struct SidebarView: View {
                         } label: {
                             Label(L("ai.test"), systemImage: "bolt.fill")
                         }
+                        .buttonStyle(.borderedProminent)
                         .disabled(aiTesting)
 
                         if aiTesting {
@@ -950,6 +880,7 @@ struct SidebarView: View {
                             } label: {
                                 Label(L("ai.chat.test"), systemImage: "bolt.fill")
                             }
+                            .buttonStyle(.borderedProminent)
                             .disabled(chatTesting)
 
                             if chatTesting {
@@ -980,129 +911,197 @@ struct SidebarView: View {
                 settingsCardLabel(L("ai.chat.card"), systemImage: "bubble.left.and.bubble.right")
             }
 
+            } // if aiEnabled
+        }
+        .onChange(of: aiProviderRaw) { _, _ in
+            aiTestMessage = nil
+            // Lo stato dipende dal motore: al cambio provider lo si ricalcola.
+            Task { for root in indexRootURLs { await recomputeStatus(for: root) } }
+        }
+        .onChange(of: aiChatProviderRaw) { _, _ in
+            chatTestMessage = nil
+        }
+    }
+
+    private var contentIndexingSettings: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text(L("indexing.intro"))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
             GroupBox {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(L("ai.exclusions.intro"))
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    HStack(spacing: 10) {
-                        Button {
-                            chooseAIExclusions(directories: false)
-                        } label: {
-                            Label(L("ai.exclusions.addFiles"), systemImage: "doc.badge.plus")
-                        }
-                        Button {
-                            chooseAIExclusions(directories: true)
-                        } label: {
-                            Label(L("ai.exclusions.addFolders"), systemImage: "folder.badge.plus")
-                        }
-                    }
-
-                    if aiExcludedSourcePaths.isEmpty {
-                        Text(L("ai.exclusions.empty"))
-                            .font(.caption)
+                VStack(alignment: .leading, spacing: 0) {
+                    if indexRootURLs.isEmpty {
+                        Label(L("common.noFolders"), systemImage: "folder")
                             .foregroundStyle(.secondary)
+                            .padding(8)
                     } else {
-                        VStack(alignment: .leading, spacing: 0) {
-                            ForEach(aiExcludedSourcePaths, id: \.self) { path in
-                                aiExclusionRow(path: path)
-                                if path != aiExcludedSourcePaths.last { Divider() }
-                            }
+                        ForEach(indexRootURLs, id: \.path) { folderURL in
+                            indexFolderRow(folderURL)
+                            aiExclusionsSettings(for: folderURL)
+                            if folderURL.path != indexRootURLs.last?.path { Divider() }
                         }
-                        .padding(.horizontal, 10)
-                        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-                    }
-
-                    Divider()
-
-                    HStack(spacing: 10) {
-                        Button {
-                            analyzeAIExclusionSuggestions()
-                        } label: {
-                            Label(L("ai.exclusions.analyze"), systemImage: "wand.and.stars")
-                        }
-                        .disabled(aiExclusionScanning || managedFolderURLs.isEmpty)
-
-                        if aiExclusionScanning {
-                            ProgressView().controlSize(.small)
-                            Text(L("ai.exclusions.analyzing"))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        Spacer()
-
-                        if !aiExclusionSuggestions.isEmpty {
-                            Button(L("ai.exclusions.addAllSuggestions")) {
-                                addAIExclusionPaths(aiExclusionSuggestions.map(\.path))
-                            }
-                            .buttonStyle(.borderless)
-                        }
-                    }
-
-                    Text(L("ai.exclusions.suggestionNote"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    if !aiExclusionSuggestions.isEmpty {
-                        VStack(alignment: .leading, spacing: 0) {
-                            ForEach(aiExclusionSuggestions) { suggestion in
-                                HStack(spacing: 8) {
-                                    Image(systemName: "folder.fill")
-                                        .foregroundStyle(.secondary)
-                                    VStack(alignment: .leading, spacing: 1) {
-                                        Text(URL(fileURLWithPath: suggestion.path).lastPathComponent)
-                                            .lineLimit(1)
-                                        Text(suggestion.reason + " · " + suggestion.path)
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(1)
-                                            .truncationMode(.middle)
-                                    }
-                                    Spacer()
-                                    Button(L("common.add")) {
-                                        addAIExclusionPaths([suggestion.path])
-                                    }
-                                    .buttonStyle(.borderless)
-                                }
-                                .padding(.vertical, 7)
-                                if suggestion.id != aiExclusionSuggestions.last?.id { Divider() }
-                            }
-                        }
-                        .padding(.horizontal, 10)
-                        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(6)
             } label: {
-                settingsCardLabel(L("ai.exclusions.card"), systemImage: "eye.slash")
+                settingsCardLabel(L("indexing.folders.card"), systemImage: "doc.text.magnifyingglass")
             }
-            } // if aiEnabled
+
+            if !indexingService.isIndexing, indexingService.embeddingFailures > 0 {
+                Label("\(L("indexing.embedFailures")) \(indexingService.embeddingFailures) file. \(failedFilesPreview)",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+            }
         }
-        .task(id: selectedFolderURL?.path ?? "") {
-            loadCachedStatus()
-        }
+        .task(id: indexRootURLs.map(\.path).joined(separator: "|")) { loadAllCachedStatuses() }
         .onAppear {
-            hasOpenAIKey = KeychainStore.exists(account: AIProviderSettings.openAIKeyAccount)
+            if exclusionRootPath.isEmpty { exclusionRootPath = indexRootURLs.first?.path ?? "" }
         }
-        .onChange(of: aiProviderRaw) { _, _ in
-            aiTestMessage = nil
-            // Lo stato dipende dal motore: al cambio provider lo si ricalcola.
-            Task { await recomputeStatus() }
-        }
-        .onChange(of: aiChatProviderRaw) { _, _ in
-            chatTestMessage = nil
-        }
+        .onChange(of: exclusionRootPath) { _, _ in aiExclusionSuggestions = [] }
         .onChange(of: indexingService.isIndexing) { _, running in
-            // A fine indicizzazione ricalcola e memorizza lo stato (così diventa verde da solo).
-            if !running {
-                Task { await recomputeStatus() }
+            guard !running, let rootPath = indexingRootPath,
+                  let root = indexRootURLs.first(where: { $0.path == rootPath }) else { return }
+            Task {
+                await recomputeStatus(for: root)
+                indexingRootPath = nil
             }
         }
+    }
+
+    private func aiExclusionsSettings(for root: URL) -> some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(L("ai.exclusions.perFolderIntro"))
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 10) {
+                    Button { chooseAIExclusions(for: root, directories: false) } label: {
+                        Label(L("ai.exclusions.addFiles"), systemImage: "doc.badge.plus")
+                    }
+                    Button { chooseAIExclusions(for: root, directories: true) } label: {
+                        Label(L("ai.exclusions.addFolders"), systemImage: "folder.badge.plus")
+                    }
+                }
+
+                if exclusions(for: root).isEmpty {
+                    Text(L("ai.exclusions.emptyForFolder")).font(.caption).foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(exclusions(for: root), id: \.self) { path in
+                            aiExclusionRow(path: path, root: root)
+                            if path != exclusions(for: root).last { Divider() }
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                }
+
+                Divider()
+                HStack(spacing: 10) {
+                    Button { analyzeAIExclusionSuggestions(for: root) } label: {
+                        Label(L("ai.exclusions.analyze"), systemImage: "wand.and.stars")
+                    }
+                    .disabled(aiExclusionScanning)
+                    if aiExclusionScanning, exclusionRootPath == root.path { ProgressView().controlSize(.small) }
+                    Spacer()
+                    if exclusionRootPath == root.path, !aiExclusionSuggestions.isEmpty {
+                        Button(L("ai.exclusions.addAllSuggestions")) {
+                            addAIExclusionPaths(aiExclusionSuggestions.map(\.path), for: root)
+                        }.buttonStyle(.borderless)
+                    }
+                }
+                Text(L("ai.exclusions.suggestionNote"))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if exclusionRootPath == root.path, !aiExclusionSuggestions.isEmpty {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(aiExclusionSuggestions) { suggestion in
+                            HStack(spacing: 8) {
+                                Image(systemName: "folder.fill").foregroundStyle(.secondary)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(URL(fileURLWithPath: suggestion.path).lastPathComponent).lineLimit(1)
+                                    Text(suggestion.reason + " · " + suggestion.path)
+                                        .font(.caption2).foregroundStyle(.secondary)
+                                        .lineLimit(1).truncationMode(.middle)
+                                }
+                                Spacer()
+                                Button(L("common.add")) { addAIExclusionPaths([suggestion.path], for: root) }
+                                    .buttonStyle(.borderless)
+                            }
+                            .padding(.vertical, 7)
+                            if suggestion.id != aiExclusionSuggestions.last?.id { Divider() }
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(6)
+        } label: {
+            settingsCardLabel(L("ai.exclusions.card"), systemImage: "eye.slash")
+        }
+    }
+
+    private func exclusions(for root: URL) -> [String] {
+        aiExclusionsByRoot[root.standardizedFileURL.path] ?? []
+    }
+
+    private var indexRootURLs: [URL] {
+        AIExclusionPolicy.topLevelRoots(managedFolderURLs)
+    }
+
+    @ViewBuilder
+    private func indexFolderRow(_ folderURL: URL) -> some View {
+        let snapshot = folderIndexStatuses[folderURL.path] ?? FolderIndexSnapshot()
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Circle().fill(indexStatusColor(snapshot.status)).frame(width: 10, height: 10)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(folderURL.lastPathComponent).fontWeight(.medium)
+                    Text(folderURL.path).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
+                Spacer()
+                Text(indexStatusLabel(snapshot)).font(.callout).foregroundStyle(.secondary)
+                if snapshot.isChecking {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Button { Task { await recomputeStatus(for: folderURL) } } label: {
+                        Label(L("indexing.recheck"), systemImage: "arrow.clockwise")
+                    }
+                        .buttonStyle(.borderless)
+                        .help(L("indexing.recheck"))
+                        .disabled(indexingService.isIndexing)
+                }
+            }
+            HStack(spacing: 10) {
+                Button {
+                    indexingRootPath = folderURL.path
+                    indexingService.indexRecursively(root: folderURL, store: metadataStore)
+                } label: {
+                    Label(indexButtonTitle(snapshot.status), systemImage: "text.magnifyingglass")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(indexingService.isIndexing)
+                if indexingService.isIndexing, indexingRootPath == folderURL.path {
+                    ProgressView().controlSize(.small)
+                    Text(indexingProgressText).font(.callout).monospacedDigit().foregroundStyle(.secondary)
+                    Button(L("index.stop")) { indexingService.cancel() }.buttonStyle(.bordered)
+                }
+                if let checkedAt = snapshot.checkedAt {
+                    Spacer()
+                    Text("\(L("indexing.checkedAt")) \(Self.statusDateFormatter.string(from: checkedAt))")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(.vertical, 10)
     }
 
     private func saveOpenAIKey() {
@@ -1111,11 +1110,11 @@ struct SidebarView: View {
         openAIKeyInput = ""
     }
 
-    private var aiExcludedSourcePaths: [String] {
-        AIExclusionPolicy.decode(aiExcludedSourcePathsData)
+    private var aiExclusionsByRoot: AIExclusionPolicy.ExclusionsByRoot {
+        AIExclusionPolicy.decodeByRoot(aiExcludedSourcePathsData, knownRoots: indexRootURLs)
     }
 
-    private func aiExclusionRow(path: String) -> some View {
+    private func aiExclusionRow(path: String, root: URL) -> some View {
         var isDirectory: ObjCBool = false
         let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
         return HStack(spacing: 8) {
@@ -1132,7 +1131,7 @@ struct SidebarView: View {
             }
             Spacer()
             Button {
-                removeAIExclusionPath(path)
+                removeAIExclusionPath(path, for: root)
             } label: {
                 Image(systemName: "minus.circle")
             }
@@ -1142,39 +1141,49 @@ struct SidebarView: View {
         .padding(.vertical, 7)
     }
 
-    private func chooseAIExclusions(directories: Bool) {
+    private func chooseAIExclusions(for root: URL, directories: Bool) {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = directories
         panel.canChooseFiles = !directories
         panel.canCreateDirectories = false
+        panel.directoryURL = root
         panel.prompt = L("common.add")
         guard panel.runModal() == .OK else { return }
-        addAIExclusionPaths(panel.urls.map(\.path))
+        let rootPrefix = root.path + "/"
+        addAIExclusionPaths(panel.urls.map(\.standardizedFileURL.path).filter {
+            $0 == root.path || $0.hasPrefix(rootPrefix)
+        }, for: root)
     }
 
-    private func addAIExclusionPaths(_ paths: [String]) {
-        aiExcludedSourcePathsData = AIExclusionPolicy.encode(aiExcludedSourcePaths + paths)
-        let excluded = Set(aiExcludedSourcePaths)
+    private func addAIExclusionPaths(_ paths: [String], for root: URL) {
+        var mapping = aiExclusionsByRoot
+        let rootPath = root.standardizedFileURL.path
+        mapping[rootPath] = (mapping[rootPath] ?? []) + paths
+        aiExcludedSourcePathsData = AIExclusionPolicy.encode(mapping)
+        let excluded = Set(mapping[rootPath] ?? [])
         aiExclusionSuggestions.removeAll { excluded.contains($0.path) }
-        Task { await recomputeStatus() }
+        Task { await recomputeStatus(for: root) }
     }
 
-    private func removeAIExclusionPath(_ path: String) {
-        aiExcludedSourcePathsData = AIExclusionPolicy.encode(aiExcludedSourcePaths.filter { $0 != path })
-        Task { await recomputeStatus() }
+    private func removeAIExclusionPath(_ path: String, for root: URL) {
+        var mapping = aiExclusionsByRoot
+        let rootPath = root.standardizedFileURL.path
+        mapping[rootPath] = (mapping[rootPath] ?? []).filter { $0 != path }
+        aiExcludedSourcePathsData = AIExclusionPolicy.encode(mapping)
+        Task { await recomputeStatus(for: root) }
     }
 
-    private func analyzeAIExclusionSuggestions() {
-        let roots = managedFolderURLs
-        let excluded = aiExcludedSourcePaths
+    private func analyzeAIExclusionSuggestions(for root: URL) {
+        let excluded = exclusions(for: root)
         let token = UUID()
+        exclusionRootPath = root.path
         aiExclusionScanToken = token
         aiExclusionScanning = true
         aiExclusionSuggestions = []
         Task {
             let suggestions = await Task.detached(priority: .utility) {
-                AIExclusionPolicy.suggestions(under: roots, excluding: excluded)
+                AIExclusionPolicy.suggestions(under: [root], excluding: excluded)
             }.value
             guard aiExclusionScanToken == token else { return }
             aiExclusionSuggestions = suggestions
@@ -1226,28 +1235,23 @@ struct SidebarView: View {
     }
 
     /// Legge lo stato MEMORIZZATO (istantaneo, nessuna enumerazione): usato all'apertura.
-    private func loadCachedStatus() {
-        guard let selectedFolderURL else {
-            indexStatus = .notIndexed
-            indexStatusCheckedAt = nil
-            return
-        }
-        if let cached = indexingService.loadStatus(root: selectedFolderURL, store: metadataStore) {
-            indexStatus = cached.status
-            indexStatusCheckedAt = cached.checkedAt
-        } else {
-            indexStatus = .unknown
-            indexStatusCheckedAt = nil
+    private func loadAllCachedStatuses() {
+        for root in indexRootURLs {
+            if let cached = indexingService.loadStatus(root: root, store: metadataStore) {
+                folderIndexStatuses[root.path] = FolderIndexSnapshot(status: cached.status, checkedAt: cached.checkedAt)
+            } else {
+                folderIndexStatuses[root.path] = FolderIndexSnapshot()
+            }
         }
     }
 
     /// Ricalcola lo stato enumerando il sottoalbero e lo memorizza (su richiesta / a fine indicizzazione).
-    private func recomputeStatus() async {
-        guard let selectedFolderURL else { return }
-        isCheckingIndexStatus = true
-        indexStatus = await indexingService.recomputeStatus(root: selectedFolderURL, store: metadataStore)
-        indexStatusCheckedAt = Date()
-        isCheckingIndexStatus = false
+    private func recomputeStatus(for root: URL) async {
+        var snapshot = folderIndexStatuses[root.path] ?? FolderIndexSnapshot()
+        snapshot.isChecking = true
+        folderIndexStatuses[root.path] = snapshot
+        let status = await indexingService.recomputeStatus(root: root, store: metadataStore)
+        folderIndexStatuses[root.path] = FolderIndexSnapshot(status: status, checkedAt: Date())
     }
 
     private static let statusDateFormatter: DateFormatter = {
@@ -1257,8 +1261,8 @@ struct SidebarView: View {
         return formatter
     }()
 
-    private var indexStatusColor: Color {
-        switch indexStatus {
+    private func indexStatusColor(_ status: FolderIndexStatus) -> Color {
+        switch status {
         case .upToDate:
             return .green
         case .stale:
@@ -1268,9 +1272,9 @@ struct SidebarView: View {
         }
     }
 
-    private var indexStatusLabel: String {
-        if isCheckingIndexStatus { return L("indexing.status.checking") }
-        switch indexStatus {
+    private func indexStatusLabel(_ snapshot: FolderIndexSnapshot) -> String {
+        if snapshot.isChecking { return L("indexing.status.checking") }
+        switch snapshot.status {
         case .unknown:
             return L("indexing.status.unknown")
         case .notIndexed:
@@ -1282,9 +1286,9 @@ struct SidebarView: View {
         }
     }
 
-    private var indexButtonTitle: String {
-        if case .notIndexed = indexStatus { return L("indexing.button") }
-        if case .unknown = indexStatus { return L("indexing.button") }
+    private func indexButtonTitle(_ status: FolderIndexStatus) -> String {
+        if case .notIndexed = status { return L("indexing.button") }
+        if case .unknown = status { return L("indexing.button") }
         return L("indexing.reindex")
     }
 
@@ -1356,6 +1360,40 @@ struct SidebarView: View {
                 .padding(6)
             } label: {
                 settingsCardLabel(L("maint.repairCard"), systemImage: "arrow.triangle.2.circlepath")
+            }
+
+            GroupBox {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(L("maint.indexCleanupNote"))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(spacing: 12) {
+                        Button(role: .destructive) {
+                            isCleaningIndexes = true
+                            maintenanceMessage = nil
+                            Task {
+                                let result = await metadataStore.purgeOrphanedIndexes(currentRoots: indexRootURLs)
+                                isCleaningIndexes = false
+                                folderIndexStatuses = folderIndexStatuses.filter { snapshot in
+                                    indexRootURLs.contains { $0.path == snapshot.key }
+                                }
+                                maintenanceMessage = "\(L("maint.indexCleanupDone")) \(result.indexRecordsRemoved) · \(L("maint.indexedFilesRemoved")) \(result.indexedFilesRemoved + result.legacyIndexedFilesRemoved)"
+                            }
+                        } label: {
+                            Label(L("maint.indexCleanup"), systemImage: "externaldrive.badge.xmark")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(isCleaningIndexes || indexingService.isIndexing)
+
+                        if isCleaningIndexes { ProgressView().controlSize(.small) }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+            } label: {
+                settingsCardLabel(L("maint.indexCleanupCard"), systemImage: "externaldrive.badge.xmark")
             }
 
             GroupBox {
@@ -2490,6 +2528,69 @@ private struct FlowLayout: Layout {
     }
 }
 
+private struct FolderIndexSnapshot {
+    var status: FolderIndexStatus = .unknown
+    var checkedAt: Date?
+    var isChecking = false
+}
+
+private struct SettingsWindowContainer: View {
+    @State private var section: SettingsSection = .folders
+    @AppStorage(AIProviderSettings.Keys.enabled) private var aiEnabled = true
+    let accent: Color
+    let dismiss: () -> Void
+    let detail: (SettingsSection) -> AnyView
+
+    var body: some View {
+        HStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(L("sidebar.configuration"))
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 16)
+                    .padding(.bottom, 10)
+
+                ForEach(SettingsSection.allCases) { item in
+                    let selected = section == item
+                    let unavailable = item == .contentIndexing && !aiEnabled
+                    Button { section = item } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: item.systemImage)
+                                .font(.body).frame(width: 20)
+                                .foregroundStyle(selected ? Color.white : accent)
+                            Text(item.title)
+                                .foregroundStyle(selected ? Color.white : Color.primary)
+                                .lineLimit(1).minimumScaleFactor(0.82)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(RoundedRectangle(cornerRadius: 7).fill(selected ? accent : Color.clear))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(unavailable)
+                    .opacity(unavailable ? 0.42 : 1)
+                }
+                Spacer()
+            }
+            .padding(8)
+            .frame(width: 210)
+            .background(Color(nsColor: .windowBackgroundColor))
+
+            Divider()
+            detail(section)
+        }
+        .frame(width: 760, height: 540)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .tint(accent)
+        .onChange(of: aiEnabled) { _, enabled in
+            if !enabled, section == .contentIndexing { section = .indexing }
+        }
+    }
+}
+
 private enum SettingsSection: String, CaseIterable, Identifiable {
     case folders
     case appearance
@@ -2498,6 +2599,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     case language
     case templates
     case indexing
+    case contentIndexing
     case maintenance
     case backup
     case help
@@ -2519,6 +2621,8 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             return L("settings.language.title")
         case .templates:
             return L("settings.templates.title")
+        case .contentIndexing:
+            return L("settings.contentIndexing.title")
         case .indexing:
             return L("settings.indexing.title")
         case .maintenance:
@@ -2546,8 +2650,10 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             return "globe"
         case .templates:
             return "rectangle.stack"
+        case .contentIndexing:
+            return "doc.text.magnifyingglass"
         case .indexing:
-            return "text.magnifyingglass"
+            return "sparkles"
         case .maintenance:
             return "wrench.and.screwdriver"
         case .backup:
@@ -2573,6 +2679,8 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             return L("settings.language.subtitle")
         case .templates:
             return L("settings.templates.subtitle")
+        case .contentIndexing:
+            return L("settings.contentIndexing.subtitle")
         case .indexing:
             return L("settings.indexing.subtitle")
         case .maintenance:

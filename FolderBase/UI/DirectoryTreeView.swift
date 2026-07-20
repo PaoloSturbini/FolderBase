@@ -22,7 +22,6 @@ struct DirectoryTreeView: View {
     @State private var expandedPaths: Set<String> = []
     @State private var childrenByPath: [String: [URL]] = [:]
     @State private var loadingPaths: Set<String> = []
-    @State private var chatFolder: ChatFolder?
     @State private var chatPreparationTask: Task<Void, Never>?
 
     fileprivate struct Row: Identifiable, Equatable {
@@ -32,11 +31,6 @@ struct DirectoryTreeView: View {
         let isLoaded: Bool
         let hasChildren: Bool
         var id: String { url.standardizedFileURL.path }
-    }
-
-    private struct ChatFolder: Identifiable {
-        let url: URL
-        var id: String { url.path }
     }
 
     private var rootPath: String { rootURL.standardizedFileURL.path }
@@ -76,11 +70,6 @@ struct DirectoryTreeView: View {
         .onAppear { expandPathToSelection() }
         .onChange(of: selectedFolderURL?.standardizedFileURL.path) { expandPathToSelection() }
         .onChange(of: directoryCache.invalidationGeneration) { reloadInvalidatedBranches() }
-        .sheet(item: $chatFolder) { request in
-            ChatView(chatService: chatService, store: metadataStore, focusedFile: nil) {
-                chatFolder = nil
-            }
-        }
     }
 
     private func openInNewWindow(_ url: URL) {
@@ -99,7 +88,7 @@ struct DirectoryTreeView: View {
             }.value
             guard !Task.isCancelled else { return }
             chatService.configure(candidates: candidates, scopeLabel: label)
-            chatFolder = ChatFolder(url: folder)
+            ChatWindowPresenter.show(chatService: chatService, store: metadataStore, focusedFile: nil)
         }
     }
 
@@ -229,6 +218,7 @@ private struct DirectoryTreeRow: View, Equatable {
     @ViewBuilder private var contextMenu: some View {
         Button(action: onSelect) { Label(L("ctx.open"), systemImage: "folder") }
         Button { onAction(.reveal) } label: { Label(L("ctx.revealFinder"), systemImage: "magnifyingglass") }
+        Button { showFileInformation(for: row.url) } label: { Label(L("ctx.information"), systemImage: "info.circle") }
         Button { onOpenWindow(row.url) } label: { Label(L("ctx.openNewWindow"), systemImage: "macwindow.badge.plus") }
         if aiEnabled {
             Divider()

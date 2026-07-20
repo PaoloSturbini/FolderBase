@@ -14,6 +14,7 @@ struct AIExclusionSuggestion: Identifiable, Equatable, Sendable {
 /// non vengono più restituiti alla UI o inviati al modello.
 enum AIExclusionPolicy {
     static let storageKey = "aiExcludedSourcePaths"
+    typealias ExclusionsByRoot = [String: [String]]
 
     private static let generatedDirectoryNames: Set<String> = [
         "node_modules", "deriveddata", "build", "dist", "vendor", "pods",
@@ -25,21 +26,69 @@ enum AIExclusionPolicy {
         decode(defaults.data(forKey: storageKey) ?? Data())
     }
 
+    /// Esclusioni appartenenti esclusivamente alla cartella principale indicata. Questo evita
+    /// che la configurazione di una radice (in particolare quando le radici si sovrappongono)
+    /// modifichi la scansione richiesta per un'altra.
+    static func excludedPaths(forRoot root: URL, defaults: UserDefaults = .standard) -> [String] {
+        let data = defaults.data(forKey: storageKey) ?? Data()
+        let rootPath = normalizedPath(root.path)
+        if let decoded = try? JSONDecoder().decode(ExclusionsByRoot.self, from: data) {
+            return normalizedMapping(decoded)[rootPath] ?? []
+        }
+        let prefix = rootPath + "/"
+        return decode(data).filter { $0 == rootPath || $0.hasPrefix(prefix) }
+    }
+
     static func save(_ paths: [String], defaults: UserDefaults = .standard) {
         defaults.set(encode(paths), forKey: storageKey)
     }
 
     static func decode(_ data: Data) -> [String] {
-        let decoded = (try? JSONDecoder().decode([String].self, from: data)) ?? []
-        return normalizedUnique(decoded)
+        if let legacy = try? JSONDecoder().decode([String].self, from: data) {
+            return normalizedUnique(legacy)
+        }
+        return normalizedUnique(Array(decodeByRoot(data).values.joined()))
     }
 
     static func encode(_ paths: [String]) -> Data {
         (try? JSONEncoder().encode(normalizedUnique(paths))) ?? Data()
     }
 
+    static func decodeByRoot(_ data: Data, knownRoots: [URL] = []) -> ExclusionsByRoot {
+        if let decoded = try? JSONDecoder().decode(ExclusionsByRoot.self, from: data) {
+            return normalizedMapping(decoded)
+        }
+        // Migrazione trasparente dal vecchio array globale: assegna ogni percorso alla radice
+        // gestita più specifica che lo contiene.
+        let legacy = (try? JSONDecoder().decode([String].self, from: data)) ?? []
+        let roots = knownRoots.map { normalizedPath($0.path) }.sorted { $0.count > $1.count }
+        var result: ExclusionsByRoot = [:]
+        for path in normalizedUnique(legacy) {
+            if let root = roots.first(where: { path == $0 || path.hasPrefix($0 + "/") }) {
+                result[root, default: []].append(path)
+            }
+        }
+        return normalizedMapping(result)
+    }
+
+    static func encode(_ mapping: ExclusionsByRoot) -> Data {
+        (try? JSONEncoder().encode(normalizedMapping(mapping))) ?? Data()
+    }
+
     static func normalizedPath(_ path: String) -> String {
         URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+
+    /// Mantiene soltanto le radici principali: se una cartella selezionata è già contenuta in
+    /// un'altra radice, non rappresenta un indice autonomo.
+    static func topLevelRoots(_ urls: [URL]) -> [URL] {
+        var seen = Set<String>()
+        let unique = urls.map(\.standardizedFileURL).filter { seen.insert($0.path).inserted }
+        return unique.filter { candidate in
+            !unique.contains { other in
+                other.path != candidate.path && candidate.path.hasPrefix(other.path + "/")
+            }
+        }
     }
 
     static func isExcluded(_ url: URL, excludedPaths: [String]? = nil) -> Bool {
@@ -112,5 +161,16 @@ enum AIExclusionPolicy {
             .map(normalizedPath)
             .filter { !$0.isEmpty && seen.insert($0).inserted }
             .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    private static func normalizedMapping(_ mapping: ExclusionsByRoot) -> ExclusionsByRoot {
+        var result: ExclusionsByRoot = [:]
+        for (rawRoot, paths) in mapping {
+            let root = normalizedPath(rawRoot)
+            let prefix = root + "/"
+            let contained = normalizedUnique(paths).filter { $0 == root || $0.hasPrefix(prefix) }
+            if !contained.isEmpty { result[root] = contained }
+        }
+        return result
     }
 }

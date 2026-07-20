@@ -15,6 +15,14 @@ private struct LegacyMetadataDocument: Codable {
     var metadataByPath: [String: FileMetadata]
 }
 
+struct OrphanIndexCleanupResult: Equatable, Sendable {
+    let indexRecordsRemoved: Int
+    let indexedFilesRemoved: Int
+    let legacyIndexedFilesRemoved: Int
+
+    var totalRemoved: Int { indexRecordsRemoved + indexedFilesRemoved + legacyIndexedFilesRemoved }
+}
+
 /// La connessione SQLite e tutte le cache collegate appartengono al main actor.
 /// Le operazioni filesystem/AI costose producono risultati in background e consegnano qui
 /// solo gli aggiornamenti da applicare, evitando accessi concorrenti alla stessa connessione.
@@ -1762,6 +1770,80 @@ final class MetadataStore: ObservableObject {
         return (state, indexed, total, checkedAt)
     }
 
+    /// Cartelle principali per cui esiste un indice utilizzabile. Ogni riga rappresenta un
+    /// indice logico separato, anche se i contenuti condividono lo stesso database SQLite.
+    func indexedFolderPaths() -> [String] {
+        var result: [String] = []
+        var statement: OpaquePointer?
+        let sql = "SELECT folder_path FROM folder_index_status WHERE state IN ('upToDate', 'stale') AND indexed_count > 0 ORDER BY folder_path COLLATE NOCASE"
+        guard (try? prepare(sql, statement: &statement)) != nil else { return [] }
+        defer { sqlite3_finalize(statement) }
+        while sqlite3_step(statement) == SQLITE_ROW { result.append(columnText(statement, 0)) }
+        return result
+    }
+
+    /// Conserva esclusivamente gli indici logici delle cartelle principali attualmente gestite.
+    /// Rimuove inoltre contenuti fuori da tali radici e l'eventuale copia fisica dell'indice
+    /// precedente rimasta nel database metadata dopo la migrazione al DB AI separato.
+    func purgeOrphanedIndexes(currentRoots: [URL]) async -> OrphanIndexCleanupResult {
+        let roots = AIExclusionPolicy.topLevelRoots(currentRoots).filter {
+            var isDirectory: ObjCBool = false
+            return FileManager.default.fileExists(atPath: $0.path, isDirectory: &isDirectory) && isDirectory.boolValue
+        }
+        let paths = roots.map(\.path)
+
+        let statusCount: Int
+        if paths.isEmpty {
+            statusCount = (try? intValue("SELECT COUNT(*) FROM folder_index_status")) ?? 0
+            try? execute("DELETE FROM folder_index_status")
+        } else {
+            let placeholders = Array(repeating: "?", count: paths.count).joined(separator: ",")
+            let bindings = paths.map(SQLiteBinding.text)
+            statusCount = (try? intValue(
+                "SELECT COUNT(*) FROM folder_index_status WHERE folder_path NOT IN (\(placeholders))",
+                bindings: bindings
+            )) ?? 0
+            try? execute(
+                "DELETE FROM folder_index_status WHERE folder_path NOT IN (\(placeholders))",
+                bindings: bindings
+            )
+        }
+
+        let indexedFilesRemoved = (try? await contentDatabaseActor?.purgeIndexContent(keepingRootPaths: paths)) ?? 0
+
+        // Il DB operativo può ancora contenere la copia pre-separazione. Non è più usata quando
+        // folderbase-index.sqlite esiste ed è quindi un indice precedente eliminabile per intero.
+        var legacyRemoved = 0
+        if FileManager.default.fileExists(atPath: indexDBURL.path) {
+            legacyRemoved = (try? intValue("SELECT COUNT(*) FROM file_content")) ?? 0
+            if legacyRemoved > 0 {
+                try? execute("DELETE FROM chunk_vectors")
+                try? execute("DELETE FROM content_chunks")
+                try? execute("DELETE FROM content_fts")
+                try? execute("DELETE FROM file_content")
+            }
+        }
+        return OrphanIndexCleanupResult(
+            indexRecordsRemoved: statusCount,
+            indexedFilesRemoved: indexedFilesRemoved,
+            legacyIndexedFilesRemoved: legacyRemoved
+        )
+    }
+
+    /// Identità indicizzate appartenenti a una cartella principale. Il confronto esplicito con
+    /// `root + /` evita che `/Lavoro` includa accidentalmente `/Lavoro vecchio`.
+    func indexedIdentities(under rootPath: String) -> Set<String> {
+        var result = Set<String>()
+        var statement: OpaquePointer?
+        let sql = "SELECT file_identity FROM file_content WHERE index_state = 'indexed' AND (path = ? OR substr(path, 1, ?) = ?)"
+        let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+        guard (try? prepare(sql, statement: &statement)) != nil else { return [] }
+        defer { sqlite3_finalize(statement) }
+        try? bind([.text(rootPath), .int(prefix.utf8.count), .text(prefix)], to: statement)
+        while sqlite3_step(statement) == SQLITE_ROW { result.insert(columnText(statement, 0)) }
+        return result
+    }
+
     /// Identità dei file che hanno almeno un embedding con provider che inizia per `providerPrefix`
     /// (es. "apple-nl-", "ollama-<model>", "openai-<model>"). Serve a legare lo stato al motore AI.
     func identitiesWithVectors(providerPrefix: String) async -> Set<String> {
@@ -2040,12 +2122,17 @@ final class MetadataStore: ObservableObject {
     /// caldo di navigazione.
     func storeExtractedText(for item: FileItem, text: String, ocrUsed: Bool, hash: String) async {
         if let contentDatabaseActor {
-            let url = item.url
-            let identity = item.identity
-            let registration = await Task.detached(priority: .utility) {
-                MetadataStore.fileRegistration(url: url, identity: identity)
-            }.value
-            try? await contentDatabaseActor.storeContent(identity: item.identity, name: item.name, path: item.url.path, text: text, ocrUsed: ocrUsed, hash: hash, state: "indexed", chunks: nil, registration: registration)
+            // Il DB AI separato non possiede (né necessita) la tabella metadata `files`: nome e
+            // percorso vivono già in file_content. La registrazione va passata soltanto nel raro
+            // fallback sul DB principale; altrimenti l'UPSERT su `files` fallisceva e annullava
+            // silenziosamente l'intera transazione di ogni file nuovo.
+            let registration = await contentRegistrationIfNeeded(for: item)
+            do {
+                try await contentDatabaseActor.storeContent(identity: item.identity, name: item.name, path: item.url.path, text: text, ocrUsed: ocrUsed, hash: hash, state: "indexed", chunks: nil, registration: registration)
+            } catch {
+                assertionFailure("Unable to store extracted content for \(item.url.path): \(error)")
+                return
+            }
             noteRegistered(identity: item.identity, path: item.url.path)
             return
         }
@@ -2092,12 +2179,13 @@ final class MetadataStore: ObservableObject {
         chunks: [(ordinal: Int, text: String, providerID: String, vector: [Float])]
     ) async {
         if let contentDatabaseActor {
-            let url = item.url
-            let identity = item.identity
-            let registration = await Task.detached(priority: .utility) {
-                MetadataStore.fileRegistration(url: url, identity: identity)
-            }.value
-            try? await contentDatabaseActor.storeContent(identity: item.identity, name: item.name, path: item.url.path, text: text, ocrUsed: ocrUsed, hash: hash, state: "indexed", chunks: chunks, registration: registration)
+            let registration = await contentRegistrationIfNeeded(for: item)
+            do {
+                try await contentDatabaseActor.storeContent(identity: item.identity, name: item.name, path: item.url.path, text: text, ocrUsed: ocrUsed, hash: hash, state: "indexed", chunks: chunks, registration: registration)
+            } catch {
+                assertionFailure("Unable to store indexed content for \(item.url.path): \(error)")
+                return
+            }
             noteRegistered(identity: item.identity, path: item.url.path)
             return
         }
@@ -2141,12 +2229,13 @@ final class MetadataStore: ObservableObject {
     /// così l'indicizzazione non lo riprova finché il file non cambia.
     func markContentUnsupported(for item: FileItem, hash: String) async {
         if let contentDatabaseActor {
-            let url = item.url
-            let identity = item.identity
-            let registration = await Task.detached(priority: .utility) {
-                MetadataStore.fileRegistration(url: url, identity: identity)
-            }.value
-            try? await contentDatabaseActor.storeContent(identity: item.identity, name: item.name, path: item.url.path, text: nil, ocrUsed: false, hash: hash, state: "unsupported", chunks: nil, registration: registration)
+            let registration = await contentRegistrationIfNeeded(for: item)
+            do {
+                try await contentDatabaseActor.storeContent(identity: item.identity, name: item.name, path: item.url.path, text: nil, ocrUsed: false, hash: hash, state: "unsupported", chunks: nil, registration: registration)
+            } catch {
+                assertionFailure("Unable to mark unsupported content for \(item.url.path): \(error)")
+                return
+            }
             noteRegistered(identity: item.identity, path: item.url.path)
             return
         }
@@ -2164,6 +2253,17 @@ final class MetadataStore: ObservableObject {
             bindings: [.text(item.identity), .text(hash), .real(Date().timeIntervalSince1970)]
         )
         try? execute("DELETE FROM content_fts WHERE file_identity = ?", bindings: [.text(item.identity)])
+    }
+
+    /// Il database AI separato ha uno schema autonomo e non contiene la tabella `files`.
+    /// Nel fallback legacy sul database metadata, invece, la registrazione resta necessaria.
+    private func contentRegistrationIfNeeded(for item: FileItem) async -> FileRegistration? {
+        guard indexDatabaseActor == nil else { return nil }
+        let url = item.url
+        let identity = item.identity
+        return await Task.detached(priority: .utility) {
+            MetadataStore.fileRegistration(url: url, identity: identity)
+        }.value
     }
 
     /// Ricerca full-text: ritorna le identità dei file il cui nome o contenuto corrisponde
@@ -2584,10 +2684,11 @@ private extension MetadataStore {
         return statement
     }
 
-    func intValue(_ sql: String) throws -> Int {
+    func intValue(_ sql: String, bindings: [SQLiteBinding] = []) throws -> Int {
         var statement: OpaquePointer?
         try prepare(sql, statement: &statement)
         defer { sqlite3_finalize(statement) }
+        try bind(bindings, to: statement)
 
         guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
         return Int(sqlite3_column_int(statement, 0))

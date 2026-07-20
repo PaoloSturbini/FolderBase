@@ -6,6 +6,7 @@ struct FileTableView: View {
     @Environment(\.openWindow) private var openWindow
     @Binding var items: [FileItem]
     let metadataStore: MetadataStore
+    let indexingService: IndexingService
     @ObservedObject private var loc = LocalizationManager.shared
 
     let selectedFolderURL: URL?
@@ -39,9 +40,6 @@ struct FileTableView: View {
     let chatService: ChatService
 
     @State private var isAddingField = false
-    /// Impostato per aprire la chat: l'ambito effettivo (candidati + etichetta) è già configurato
-    /// in `chatService` al momento dell'apertura (vedi `startChat`).
-    @State private var chatRequest: ChatRequest?
     @State private var newItemRequest: NewItemRequest?
     @State private var fieldPendingEdit: MetadataField?
     @State private var itemPendingRename: FileItem?
@@ -115,14 +113,6 @@ struct FileTableView: View {
         case table
         case board
         var id: String { rawValue }
-    }
-
-    /// Token per presentare la finestra di chat (l'ambito è già in `chatService`).
-    private struct ChatRequest: Identifiable {
-        let id = UUID()
-        /// File selezionato nel momento esatto in cui la chat viene aperta. Resta congelato
-        /// per tutta la vita della finestra, anche se la selezione della tabella cambia.
-        let focusedFile: FileItem?
     }
 
     /// Ambito della ricerca: per nome (storico) o per contenuto. La ricerca "Contenuto" è IBRIDA:
@@ -200,11 +190,6 @@ struct FileTableView: View {
         }
         .sheet(item: $quickLookItem) { item in
             QuickLookSheet(url: item.url) { quickLookItem = nil }
-        }
-        .sheet(item: $chatRequest) { request in
-            ChatView(chatService: chatService, store: metadataStore, focusedFile: request.focusedFile) {
-                chatRequest = nil
-            }
         }
         .onAppear {
             // Con AI disattivata la ricerca per contenuto non è disponibile: torna al solo nome.
@@ -388,7 +373,7 @@ struct FileTableView: View {
     /// Configura l'ambito della chat (candidati + etichetta) e la apre.
     private func startChat(candidates: Set<String>, scopeLabel: String, focusedFile: FileItem? = nil) {
         chatService.configure(candidates: candidates, scopeLabel: scopeLabel)
-        chatRequest = ChatRequest(focusedFile: focusedFile)
+        ChatWindowPresenter.show(chatService: chatService, store: metadataStore, focusedFile: focusedFile)
     }
 
     /// Prepara l'ambito ricorsivo fuori dal main actor. La task viene cancellata se parte una
@@ -1215,6 +1200,12 @@ struct FileTableView: View {
                 Label(L("ctx.revealFinder"), systemImage: "magnifyingglass")
             }
 
+            Button {
+                showFileInformation(for: single.url)
+            } label: {
+                Label(L("ctx.information"), systemImage: "info.circle")
+            }
+
             if single.isFolder {
                 Button {
                     let metadataRoot = configurationRootURL ?? selectedFolderURL ?? single.url
@@ -1238,9 +1229,12 @@ struct FileTableView: View {
                     }
                 } else {
                     Button {
-                        startChat(candidates: [single.identity],
-                                  scopeLabel: "\(L("chat.scope.file")): \(single.name)",
-                                  focusedFile: single)
+                        Task {
+                            _ = await indexingService.ensureIndexed(item: single, store: metadataStore)
+                            startChat(candidates: [single.identity],
+                                      scopeLabel: "\(L("chat.scope.file")): \(single.name)",
+                                      focusedFile: single)
+                        }
                     } label: {
                         Label(L("ctx.chatFile"), systemImage: "bubble.left.and.bubble.right")
                     }

@@ -15,6 +15,7 @@ struct ChatView: View {
     let dismiss: () -> Void
 
     @State private var input = ""
+    @State private var selectedScopeID = "all-indexes"
     /// Fornitore di chat corrente (persistito nelle stesse impostazioni della Configurazione:
     /// qui si cambia solo il FORNITORE, il modello specifico resta quello impostato là).
     @AppStorage(AIProviderSettings.Keys.chatProvider) private var chatProviderRaw = AIChatProvider.none.rawValue
@@ -61,6 +62,9 @@ struct ChatView: View {
             inputBar
         }
         .frame(width: 580, height: 640)
+        .onAppear {
+            if chatService.isWholeIndexScope { selectAllIndexes() }
+        }
     }
 
     private var header: some View {
@@ -112,62 +116,76 @@ struct ChatView: View {
         .padding(.vertical, 12)
     }
 
-    private enum ScopeChoice: String {
-        case all
-        case file
-    }
-
-    /// Se la chat è stata aperta con un file selezionato, permette di passare tra tutto
-    /// l'indice e quel solo file. Cambiare contesto azzera intenzionalmente la conversazione.
-    @ViewBuilder
     private var scopeMenu: some View {
-        if let focusedFile {
-            Menu {
-                Picker(L("chat.scope.pick"), selection: scopeChoiceBinding) {
-                    Text(L("chat.scope.all")).tag(ScopeChoice.all)
-                    Text("\(L("chat.scope.file")): \(focusedFile.name)").tag(ScopeChoice.file)
-                }
-                .pickerStyle(.inline)
-                .labelsHidden()
+        Menu {
+            Button {
+                selectAllIndexes()
             } label: {
-                HStack(spacing: 3) {
-                    Text("\(L("chat.scope.label")): \(chatService.scopeLabel)")
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Image(systemName: "chevron.down")
-                        .font(.caption2)
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                if selectedScopeID == "all-indexes" { Label(L("chat.scope.allIndexes"), systemImage: "checkmark") }
+                else { Text(L("chat.scope.allIndexes")) }
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize(horizontal: false, vertical: true)
-        } else if !chatService.scopeLabel.isEmpty {
-            Text("\(L("chat.scope.label")): \(chatService.scopeLabel)")
+
+            if !indexedRoots.isEmpty {
+                Divider()
+                Section(L("chat.scope.indexes")) {
+                    ForEach(indexedRoots, id: \.path) { root in
+                        Button {
+                            selectIndex(root)
+                        } label: {
+                            if selectedScopeID == root.path { Label(root.lastPathComponent, systemImage: "checkmark") }
+                            else { Text(root.lastPathComponent) }
+                        }
+                    }
+                }
+            }
+
+            if let focusedFile {
+                Divider()
+                Button {
+                    selectedScopeID = "file"
+                    chatService.configure(candidates: [focusedFile.identity], scopeLabel: "\(L("chat.scope.file")): \(focusedFile.name)")
+                } label: {
+                    if selectedScopeID == "file" { Label("\(L("chat.scope.file")): \(focusedFile.name)", systemImage: "checkmark") }
+                    else { Text("\(L("chat.scope.file")): \(focusedFile.name)") }
+                }
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Text("\(L("chat.scope.label")): \(chatService.scopeLabel)").lineLimit(1).truncationMode(.middle)
+                Image(systemName: "chevron.down").font(.caption2)
+            }
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
         }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
-    private var scopeChoiceBinding: Binding<ScopeChoice> {
-        Binding(
-            get: { chatService.isWholeIndexScope ? .all : .file },
-            set: { choice in
-                guard let focusedFile else { return }
-                switch choice {
-                case .all:
-                    chatService.configure(candidates: [], scopeLabel: L("chat.scope.all"))
-                case .file:
-                    chatService.configure(
-                        candidates: [focusedFile.identity],
-                        scopeLabel: "\(L("chat.scope.file")): \(focusedFile.name)"
-                    )
-                }
-            }
+    private var indexedRoots: [URL] {
+        store.indexedFolderPaths().map { URL(fileURLWithPath: $0) }
+    }
+
+    private func selectAllIndexes() {
+        selectedScopeID = "all-indexes"
+        let identities = indexedRoots.reduce(into: Set<String>()) { result, root in
+            result.formUnion(store.indexedIdentities(under: root.path))
+        }
+        chatService.configure(candidates: nonEmptyScope(identities), scopeLabel: L("chat.scope.allIndexes"))
+    }
+
+    private func selectIndex(_ root: URL) {
+        selectedScopeID = root.path
+        chatService.configure(
+            candidates: nonEmptyScope(store.indexedIdentities(under: root.path)),
+            scopeLabel: "\(L("chat.scope.index")): \(root.lastPathComponent)"
         )
+    }
+
+    /// In ChatService l'insieme vuoto significa storicamente “nessun filtro”. Un identificatore
+    /// impossibile mantiene invece davvero vuoto un indice che non contiene testi estraibili.
+    private func nonEmptyScope(_ identities: Set<String>) -> Set<String> {
+        identities.isEmpty ? ["__folderbase_empty_index_scope__"] : identities
     }
 
     /// Menu per cambiare al volo il FORNITORE di chat (Ollama / OpenAI). Apple è mostrato ma

@@ -61,13 +61,20 @@ enum TextExtractor {
     nonisolated static func isIndexableCandidate(_ url: URL) -> Bool {
         let ext = url.pathExtension.lowercased()
         if nonIndexableExtensions.contains(ext) { return false }
+        if ["eml", "emlx"].contains(ext) { return true }
         if textutilExtensions.contains(ext) { return true }
-        if ext == "pptx" || ext == "xlsx" { return true }
+        if ooxmlPresentationExtensions.contains(ext) || ooxmlSpreadsheetExtensions.contains(ext) { return true }
         if quickLookExtensions.contains(ext) { return true }
+
+        if ext.isEmpty {
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            return size > 0 && size <= unknownTypeMaxBytes && looksLikeTextFile(url)
+        }
 
         if let type = fileType(for: url) {
             if type.conforms(to: .pdf) || type.conforms(to: .image) { return true }
             if isPlainTextType(type) { return true }
+            if isQuickLookDocumentType(type) { return true }
             // Tipo noto ma non testuale (audio/video/archivio/eseguibile…): non indicizzabile.
             return false
         }
@@ -75,11 +82,19 @@ enum TextExtractor {
         // Tipo sconosciuto (es. .pem, dotfile di configurazione): plausibilmente testo, ma solo se
         // piccolo, per non leggere interi binari privi di tipo.
         let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-        return size > 0 && size <= unknownTypeMaxBytes
+        return size > 0 && size <= unknownTypeMaxBytes && looksLikeTextFile(url)
     }
 
     static func extractText(from url: URL) -> ExtractedText? {
+        guard !Task.isCancelled else { return nil }
         let ext = url.pathExtension.lowercased()
+
+        // Email RFC 822 / Apple Mail: sono file testuali MIME. Conservare anche gli header è
+        // utile alla ricerca (mittente, destinatari, oggetto, data) oltre al corpo del messaggio.
+        if ext == "eml" || ext == "emlx" {
+            guard let text = readPlainText(from: url) else { return nil }
+            return ExtractedText(text: capped(text), ocrUsed: false)
+        }
 
         // Documenti Office / rich text gestiti per estensione con strumenti nativi macOS
         // (nessuna dipendenza esterna). Tutto eseguibile su thread di background.
@@ -87,11 +102,11 @@ enum TextExtractor {
             guard let text = extractWithTextutil(url) else { return nil }
             return ExtractedText(text: capped(text), ocrUsed: false)
         }
-        if ext == "pptx" {
+        if Self.ooxmlPresentationExtensions.contains(ext) {
             guard let text = extractZipXML(url, patterns: ["ppt/slides/slide*.xml", "ppt/notesSlides/notesSlide*.xml"]) else { return nil }
             return ExtractedText(text: capped(text), ocrUsed: false)
         }
-        if ext == "xlsx" {
+        if Self.ooxmlSpreadsheetExtensions.contains(ext) {
             let text = extractZipXML(url, patterns: ["xl/sharedStrings.xml"])
                 ?? extractZipXML(url, patterns: ["xl/worksheets/sheet*.xml"])
             guard let text else { return nil }
@@ -122,6 +137,10 @@ enum TextExtractor {
             if let result = extractViaQuickLook(url) { return result }
         }
 
+        if let type, isQuickLookDocumentType(type), let result = extractViaQuickLook(url) {
+            return result
+        }
+
         // Tipo sconosciuto: ultimo tentativo come testo semplice (es. PEM, file senza tipo noto).
         // Per i tipi noti ma non gestiti si evita di proposito la lettura grezza (darebbe binario).
         if type == nil {
@@ -135,14 +154,42 @@ enum TextExtractor {
 
     /// Estensioni gestite da `textutil` (Word e altri formati rich text/documento).
     private static let textutilExtensions: Set<String> = [
-        "doc", "docx", "rtf", "rtfd", "odt", "html", "htm", "webarchive", "wordml"
+        "doc", "docx", "docm", "dot", "dotx", "dotm", "rtf", "rtfd", "odt",
+        "html", "htm", "webarchive", "wordml"
+    ]
+
+    private static let ooxmlPresentationExtensions: Set<String> = [
+        "pptx", "pptm", "ppsx", "ppsm", "potx", "potm"
+    ]
+
+    private static let ooxmlSpreadsheetExtensions: Set<String> = [
+        "xlsx", "xlsm", "xltx", "xltm"
     ]
 
     /// Estensioni gestite come best-effort tramite l'anteprima QuickLook: binari legacy Office
     /// e pacchetti iWork (non hanno un estrattore testuale nativo diretto).
     private static let quickLookExtensions: Set<String> = [
-        "xls", "ppt", "pps", "pages", "numbers", "key", "odp", "ods"
+        "xls", "ppt", "pps", "pages", "numbers", "key", "odp", "ods", "msg"
     ]
+
+    /// Controllo conservativo per file senza estensione o con tipo sconosciuto. Evita che plist
+    /// binarie, contenuti compilati/cifrati e altri blob piccoli entrino nel totale indicizzabile.
+    nonisolated private static func looksLikeTextFile(_ url: URL) -> Bool {
+        guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]), !data.isEmpty else { return false }
+        let sample = data.prefix(16_384)
+        if sample.starts(with: Data("bplist00".utf8)) { return false }
+        if sample.starts(with: [0x7f, 0x45, 0x4c, 0x46]) || sample.starts(with: [0xcf, 0xfa, 0xed, 0xfe]) { return false }
+        if let header = String(data: sample.prefix(256), encoding: .utf8),
+           header.contains("BEGIN ENCRYPTED PRIVATE KEY") || header.contains("BEGIN PGP MESSAGE")
+            || header.contains("age-encryption.org/") { return false }
+        if sample.contains(0) { return false }
+        let controls = sample.reduce(into: 0) { count, byte in
+            if byte < 0x20, byte != 0x09, byte != 0x0a, byte != 0x0d { count += 1 }
+        }
+        guard Double(controls) / Double(sample.count) < 0.02 else { return false }
+        return String(data: sample, encoding: .utf8) != nil
+            || String(data: sample, encoding: .isoLatin1) != nil
+    }
 
     // MARK: - Tipo file
 
@@ -160,9 +207,21 @@ enum TextExtractor {
         return type.conforms(to: .plainText) || type.conforms(to: .sourceCode) || type.conforms(to: .text)
     }
 
+    /// Documenti che macOS sa rappresentare tramite Quick Look ma per cui non abbiamo un
+    /// estrattore diretto. I contenuti multimediali, archivi, eseguibili e plist restano esclusi.
+    private static func isQuickLookDocumentType(_ type: UTType) -> Bool {
+        guard type.conforms(to: .content),
+              !type.conforms(to: .audiovisualContent),
+              !type.conforms(to: .archive),
+              !type.conforms(to: .executable),
+              !type.conforms(to: .propertyList) else { return false }
+        return true
+    }
+
     // MARK: - Testo semplice
 
     private static func readPlainText(from url: URL) -> String? {
+        guard !Task.isCancelled else { return nil }
         // Carica il file una sola volta: i fallback cambiano soltanto la decodifica del buffer.
         // Questo evita fino a tre letture dal filesystem per i testi non UTF-8.
         guard let data = try? Data(contentsOf: url) else { return nil }
@@ -201,6 +260,7 @@ enum TextExtractor {
         var ocrText = ""
         let pageLimit = min(document.pageCount, maxOCRPages)
         for pageIndex in 0..<pageLimit {
+            if Task.isCancelled { return nil }
             guard let page = document.page(at: pageIndex),
                   let cgImage = render(page: page) else { continue }
             if let text = ocr(cgImage: cgImage), !text.isEmpty {
@@ -245,6 +305,7 @@ enum TextExtractor {
     }
 
     private static func ocr(cgImage: CGImage) -> String? {
+        guard !Task.isCancelled else { return nil }
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
@@ -349,7 +410,12 @@ enum TextExtractor {
             semaphore.signal()
         }
 
-        if semaphore.wait(timeout: .now() + timeout) == .timedOut {
+        let deadline = Date().addingTimeInterval(timeout)
+        var completed = false
+        while !completed, !Task.isCancelled, Date() < deadline {
+            completed = semaphore.wait(timeout: .now() + 0.1) == .success
+        }
+        if !completed {
             kill(process.processIdentifier, SIGKILL)   // forza la terminazione
             try? handle.close()                         // sblocca readDataToEndOfFile
             process.waitUntilExit()

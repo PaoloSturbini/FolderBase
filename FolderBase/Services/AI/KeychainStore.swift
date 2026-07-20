@@ -37,14 +37,23 @@ enum KeychainStore {
 
         if value.isEmpty {
             setCache(nil, for: account)
+            if account == AIProviderSettings.openAIKeyAccount {
+                UserDefaults.standard.set(false, forKey: AIProviderSettings.Keys.hasOpenAIKey)
+            }
             return
         }
 
         var attributes = query
         attributes[kSecValueData as String] = data
+        // Disponibile dopo il primo sblocco del Mac e vincolata a questo dispositivo. Non viene
+        // sincronizzata su iCloud e non richiede un'autenticazione interattiva a ogni lettura.
+        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         SecItemAdd(attributes as CFDictionary, nil)
         // Aggiorna la cache col valore salvato: nessuna rilettura dal Portachiavi.
         setCache(value, for: account)
+        if account == AIProviderSettings.openAIKeyAccount {
+            UserDefaults.standard.set(true, forKey: AIProviderSettings.Keys.hasOpenAIKey)
+        }
     }
 
     static func load(account: String) -> String? {
@@ -65,6 +74,9 @@ enum KeychainStore {
             : nil
         // Memorizza l'esito (valore o assenza) così il Portachiavi non viene più interrogato.
         setCache(value, for: account)
+        if account == AIProviderSettings.openAIKeyAccount, value?.isEmpty == false {
+            UserDefaults.standard.set(true, forKey: AIProviderSettings.Keys.hasOpenAIKey)
+        }
         return value
     }
 
@@ -80,5 +92,8 @@ enum KeychainStore {
         ]
         SecItemDelete(query as CFDictionary)
         setCache(nil, for: account)
+        if account == AIProviderSettings.openAIKeyAccount {
+            UserDefaults.standard.set(false, forKey: AIProviderSettings.Keys.hasOpenAIKey)
+        }
     }
 }

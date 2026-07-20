@@ -118,6 +118,31 @@ actor SQLiteDatabaseActor {
         }
     }
 
+    /// Elimina dall'indice AI i contenuti che non appartengono più a nessuna radice principale.
+    /// Le sottocartelle sono comprese dal prefisso della radice e non costituiscono indici propri.
+    func purgeIndexContent(keepingRootPaths roots: [String]) throws -> Int {
+        let normalized = roots.map { URL(fileURLWithPath: $0).standardizedFileURL.path }
+        let membership = normalized.isEmpty
+            ? "0"
+            : normalized.map { _ in "(path = ? OR instr(path, ?) = 1)" }.joined(separator: " OR ")
+        let values = normalized.flatMap { [$0, $0 + "/"] }
+        let staleWhere = "NOT (\(membership))"
+        let count = Int(scalarText("SELECT COUNT(*) FROM file_content WHERE \(staleWhere)", values: values) ?? "0") ?? 0
+        guard count > 0 else { return 0 }
+
+        try transaction {
+            let identities = "SELECT file_identity FROM file_content WHERE \(staleWhere)"
+            try execute(
+                "DELETE FROM chunk_vectors WHERE chunk_id IN (SELECT id FROM content_chunks WHERE file_identity IN (\(identities)))",
+                texts: values
+            )
+            try execute("DELETE FROM content_chunks WHERE file_identity IN (\(identities))", texts: values)
+            try execute("DELETE FROM content_fts WHERE file_identity IN (\(identities))", texts: values)
+            try execute("DELETE FROM file_content WHERE \(staleWhere)", texts: values)
+        }
+        return count
+    }
+
     func applyTrackingUpdates(_ updates: [FileTrackingUpdate]) throws {
         guard !updates.isEmpty else { return }
         try transaction {

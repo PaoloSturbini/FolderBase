@@ -160,6 +160,24 @@ enum TextChunker {
         var chunks: [String] = []
         var current = ""
         for piece in pieces {
+            // Tabelle Excel, CSV e JSON minificati possono produrre una singola "frase" lunga
+            // decine di migliaia di caratteri. Va spezzata comunque, altrimenti OpenAI rifiuta
+            // l'intero batch per superamento del limite token e il file resta sempre stale.
+            if piece.count > targetChars {
+                if !current.isEmpty {
+                    chunks.append(current)
+                    if chunks.count >= maxChunks { return chunks }
+                    current = ""
+                }
+                var start = piece.startIndex
+                while start < piece.endIndex {
+                    let end = piece.index(start, offsetBy: targetChars, limitedBy: piece.endIndex) ?? piece.endIndex
+                    chunks.append(String(piece[start..<end]))
+                    if chunks.count >= maxChunks { return chunks }
+                    start = end
+                }
+                continue
+            }
             if current.isEmpty {
                 current = piece
             } else if current.count + piece.count + 2 <= targetChars {

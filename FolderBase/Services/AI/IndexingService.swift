@@ -53,8 +53,10 @@ final class IndexingService: ObservableObject {
     private let maxConcurrentFiles = 3
 
     private var task: Task<Void, Never>?
+    private var activeRunID: UUID?
 
     func cancel() {
+        activeRunID = nil
         task?.cancel()
         task = nil
         isIndexing = false
@@ -71,9 +73,11 @@ final class IndexingService: ObservableObject {
         isIndexing = true
         progress = Progress(processed: 0, total: files.count)
         let embedder = EmbeddingEngine.active()
+        let runID = UUID()
+        activeRunID = runID
         task = Task { [weak self] in
             await self?.runLoop(files: files, store: store, embedder: embedder)
-            self?.finish()
+            self?.finish(runID: runID)
         }
     }
 
@@ -84,14 +88,58 @@ final class IndexingService: ObservableObject {
         progress = Progress(processed: 0, total: 0)   // total 0 → "analisi in corso"
         let limit = maxRecursiveFiles
         let embedder = EmbeddingEngine.active()
+        let exclusions = AIExclusionPolicy.excludedPaths(forRoot: root)
+        let runID = UUID()
+        activeRunID = runID
         task = Task { [weak self] in
-            let files = await Task.detached(priority: .utility) {
-                Self.fileItems(under: root, limit: limit, contentOnly: true)
-            }.value
-            guard let self, !Task.isCancelled else { self?.finish(); return }
+            let scan = Task.detached(priority: .utility) {
+                Self.fileItems(under: root, limit: limit, contentOnly: true, excludedPaths: exclusions)
+            }
+            let files = await withTaskCancellationHandler {
+                await scan.value
+            } onCancel: {
+                scan.cancel()
+            }
+            guard let self, !Task.isCancelled else { self?.finish(runID: runID); return }
             await self.runLoop(files: files, store: store, embedder: embedder)
-            self.finish()
+            self.finish(runID: runID)
         }
+    }
+
+    /// Garantisce che un file scelto esplicitamente per la chat sia disponibile nell'indice.
+    /// È utile per file nuovi in una sottocartella dopo l'ultima indicizzazione della radice.
+    @discardableResult
+    func ensureIndexed(item: FileItem, store: MetadataStore) async -> Bool {
+        let currentHash = Self.changeHash(for: item.url)
+        let storedHash = await store.contentHash(for: item.identity)
+        if currentHash != nil, currentHash == storedHash,
+           await store.extractedText(for: item.identity) != nil {
+            return true
+        }
+
+        // Se è in corso l'indicizzazione della radice, non scartare silenziosamente la richiesta
+        // della chat. Attendi quel lavoro e verifica di nuovo il file; se non è stato incluso,
+        // indicizzalo subito come operazione singola.
+        if isIndexing {
+            await task?.value
+            let refreshedHash = Self.changeHash(for: item.url)
+            let refreshedStoredHash = await store.contentHash(for: item.identity)
+            let refreshedText = await store.extractedText(for: item.identity)
+            if refreshedHash != nil,
+               refreshedHash == refreshedStoredHash,
+               refreshedText != nil {
+                return true
+            }
+        }
+        guard !isIndexing, !item.isFolder, TextExtractor.isIndexableCandidate(item.url) else { return false }
+
+        isIndexing = true
+        progress = Progress(processed: 0, total: 1)
+        let runID = UUID()
+        activeRunID = runID
+        await runLoop(files: [item], store: store, embedder: EmbeddingEngine.active())
+        finish(runID: runID)
+        return await store.extractedText(for: item.identity) != nil
     }
 
     /// Carica lo stato MEMORIZZATO dell'ultima verifica (istantaneo, nessuna enumerazione).
@@ -131,8 +179,9 @@ final class IndexingService: ObservableObject {
     /// con quelli già indicizzati e aggiornati nel DB.
     func status(root: URL, store: MetadataStore) async -> FolderIndexStatus {
         let limit = maxRecursiveFiles
+        let exclusions = AIExclusionPolicy.excludedPaths(forRoot: root)
         let fingerprints = await Task.detached(priority: .utility) {
-            Self.fingerprints(under: root, limit: limit, contentOnly: true)
+            Self.fingerprints(under: root, limit: limit, contentOnly: true, excludedPaths: exclusions)
         }.value
         guard !fingerprints.isEmpty else { return .notIndexed }
 
@@ -141,31 +190,43 @@ final class IndexingService: ObservableObject {
         // stati processati, non c'è altro da fare → vanno contati come "coperti", altrimenti
         // tengono la cartella arancione per sempre pur essendo a posto.
         let unsupported = await store.unsupportedHashes()
-        // Un file è "aggiornato" se il testo è indicizzato (hash combacia) E ha embedding per il
-        // MOTORE ATTUALE: cambiando provider i vettori non sono compatibili → arancione finché non
-        // si reindicizza.
-        let vectorized = await store.identitiesWithVectors(providerPrefix: Self.activeProviderPrefix())
-        var textIndexed = 0
+        var eligibleTotal = 0
         var upToDate = 0
         for fingerprint in fingerprints {
             let identity = fingerprint.identity
-            if indexed[identity] == fingerprint.hash {
-                textIndexed += 1
-                if vectorized.contains(identity) { upToDate += 1 }
-            } else if unsupported[identity] == fingerprint.hash {
-                // Processato ma senza contenuto indicizzabile: coperto.
-                textIndexed += 1
-                upToDate += 1
+            if unsupported[identity] == fingerprint.hash {
+                // Elaborato ma privo di testo: non fa parte del totale indicizzabile.
+                continue
             }
+            eligibleTotal += 1
+            // Il testo correttamente estratto è già un indice completo per ricerca e chat FTS.
+            // Un embedding fallito viene segnalato separatamente, ma non deve lasciare per sempre
+            // la cartella arancione né provocare reindicizzazioni infinite dello stesso testo.
+            if indexed[identity] == fingerprint.hash { upToDate += 1 }
         }
 
-        if textIndexed == 0 { return .notIndexed }
-        let total = fingerprints.count
-        let changed = total - upToDate
-        // Verde se aggiornata (tolleranza ~5%, min 3 file); arancione se molti file nuovi/cambiati
-        // o con vettori di un altro motore.
-        let threshold = max(3, total / 20)
-        return changed <= threshold ? .upToDate(files: total) : .stale(indexed: upToDate, total: total)
+        if eligibleTotal == 0 { return .notIndexed }
+        let total = eligibleTotal
+        // Anche un solo file nuovo o cambiato rende lo stato non aggiornato: una tolleranza
+        // percentuale faceva apparire verdi archivi grandi pur lasciando fuori documenti recenti.
+        return upToDate == total ? .upToDate(files: total) : .stale(indexed: upToDate, total: total)
+    }
+
+    /// Diagnostica gli elementi che mantengono una cartella in stato "Da aggiornare".
+    /// Usata dalla verifica e mantenuta separata dalla UI per poter testare casi reali.
+    func missingIndexableFiles(root: URL, store: MetadataStore) async -> [URL] {
+        let exclusions = AIExclusionPolicy.excludedPaths(forRoot: root)
+        let limit = maxRecursiveFiles
+        let items = await Task.detached(priority: .utility) {
+            Self.fileItems(under: root, limit: limit, contentOnly: true, excludedPaths: exclusions)
+        }.value
+        let indexed = await store.indexedHashes()
+        let unsupported = await store.unsupportedHashes()
+        return items.compactMap { item in
+            guard let hash = Self.changeHash(for: item.url) else { return item.url }
+            if unsupported[item.identity] == hash { return nil }
+            return indexed[item.identity] == hash ? nil : item.url
+        }
     }
 
     /// Prefisso dei providerID compatibili con il motore attualmente selezionato.
@@ -179,7 +240,9 @@ final class IndexingService: ObservableObject {
 
     // MARK: - Loop di indicizzazione
 
-    private func finish() {
+    private func finish(runID: UUID) {
+        guard activeRunID == runID else { return }
+        activeRunID = nil
         isIndexing = false
         progress = nil
         task = nil
@@ -190,7 +253,7 @@ final class IndexingService: ObservableObject {
         // tentarne l'estrazione. L'enumerazione ricorsiva li ha già filtrati; questo copre anche
         // l'indicizzazione "flat" della cartella corrente, i cui item arrivano dalla tabella.
         let files = rawFiles.filter { TextExtractor.isIndexableCandidate($0.url) }
-        let total = files.count
+        var total = files.count
         progress = Progress(processed: 0, total: total)
         guard total > 0 else { return }
         embeddingFailures = 0
@@ -237,8 +300,14 @@ final class IndexingService: ObservableObject {
                 guard inFlight > 0, let prepared = await group.next() else { continue }
                 inFlight -= 1
                 if Task.isCancelled { group.cancelAll(); break }
-                await commit(prepared, store: store)
-                processed += 1
+                if await commit(prepared, store: store) {
+                    processed += 1
+                } else {
+                    // Dopo il tentativo sappiamo che il file non contiene testo indicizzabile:
+                    // rimuovilo anche dal denominatore, così il totale finale coincide con quello
+                    // mostrato dal ricalcolo dello stato e il progresso può arrivare al 100%.
+                    total = max(processed, total - 1)
+                }
                 progress = Progress(processed: processed, total: total)
             }
         }
@@ -246,7 +315,7 @@ final class IndexingService: ObservableObject {
         // Con dei fallimenti, interroga il motore UNA volta per capire di chi è la colpa:
         // se non risponde il problema è il motore (i file sono a posto), altrimenti sono
         // i singoli file. La UI usa questa diagnosi per un messaggio non ambiguo.
-        if embeddingFailures > 0 {
+        if !Task.isCancelled, embeddingFailures > 0 {
             switch await EmbeddingEngine.healthCheck() {
             case .ok:
                 embeddingFailureDiagnosis = .fileSpecific
@@ -284,11 +353,13 @@ final class IndexingService: ObservableObject {
         return .indexed(item: plan.item, hash: plan.hash, extracted: extracted, build: build)
     }
 
-    private func commit(_ prepared: PreparedFile, store: MetadataStore) async {
+    /// Ritorna true se il file contiene testo e fa quindi parte del totale indicizzabile finale.
+    private func commit(_ prepared: PreparedFile, store: MetadataStore) async -> Bool {
         switch prepared {
         case let .vectorsOnly(item, build):
             if !build.embedderFailed { await store.replaceChunks(for: item.identity, chunks: build.vectors) }
             else { recordEmbeddingFailure(fileName: item.name) }
+            return true
         case let .indexed(item, hash, extracted, build):
             if !build.embedderFailed {
                 await store.storeIndexedContent(for: item, text: extracted.text, ocrUsed: extracted.ocrUsed, hash: hash, chunks: build.vectors)
@@ -296,8 +367,10 @@ final class IndexingService: ObservableObject {
                 await store.storeExtractedText(for: item, text: extracted.text, ocrUsed: extracted.ocrUsed, hash: hash)
                 recordEmbeddingFailure(fileName: item.name)
             }
+            return true
         case let .unsupported(item, hash):
             await store.markContentUnsupported(for: item, hash: hash)
+            return false
         }
     }
 
@@ -370,6 +443,7 @@ final class IndexingService: ObservableObject {
 
         var urls: [URL] = []
         for case let url as URL in enumerator {
+            if Task.isCancelled { break }
             if AIExclusionPolicy.isExcluded(url, excludedPaths: excludedPaths) {
                 enumerator.skipDescendants()
                 continue
